@@ -6,6 +6,7 @@ uv run --isolated --extra dev pytest tests/train/opd/test_opd.py
 
 import asyncio
 import base64
+import dataclasses
 import io
 import math
 import random
@@ -32,8 +33,10 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.opd.config import (
+    DEFAULT_TEACHER,
     OPDConfig,
     OPDExpConfig,
+    TeacherConfig,
     TeacherEngineConfig,
     teacher_logprob_width,
     teacher_topk,
@@ -46,11 +49,12 @@ from skyrl.train.opd.teacher_client import (
     parse_scoring_response,
     scoring_request,
 )
-from skyrl.train.opd.teacher_launch import _teacher_start_port
+from skyrl.train.opd.teacher_launch import _teacher_start_port, teacher_start_ports
 from skyrl.train.opd.trainer import OPDTrainer
 from skyrl.train.opd.utils import (
     ROLLOUT_CORRECT_KEY,
     STUDENT_LOGPROB_FLOOR,
+    TEACHER_INDEX_KEY,
     TEACHER_LOGPROBS_KEY,
     apply_opd_to_advantages,
     pad_teacher_logprobs,
@@ -192,8 +196,8 @@ def test_apply_opd_to_advantages_pure_and_mixed():
     adv, metrics = apply_opd_to_advantages(zero_adv, student, teacher, mask, OPDConfig(kl_coef=2.0))
     # -coef * (student - teacher) * mask
     assert adv.tolist() == [[-1.0, 2.0, 0.0]]
-    assert metrics["opd/reverse_kl"] == pytest.approx((0.5 + -1.0) / 2)
-    assert metrics["opd/reverse_kl_abs_max"] == pytest.approx(1.0)
+    assert metrics["opd/teacher/default/reverse_kl"] == pytest.approx((0.5 + -1.0) / 2)
+    assert metrics["opd/teacher/default/reverse_kl_abs_max"] == pytest.approx(1.0)
     assert metrics["opd/kl_coef"] == 2.0
 
     rl_adv = torch.tensor([[0.7, 0.7, 0.7]])
@@ -221,8 +225,8 @@ def test_apply_opd_to_advantages_without_stabilization_is_unchanged():
 
     reverse_kl = torch.where(mask.bool(), student - teacher, torch.zeros_like(student))
     assert torch.equal(new, advantages - 0.7 * reverse_kl)
-    assert metrics["opd/divergence_clip_fraction"] == 0.0
-    assert metrics["opd/advantage_clip_fraction"] == 0.0
+    assert metrics["opd/teacher/default/divergence_clip_fraction"] == 0.0
+    assert metrics["opd/teacher/default/advantage_clip_fraction"] == 0.0
 
 
 @pytest.mark.parametrize(
@@ -264,7 +268,7 @@ def test_divergence_clip_drops_only_confident_disagreements():
 
     assert clipped[0, 0] == 0.0
     assert torch.equal(clipped[0, 1:], plain[0, 1:])
-    assert metrics["opd/divergence_clip_fraction"] == pytest.approx(0.25)
+    assert metrics["opd/teacher/default/divergence_clip_fraction"] == pytest.approx(0.25)
 
 
 @pytest.mark.parametrize(
@@ -284,7 +288,7 @@ def test_advantage_clip_bounds_the_log_ratio(bounds, expected):
     )
 
     assert new[0].tolist() == pytest.approx(expected)
-    assert metrics["opd/advantage_clip_fraction"] == pytest.approx(
+    assert metrics["opd/teacher/default/advantage_clip_fraction"] == pytest.approx(
         sum(a != e for a, e in zip([-3, -0.5, 0.5, 3], expected)) / 4
     )
 
@@ -304,7 +308,7 @@ def test_log_compression_keeps_kl_coef_outside():
     assert compressed[0].tolist() == pytest.approx(
         [-2.0 * np.log1p(3.0), 0.0, 2.0 * np.log1p(0.5), 2.0 * np.log1p(3.0)]
     )
-    assert metrics["opd/advantage_clip_fraction"] == 0.0
+    assert metrics["opd/teacher/default/advantage_clip_fraction"] == 0.0
 
 
 def test_stabilization_leaves_the_task_advantage_and_masked_tokens_alone():
@@ -317,7 +321,7 @@ def test_stabilization_leaves_the_task_advantage_and_masked_tokens_alone():
     )
 
     assert new.tolist() == [[4.5, 5.0]]  # the task advantage is not clipped; the masked token gets no term
-    assert metrics["opd/advantage_clip_fraction"] == 1.0  # over the one masked-in token
+    assert metrics["opd/teacher/default/advantage_clip_fraction"] == 1.0  # over the one masked-in token
 
 
 def test_log_ratio_percentiles_cover_masked_tokens_only():
@@ -328,13 +332,44 @@ def test_log_ratio_percentiles_cover_masked_tokens_only():
 
     _, metrics = apply_opd_to_advantages(torch.zeros(1, 100), student, student + log_ratio, mask, OPDConfig())
     low, high = np.quantile(log_ratio[0, 50:].numpy(), [0.01, 0.99])
-    assert metrics["opd/log_ratio_p01"] == pytest.approx(low)
-    assert metrics["opd/log_ratio_p99"] == pytest.approx(high)
+    assert metrics["opd/teacher/default/log_ratio_p01"] == pytest.approx(low)
+    assert metrics["opd/teacher/default/log_ratio_p99"] == pytest.approx(high)
 
     _, empty = apply_opd_to_advantages(
         torch.zeros(1, 100), student, student + log_ratio, torch.zeros(1, 100), OPDConfig()
     )
-    assert "opd/log_ratio_p01" not in empty and "opd/log_ratio_p99" not in empty
+    assert "opd/teacher/default/log_ratio_p01" not in empty and "opd/teacher/default/log_ratio_p99" not in empty
+
+
+def test_apply_opd_to_advantages_reports_each_teachers_rows():
+    # Rows 0-1 math, row 2 code, row 3 padding. Each row's log q - log p is constant over its trainable tokens.
+    student = torch.zeros(4, 2)
+    teacher = torch.tensor([[-1.0, -1.0], [-3.0, -3.0], [-0.5, 0.0], [-1.0, -1.0]])
+    mask = torch.tensor([[1, 1], [1, 0], [1, 1], [0, 0]])
+    correct = torch.tensor([True, False, True, True])
+    index = torch.tensor([0, 0, 1, -1])
+
+    advantages, metrics = apply_opd_to_advantages(
+        torch.zeros(4, 2), student, teacher, mask, OPDConfig(), index, ["math", "code"], correct
+    )
+
+    # Who a row's teacher is changes no advantage.
+    single, _ = apply_opd_to_advantages(torch.zeros(4, 2), student, teacher, mask, OPDConfig())
+    assert torch.equal(advantages, single)
+    assert metrics["opd/teacher/math/reverse_kl"] == pytest.approx((1 + 1 + 3) / 3)
+    assert metrics["opd/teacher/code/reverse_kl"] == pytest.approx(0.25)
+    # Correct row 0 averages -1 and incorrect row 1 -3; code has no incorrect row.
+    assert metrics["opd/teacher/math/informativeness"] == pytest.approx(2.0)
+    assert "opd/teacher/code/informativeness" not in metrics
+    # 5 trainable tokens over 3 real rows; the padding row belongs to no teacher.
+    assert metrics["opd/teacher/math/token_share"] == pytest.approx(3 / 5)
+    assert metrics["opd/teacher/code/prompt_share"] == pytest.approx(1 / 3)
+    assert not any(key.startswith("opd/teacher/default/") for key in metrics)
+
+    with pytest.raises(ValueError, match="teacher_index"):
+        apply_opd_to_advantages(
+            torch.zeros(4, 2), student, teacher, mask, OPDConfig(), torch.zeros(3, dtype=torch.long)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +640,7 @@ def test_opd_config_defaults_and_overrides():
     )
     assert cfg.trainer.algorithm.use_kl_loss is False
     assert cfg.trainer.algorithm.policy_loss_type == "importance_sampling"
-    assert cfg.trainer.teacher.backend == "skyrl"  # the job launches the teacher by default
+    assert cfg.trainer.teachers[DEFAULT_TEACHER].backend == "skyrl"  # the job launches the teacher by default
     assert cfg.trainer.algorithm.opd.kl_coef == 0.5
     assert cfg.trainer.algorithm.opd.use_task_reward is True
     validate_opd_cfg(cfg)  # no error
@@ -615,16 +650,16 @@ def test_teacher_engine_block_keeps_its_defaults_under_overrides():
     # from_cli_overrides rebuilds a nested block from its field type whenever any key inside it is
     # overridden, so the teacher's changed defaults have to live on TeacherEngineConfig itself.
     cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m", "trainer.teacher.inference_engine.num_engines=2"])
-    ie_cfg = cfg.trainer.teacher.inference_engine
+    ie_cfg = cfg.trainer.teachers[DEFAULT_TEACHER].inference_engine
     assert isinstance(ie_cfg, TeacherEngineConfig)
     assert ie_cfg.num_engines == 2
     assert ie_cfg.enable_prefix_caching is False
     assert ie_cfg.gpu_memory_utilization == 0.9
     assert ie_cfg.enable_ray_prometheus_stats is False
     assert ie_cfg != TeacherEngineConfig()
-    assert OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"]).trainer.teacher.inference_engine == (
-        TeacherEngineConfig()
-    )
+    assert OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"]).trainer.teachers[
+        DEFAULT_TEACHER
+    ].inference_engine == (TeacherEngineConfig())
     validate_opd_cfg(cfg)
 
 
@@ -648,7 +683,7 @@ def test_validate_opd_cfg_accepts_each_backend_with_its_own_fields():
 @pytest.mark.parametrize(
     "overrides, message",
     [
-        ([], "trainer.teacher.model must be set"),
+        (["trainer.teacher.backend=skyrl"], "trainer.teacher.model must be set"),
         (["trainer.teacher.model=m", "trainer.teacher.backend=bogus"], "backend must be one of"),
         (["trainer.teacher.model=m", "trainer.teacher.backend=fireworks"], "backend must be one of"),  # removed
         (["trainer.teacher.model=m", "trainer.teacher.backend=vllm"], "requires trainer.teacher.server_url"),
@@ -888,6 +923,108 @@ def test_validate_opd_cfg_accepts_gae_in_mixed_mode_and_old_anchored_cispo():
 
 
 # ---------------------------------------------------------------------------
+# Config: several teachers (MOPD)
+# ---------------------------------------------------------------------------
+
+
+def test_teacher_map_builds_each_entry_with_its_defaults():
+    cfg = OPDExpConfig.from_cli_overrides(
+        [
+            "trainer.teachers.math.model=Qwen/Qwen3-8B",
+            "trainer.teachers.math.inference_engine.num_engines=2",
+            "trainer.teachers.code.model=m",
+            "trainer.teachers.code.backend=vllm",
+            "trainer.teachers.code.server_url=http://a:8000",
+        ]
+    )
+    teachers = cfg.trainer.teachers
+    assert list(teachers) == ["math", "code"]
+    assert all(isinstance(teacher, TeacherConfig) for teacher in teachers.values())
+    # Each engine block keeps the teacher defaults, not the student's.
+    assert teachers["math"].inference_engine == TeacherEngineConfig(num_engines=2)
+    assert teachers["code"].inference_engine == TeacherEngineConfig()
+    assert cfg.trainer.algorithm.opd.route_key == "skyrl_mopd_domain"
+    validate_opd_cfg(cfg)
+
+    with pytest.raises(ValueError, match=r"trainer.teachers.math: Invalid fields \{'modle'\}"):
+        OPDExpConfig.from_cli_overrides(["trainer.teachers.math.modle=m"])
+    with pytest.raises(ValueError, match="trainer.teachers.math must be a teacher block"):
+        OPDExpConfig.from_cli_overrides(["trainer.teachers.math=m"])
+
+
+def _two_teachers(*overrides: str) -> List[str]:
+    return ["trainer.teachers.math.model=m", "trainer.teachers.code.model=m", *overrides]
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        # Each teacher's backend rules, with its name in the message.
+        (_two_teachers("trainer.teachers.code.backend=vllm"), "trainer.teachers.code.server_url"),
+        (
+            _two_teachers("trainer.teachers.code.inference_engine.enable_pd=true"),
+            "trainer.teachers.code.inference_engine.enable_pd does not apply",
+        ),
+    ],
+)
+def test_validate_opd_cfg_rejects_teacher_maps(overrides, message):
+    cfg = OPDExpConfig.from_cli_overrides(overrides)
+    with pytest.raises(ValueError, match=message):
+        validate_opd_cfg(cfg)
+
+
+def test_validate_opd_cfg_rejects_a_bad_teacher_name_and_an_empty_route_key():
+    cfg = OPDExpConfig.from_cli_overrides(_two_teachers())
+    cfg.trainer.teachers["math/v2"] = TeacherConfig(model="m")
+    with pytest.raises(ValueError, match=r"teacher name 'math/v2' must match"):
+        validate_opd_cfg(cfg)
+
+    cfg = OPDExpConfig.from_cli_overrides(_two_teachers())
+    cfg.trainer.algorithm.opd.route_key = ""
+    with pytest.raises(ValueError, match="route_key must be set"):
+        validate_opd_cfg(cfg)
+
+
+def test_validate_opd_cfg_builds_teachers_set_after_parsing():
+    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"])
+    cfg.trainer.teachers = {"math": {"model": "m"}, "code": {"model": "m", "max_retries": 1}}
+    validate_opd_cfg(cfg)
+    assert cfg.trainer.teachers["code"] == TeacherConfig(model="m", max_retries=1)
+
+    # A trainer.teacher set after the config was built never reaches trainer.teachers, so it is refused, not ignored.
+    cfg.trainer.teacher = TeacherConfig(model="m")
+    with pytest.raises(ValueError, match="set after the config was built"):
+        validate_opd_cfg(cfg)
+
+
+def test_a_default_is_normalized_into_the_teacher_map():
+    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m", "trainer.teacher.max_retries=1"])
+    assert cfg.trainer.teacher is None
+    assert cfg.trainer.teachers == {DEFAULT_TEACHER: TeacherConfig(model="m", max_retries=1)}
+    # Building again from the normalized fields leaves them as they are.
+    assert dataclasses.replace(cfg.trainer) == cfg.trainer
+    # default alone in the map is the same config.
+    assert OPDExpConfig.from_cli_overrides(["trainer.teachers.default.model=m"]).trainer.teachers == {
+        DEFAULT_TEACHER: TeacherConfig(model="m")
+    }
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ([], "set trainer.teacher for one teacher, or trainer.teachers for several"),
+        (["trainer.teacher.model=m", "trainer.teachers.math.model=m"], "are alternatives; set one"),
+        # Any trainer.teacher setting counts, not only its model.
+        (["trainer.teacher.max_retries=1", "trainer.teachers.math.model=m"], "are alternatives; set one"),
+        (_two_teachers("trainer.teachers.default.model=m"), "reserved for trainer.teacher"),
+    ],
+)
+def test_opd_config_needs_exactly_one_of_teacher_and_teachers(overrides, message):
+    with pytest.raises(ValueError, match=message):
+        OPDExpConfig.from_cli_overrides(overrides)
+
+
+# ---------------------------------------------------------------------------
 # Launching the teacher (backend="skyrl")
 # ---------------------------------------------------------------------------
 
@@ -947,8 +1084,9 @@ def test_launched_teacher_raises_max_logprobs_to_the_scoring_width(monkeypatch, 
     setup = types.ModuleType("setup")
     utils = types.ModuleType("utils")
 
-    def fake_impl(ie_cfg, *, make_cli_args, **kwargs):
+    def fake_impl(ie_cfg, *, make_cli_args, start_port, **kwargs):
         built["args"] = make_cli_args()
+        built["start_port"] = start_port
         return "client", "server-setup"
 
     setup.build_new_inference_client_impl = fake_impl
@@ -956,8 +1094,27 @@ def test_launched_teacher_raises_max_logprobs_to_the_scoring_width(monkeypatch, 
     monkeypatch.setitem(sys.modules, "skyrl.backends.skyrl_train.inference_servers.setup", setup)
     monkeypatch.setitem(sys.modules, "skyrl.backends.skyrl_train.inference_servers.utils", utils)
 
-    assert launch_teacher(cfg) == ("client", "server-setup")
+    assert launch_teacher(cfg, cfg.trainer.teachers[DEFAULT_TEACHER], 8300) == ("client", "server-setup")
     assert built["args"].max_logprobs == expected
+    assert built["start_port"] == 8300
+
+
+def test_teacher_start_ports_give_each_launched_teacher_its_own_windows():
+    cfg = OPDExpConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.num_engines=2",  # the student takes 8000-8199
+            "trainer.teachers.math.model=m",
+            "trainer.teachers.math.inference_engine.num_engines=2",
+            "trainer.teachers.math.inference_engine.data_parallel_size=2",
+            "trainer.teachers.served.model=m",
+            "trainer.teachers.served.backend=vllm",
+            "trainer.teachers.served.server_url=http://a:8000",
+            "trainer.teachers.code.model=m",
+        ]
+    )
+    # math takes 2 * 2 windows of 100 ports; the served teacher takes none; code starts past math's.
+    assert teacher_start_ports(cfg) == {"math": 8200, "code": 8600}
+    assert teacher_start_ports(OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"])) == {DEFAULT_TEACHER: 8100}
 
 
 class FakeRemoteInferenceClient:
@@ -997,72 +1154,102 @@ async def test_skyrl_teacher_client_scores_through_score_tokens():
     assert client.session_closed
 
 
-def test_opd_exp_launches_the_teacher_for_the_skyrl_backend(monkeypatch):
+def test_opd_exp_launches_each_skyrl_teacher_at_its_own_port(monkeypatch):
     import skyrl.train.entrypoints.main_opd as main_opd
 
-    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=Qwen/Qwen3-32B", "trainer.teacher.max_concurrency=8"])
-    fake_client = FakeRemoteInferenceClient()
+    cfg = OPDExpConfig.from_cli_overrides(
+        [
+            "trainer.teachers.math.model=Qwen/Qwen3-32B",
+            "trainer.teachers.math.max_concurrency=8",
+            "trainer.teachers.served.model=m",
+            "trainer.teachers.served.backend=vllm",
+            "trainer.teachers.served.server_url=http://a:8000",
+            "trainer.teachers.code.model=Qwen/Qwen3-8B",
+        ]
+    )
     launched = []
 
-    def fake_launch(launch_cfg):
-        launched.append(launch_cfg)
-        return fake_client, "server-setup"
+    def fake_launch(launch_cfg, teacher, start_port):
+        assert launch_cfg is cfg
+        launched.append((teacher.model, start_port))
+        return FakeRemoteInferenceClient(), f"server-setup-{teacher.model}"
 
     monkeypatch.setattr(main_opd, "launch_teacher", fake_launch)
     exp = main_opd.OPDExp.__new__(main_opd.OPDExp)  # skip BasePPOExp.__init__ (tokenizer, datasets)
     exp.cfg = cfg
 
-    teacher = exp.get_teacher_client()
-    assert isinstance(teacher, SkyRLTeacherClient)
-    assert teacher.client is fake_client
-    assert launched == [cfg]
-    assert teacher.server_setup == "server-setup"  # the client holds the deployment, keeping its actors alive
+    teachers = exp.get_teacher_clients()
+    assert list(teachers) == ["math", "served", "code"]  # config order
+    assert launched == [("Qwen/Qwen3-32B", 8100), ("Qwen/Qwen3-8B", 8200)]
+    assert isinstance(teachers["math"], SkyRLTeacherClient) and isinstance(teachers["code"], SkyRLTeacherClient)
+    assert isinstance(teachers["served"], VLLMTeacherClient)
+    assert teachers["math"]._max_concurrency == 8
+    # Each client holds its deployment, keeping its actors alive.
+    assert teachers["code"].server_setup == "server-setup-Qwen/Qwen3-8B"
 
 
-@pytest.mark.parametrize("fails", [False, True])
-def test_opd_exp_preflights_the_teacher_before_any_model_loads(monkeypatch, fails):
+@pytest.mark.parametrize("fails", [(), ("math",), ("math", "code")])
+def test_opd_exp_preflights_every_teacher_at_once_before_any_model_loads(monkeypatch, fails):
     import skyrl.train.entrypoints.main_opd as main_opd
 
     events: List[Any] = []
+    both_started = asyncio.Event()
 
     class ProbedTeacher(FakeTeacher):
+        def __init__(self, name):
+            super().__init__()
+            self.name = name
+
         async def preflight(self, width, topk):
-            events.append(("preflight", width, topk))
-            if fails:
+            events.append(("preflight", self.name, width, topk))
+            if len(events) == 2:
+                both_started.set()
+            # Returns only once both preflights are in flight: a sequential preflight would time out here.
+            await asyncio.wait_for(both_started.wait(), timeout=5)
+            if self.name in fails:
                 raise RuntimeError("teacher preflight failed: no V2 runner")
 
         async def aclose(self):
-            events.append("aclose")
+            events.append(("aclose", self.name))
 
-    monkeypatch.setattr(main_opd.OPDExp, "get_teacher_client", lambda self: ProbedTeacher())
+    monkeypatch.setattr(
+        main_opd.OPDExp,
+        "get_teacher_clients",
+        lambda self: {name: ProbedTeacher(name) for name in ("math", "code")},
+    )
     monkeypatch.setattr(main_opd.BasePPOExp, "_setup_trainer", lambda self: events.append("setup") or "trainer")
     exp = main_opd.OPDExp.__new__(main_opd.OPDExp)
     exp.cfg = OPDExpConfig.from_cli_overrides(
         [
-            "trainer.teacher.model=m",
+            "trainer.teachers.math.model=m",
+            "trainer.teachers.code.model=m",
             "trainer.algorithm.opd.topk_metrics.num_rows=16",
             "trainer.algorithm.opd.topk_metrics.top_k=8",
         ]
     )
 
+    probed = [("preflight", "math", 1, 8), ("preflight", "code", 1, 8)]
+    closed = [("aclose", "math"), ("aclose", "code")]
     if fails:
-        with pytest.raises(RuntimeError, match="preflight failed"):
+        message = "; ".join(f"trainer.teachers.{name}: teacher preflight failed: no V2 runner" for name in fails)
+        with pytest.raises(RuntimeError, match=message):
             exp._setup_trainer()
-        assert events == [("preflight", 1, 8), "aclose"]
+        # A failure stops no other teacher's preflight, and every client is closed after them all.
+        assert events == probed + closed
     else:
         assert exp._setup_trainer() == "trainer"
-        assert events == [("preflight", 1, 8), "aclose", "setup"]
+        assert events == probed + closed + ["setup"]
 
 
 def test_opd_exp_keeps_url_backends_unlaunched(monkeypatch):
     import skyrl.train.entrypoints.main_opd as main_opd
 
-    monkeypatch.setattr(main_opd, "launch_teacher", lambda cfg: pytest.fail("must not launch"))
+    monkeypatch.setattr(main_opd, "launch_teacher", lambda *args: pytest.fail("must not launch"))
     exp = main_opd.OPDExp.__new__(main_opd.OPDExp)
     exp.cfg = OPDExpConfig.from_cli_overrides(
         ["trainer.teacher.model=m", "trainer.teacher.backend=vllm", "trainer.teacher.server_url=http://a:8000"]
     )
-    assert isinstance(exp.get_teacher_client(), VLLMTeacherClient)
+    assert isinstance(exp.get_teacher_clients()[DEFAULT_TEACHER], VLLMTeacherClient)
 
 
 # ---------------------------------------------------------------------------
@@ -1160,8 +1347,11 @@ def _trainer(
     generator: Optional[GeneratorInterface] = None,
     teacher: Optional[TeacherLogprobClient] = None,
     topk_rows: int = 0,
+    teachers: Optional[Dict[str, TeacherLogprobClient]] = None,
+    route_key: str = "skyrl_mopd_domain",
 ) -> OPDTrainer:
-    cfg = OPDExpConfig()
+    """One single teacher, ``teacher``, as ``trainer.teacher``; or several, ``teachers``, routed by labels."""
+    cfg = OPDExpConfig.from_cli_overrides(["trainer.teacher.model=m"])
     cfg.trainer.train_batch_size = 1  # prompts per batch; the two rows below share one uid
     cfg.trainer.eval_batch_size = 1
     cfg.trainer.policy_mini_batch_size = 1
@@ -1173,6 +1363,7 @@ def _trainer(
     # Set directly, without validate_opd_cfg, so the fake generator's 2-wide capture can stand in for top_k >= 8.
     cfg.trainer.algorithm.opd.topk_metrics.num_rows = topk_rows
     cfg.trainer.algorithm.opd.topk_metrics.top_k = 2
+    cfg.trainer.algorithm.opd.route_key = route_key
     trainer = OPDTrainer(
         cfg=cfg,
         tracker=None,
@@ -1181,7 +1372,7 @@ def _trainer(
         eval_dataset=None,
         inference_engine_client=None,
         generator=generator or FakeGenerator(),
-        teacher_client=teacher or FakeTeacher(),
+        teacher_clients=teachers or {DEFAULT_TEACHER: teacher or FakeTeacher()},
     )
     trainer.dispatch = MagicMock()
     trainer.dispatch.get_lcm_dp_size.return_value = 1
@@ -1234,7 +1425,9 @@ async def test_trainer_generate_scores_each_row_as_it_finishes(generator_cls, to
     assert "rollout_metrics" not in out
     assert trainer.all_metrics["generate/custom_avg"] == 1.0  # per-row metrics re-aggregated
     assert trainer.all_metrics["opd/teacher_time_exposed"] >= 0.0
-    assert trainer.all_metrics["opd/teacher_time_per_row_mean"] >= 0.0
+    assert trainer.all_metrics["opd/teacher/default/time_per_row_mean"] >= 0.0
+    assert out[TEACHER_INDEX_KEY] == [0, 0, 0, 0]
+    assert trainer.all_metrics["opd/teacher/default/rows"] == 4  # a single trainer.teacher logs as `default`
 
 
 def _topk_requests(teacher: FakeTeacher) -> Dict[tuple, Optional[int]]:
@@ -1282,13 +1475,13 @@ async def test_trainer_logs_the_topk_metrics(tokenizer):
     # nothing, so 2 positions count. RankedTeacher's top 2 is 51 (log q -0.1) and 50 (-0.2) at every position, so
     # t=0 shares both tokens with the teacher and t=1 none.
     e = math.exp
-    assert metrics["opd/overlap_positions"] == 2
-    assert metrics["opd/overlap_ratio"] == pytest.approx(0.5)
+    assert metrics["opd/teacher/default/overlap_positions"] == 2
+    assert metrics["opd/teacher/default/overlap_ratio"] == pytest.approx(0.5)
     # Eq. 7 at t=0, over {50, 51}: both sides renormalized there, averaged over the 2 shared tokens.
     p_bar = [e(-0.5) / (e(-0.5) + e(-1.0)), e(-1.0) / (e(-0.5) + e(-1.0))]
     q_bar = [e(-0.2) / (e(-0.2) + e(-0.1)), e(-0.1) / (e(-0.2) + e(-0.1))]
     advantage = sum(p * (math.log(q) - math.log(p)) for p, q in zip(p_bar, q_bar)) / 2
-    assert metrics["opd/overlap_token_advantage"] == pytest.approx(advantage)
+    assert metrics["opd/teacher/default/overlap_token_advantage"] == pytest.approx(advantage)
 
 
 @pytest.mark.asyncio
@@ -1315,7 +1508,9 @@ async def test_trainer_asks_the_selected_rows_across_the_batch(num_rows, asked_r
 
     asked = {sequence for sequence, topk in _topk_requests(teacher).items() if topk}
     assert asked == asked_rows
-    assert trainer.all_metrics["opd/overlap_positions"] == 2 * len(asked_rows)  # 2 measured positions per row
+    assert trainer.all_metrics["opd/teacher/default/overlap_positions"] == 2 * len(
+        asked_rows
+    )  # 2 measured positions per row
 
 
 @pytest.mark.asyncio
@@ -1382,15 +1577,15 @@ async def test_trainer_without_topk_metrics_leaves_a_generators_support_alone(to
     assert {_width(request) for request in teacher.calls} == {1}
     assert set(_topk_requests(teacher).values()) == {None}
     np.testing.assert_array_equal(dense(out[SAMPLE_SUPPORT_FIELD][0]), [[50, 51], [52, -1], [-1, -1]])
-    assert not any(key.startswith("opd/overlap") for key in trainer.all_metrics)
+    assert not any("overlap" in key for key in trainer.all_metrics)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["returns", "raises"])
 async def test_trainer_train_closes_teacher_client(outcome, tokenizer):
-    """The teacher's sessions are closed when the training loop ends, and when it fails."""
-    teacher = FakeTeacher()
-    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, teacher=teacher)
+    """Every teacher's sessions are closed when the training loop ends, and when it fails."""
+    teachers = {"math": FakeTeacher(), "code": FakeTeacher()}
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, teachers=teachers)
     base_train = AsyncMock(side_effect=RuntimeError("boom") if outcome == "raises" else None)
 
     with patch.object(RayPPOTrainer, "train", base_train):
@@ -1401,7 +1596,7 @@ async def test_trainer_train_closes_teacher_client(outcome, tokenizer):
             await trainer.train()
 
     base_train.assert_awaited_once()
-    assert teacher.closed
+    assert teachers["math"].closed and teachers["code"].closed
 
 
 @pytest.mark.asyncio
@@ -1426,6 +1621,7 @@ def _generator_output() -> Dict[str, Any]:
         "stop_reasons": ["stop", "stop"],
         "rollout_metrics": None,
         TEACHER_LOGPROBS_KEY: [[-0.3, -0.4, -0.5], [-0.6, -0.7]],
+        TEACHER_INDEX_KEY: [0, 0],
     }
 
 
@@ -1458,7 +1654,7 @@ def test_trainer_end_to_end_advantages_pure(tokenizer):
     expected = -2.0 * (student - batch_teacher(batch)) * batch["loss_mask"]
     assert torch.allclose(batch["advantages"], expected)
     assert TEACHER_LOGPROBS_KEY not in batch  # popped, never shipped to workers
-    assert "opd/reverse_kl" in trainer.all_metrics
+    assert "opd/teacher/default/reverse_kl" in trainer.all_metrics
 
 
 def test_trainer_logs_the_rollout_metrics_from_the_real_rewards(tokenizer):
@@ -1476,7 +1672,7 @@ def test_trainer_logs_the_rollout_metrics_from_the_real_rewards(tokenizer):
     assert trainer.all_metrics["opd/repetition_rate"] == 0.0  # both rollouts are too short to check
     # Pure mode zeroed the rewards, but row 0 (reward 1.0) still counts as correct: log q - log p averages
     # 0.6 on it and 1.35 on row 1's two trained tokens.
-    assert trainer.all_metrics["opd/informativeness"] == pytest.approx(0.6 - 1.35)
+    assert trainer.all_metrics["opd/teacher/default/informativeness"] == pytest.approx(0.6 - 1.35)
     assert ROLLOUT_CORRECT_KEY not in batch  # popped, never shipped to workers
 
 
@@ -1504,7 +1700,7 @@ def test_trainer_padding_rows_do_not_count_toward_informativeness(tokenizer):
     batch["action_log_probs"] = torch.tensor([[-1.0, -1.0, -1.0], [0.0, -2.0, -2.0]] + [[-1.0, -1.0, -1.0]] * 2)
     batch["values"] = None
     trainer.compute_advantages_and_returns(batch)
-    assert trainer.all_metrics["opd/informativeness"] == pytest.approx(0.6 - 1.35)
+    assert trainer.all_metrics["opd/teacher/default/informativeness"] == pytest.approx(0.6 - 1.35)
 
 
 def test_trainer_needs_correctness_from_postprocess():
@@ -1533,4 +1729,148 @@ def test_trainer_missing_teacher_field_is_loud():
     out = _generator_output()
     out.pop(TEACHER_LOGPROBS_KEY)
     with pytest.raises(RuntimeError, match="teacher_logprobs"):
+        trainer.convert_to_training_input(out, ["u", "u"])
+
+
+# ---------------------------------------------------------------------------
+# OPDTrainer with several teachers (MOPD): routing and per-teacher metrics
+# ---------------------------------------------------------------------------
+
+
+def _routed_batch(labels: List[Optional[str]], n: int = 2) -> GeneratorInput:
+    """``_batch`` with prompt p's rows labeled ``labels[p]`` under the default route key; ``None`` leaves no label."""
+    batch = _batch(len(labels), n, "train")
+    for row, extras in enumerate(batch["env_extras"]):
+        if labels[row // n] is not None:
+            extras["skyrl_mopd_domain"] = labels[row // n]
+    return batch
+
+
+def _sequences(teacher: FakeTeacher) -> List[tuple]:
+    """The sequences a teacher scored; FakeGenerator's prompt p, repetition r is ``(1, p, 10 + p, 20 + r, 4)``."""
+    return sorted(tuple(call["token_ids"]) for call in teacher.calls)
+
+
+@pytest.mark.asyncio
+async def test_trainer_scores_each_row_under_its_routed_teacher_only(tokenizer):
+    teachers = {"math": FakeTeacher(), "code": FakeTeacher()}
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, teachers=teachers)
+
+    out = await trainer.generate(_routed_batch(["math", "code", "math"]))
+
+    assert _sequences(teachers["math"]) == [(1, 0, 10, 20, 4), (1, 0, 10, 21, 4), (1, 2, 12, 20, 4), (1, 2, 12, 21, 4)]
+    assert _sequences(teachers["code"]) == [(1, 1, 11, 20, 4), (1, 1, 11, 21, 4)]
+    assert out[TEACHER_INDEX_KEY] == [0, 0, 1, 1, 0, 0]  # rows in input order, each with its teacher
+    metrics = trainer.all_metrics
+    assert metrics["opd/teacher/math/rows"] == 4 and metrics["opd/teacher/code/rows"] == 2
+    assert metrics["opd/teacher/math/time_per_row_mean"] >= 0.0
+    assert metrics["opd/teacher/code/time_per_row_mean"] >= 0.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "names, batch, message",
+    [
+        (["math", "code"], _routed_batch(["math", "bio"]), r"label 'bio'; .* one of \['math', 'code'\]"),
+        (["math", "code"], _routed_batch(["math", None]), r"label None"),
+        # A one-entry trainer.teachers routes by label too; only trainer.teacher takes unlabeled rows.
+        (["math"], _routed_batch([None]), r"label None; .* one of \['math'\]"),
+    ],
+)
+async def test_trainer_refuses_a_bad_route_before_anything_generates(names, batch, message, tokenizer):
+    generator = FakeGenerator()
+    teachers = {name: FakeTeacher() for name in names}
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, generator=generator, teachers=teachers)
+
+    with pytest.raises(ValueError, match=message):
+        await trainer.generate(batch)
+
+    assert generator.calls == []
+    assert all(teacher.calls == [] for teacher in teachers.values())
+
+
+@pytest.mark.asyncio
+async def test_trainer_measures_overlap_rows_within_each_teachers_rows(tokenizer):
+    teachers = {"math": RankedTeacher(), "code": RankedTeacher()}
+    trainer = _trainer(
+        use_task_reward=False,
+        tokenizer=tokenizer,
+        generator=SupportFakeGenerator(),
+        teachers=teachers,
+        topk_rows=1,
+    )
+
+    await trainer.generate(_routed_batch(["math", "math", "code"]))
+
+    # One row of each teacher's: math's first of rows 0-3, code's first of rows 4-5. One row over the whole batch
+    # would leave code unmeasured.
+    assert {sequence for sequence, topk in _topk_requests(teachers["math"]).items() if topk} == {(1, 0, 10, 20, 4)}
+    assert {sequence for sequence, topk in _topk_requests(teachers["code"]).items() if topk} == {(1, 2, 12, 20, 4)}
+    metrics = trainer.all_metrics
+    # 2 measured positions per row; the fakes give both teachers' rows the same top-K.
+    assert metrics["opd/teacher/math/overlap_positions"] == 2 and metrics["opd/teacher/code/overlap_positions"] == 2
+    assert metrics["opd/teacher/code/overlap_ratio"] == pytest.approx(metrics["opd/teacher/math/overlap_ratio"])
+    assert not any(key.startswith("opd/overlap") for key in metrics)  # per teacher only
+
+
+def _routed_advantages(trainer: OPDTrainer, teacher_index: List[int], lcm_dp_size: int = 1):
+    """``_generator_output``'s two rows, routed by ``teacher_index``, through postprocessing, conversion and the
+    advantages. Row 0 has 3 loss tokens and row 1 has 2."""
+    trainer.dispatch.get_lcm_dp_size.return_value = lcm_dp_size
+    out = _generator_output()
+    out[TEACHER_INDEX_KEY] = teacher_index
+    out, uids = trainer.postprocess_generator_output(out, ["u", "u"])
+    batch = trainer.convert_to_training_input(out, uids)
+    rows = [[-1.0, -1.0, -1.0], [0.0, -2.0, -2.0]]
+    batch["action_log_probs"] = torch.tensor(rows + rows[:1] * (len(batch) - 2))
+    batch["values"] = None
+    return trainer.compute_advantages_and_returns(batch)
+
+
+def test_trainer_logs_the_term_metrics_and_shares_per_teacher(tokenizer):
+    default = _routed_advantages(_trainer(use_task_reward=False, tokenizer=tokenizer), [0, 0])
+    trainer = _trainer(
+        use_task_reward=False, tokenizer=tokenizer, teachers={"math": FakeTeacher(), "code": FakeTeacher()}
+    )
+
+    batch = _routed_advantages(trainer, [0, 1])
+
+    # Balancing off, routing changes no advantage.
+    assert torch.equal(batch["advantages"], default["advantages"])
+    assert TEACHER_INDEX_KEY not in batch  # popped, never shipped to the workers
+    metrics = trainer.all_metrics
+    # log p - log q: row 0 (math) averages -0.6 over its 3 tokens, row 1 (code) -1.35 over its 2.
+    assert metrics["opd/teacher/math/reverse_kl"] == pytest.approx(-0.6)
+    assert metrics["opd/teacher/code/reverse_kl"] == pytest.approx(-1.35)
+    assert metrics["opd/teacher/math/token_share"] == pytest.approx(0.6)
+    assert metrics["opd/teacher/code/token_share"] == pytest.approx(0.4)
+    assert metrics["opd/teacher/math/prompt_share"] == 0.5
+    # One rollout each: neither teacher has both a correct and an incorrect one.
+    assert not any(key.endswith("informativeness") for key in metrics)
+    # Per teacher only; the coefficient is a setting, logged once.
+    assert "opd/reverse_kl" not in metrics and "opd/teacher/default/reverse_kl" not in metrics
+    assert metrics["opd/kl_coef"] == 1.0 and "opd/teacher/math/kl_coef" not in metrics
+
+
+def test_trainer_padding_rows_belong_to_no_teacher(tokenizer):
+    teachers = {"math": FakeTeacher(), "code": FakeTeacher()}
+    trainer = _trainer(use_task_reward=False, tokenizer=tokenizer, teachers=teachers)
+    trainer.dispatch.get_lcm_dp_size.return_value = 4  # two rows padded to four
+    out = _generator_output()
+    out[TEACHER_INDEX_KEY] = [0, 1]
+    out, uids = trainer.postprocess_generator_output(out, ["u", "u"])
+    assert trainer.convert_to_training_input(out, uids)[TEACHER_INDEX_KEY].tolist() == [0, 1, -1, -1]
+
+    _routed_advantages(trainer, [0, 1], lcm_dp_size=4)
+
+    # The padding rows copy row 0's tensors, a math row, but count toward no teacher's share.
+    assert trainer.all_metrics["opd/teacher/math/token_share"] == pytest.approx(0.6)
+    assert trainer.all_metrics["opd/teacher/math/prompt_share"] == 0.5
+
+
+def test_trainer_missing_teacher_index_is_loud():
+    trainer = _trainer(use_task_reward=False)
+    out = _generator_output()
+    out.pop(TEACHER_INDEX_KEY)
+    with pytest.raises(RuntimeError, match="teacher_index"):
         trainer.convert_to_training_input(out, ["u", "u"])

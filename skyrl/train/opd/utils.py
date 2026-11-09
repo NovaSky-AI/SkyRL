@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.generators.base import GeneratorInput
+from skyrl.train.opd.config import DEFAULT_TEACHER
+from skyrl.train.opd.metrics import informativeness
 
 if TYPE_CHECKING:
     from skyrl.train.opd.config import OPDConfig
 
 TEACHER_LOGPROBS_KEY = "teacher_logprobs"
 ROLLOUT_CORRECT_KEY = "rollout_correct"
+# Each row's teacher, as its index in the trainer's teachers; -1 on padding rows.
+TEACHER_INDEX_KEY = "teacher_index"
 # Floor on the student's logprob in the OPD term. A -inf would make the term inf and the pointwise KL NaN.
 STUDENT_LOGPROB_FLOOR = -99999.0
 
@@ -86,6 +90,9 @@ def apply_opd_to_advantages(
     teacher_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
     opd: OPDConfig,
+    teacher_index: Optional[torch.Tensor] = None,
+    teacher_names: Sequence[str] = (DEFAULT_TEACHER,),
+    correct: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """``advantages + kl_coef * a`` on trainable tokens, with ``a = log pi_teacher - log pi_student``.
 
@@ -102,7 +109,12 @@ def apply_opd_to_advantages(
     ``advantages - kl_coef * (log pi_student - log pi_teacher)`` exactly, with ``log pi_student`` floored at
     ``STUDENT_LOGPROB_FLOOR``.
 
-    Returns the new advantages and metrics under ``opd/``.
+    The metrics are per teacher, under ``opd/teacher/<name>/``. ``teacher_index`` (``[rows]``) is each row's teacher
+    as an index into ``teacher_names``, ``-1`` on padding rows, which belong to none; ``None`` gives every row to the
+    one teacher. ``correct`` (bool ``[rows]``) adds each teacher's informativeness. Only ``opd/kl_coef``, a setting,
+    is logged once.
+
+    Returns the new advantages and the metrics.
     """
     if not (advantages.shape == action_log_probs.shape == teacher_logprobs.shape == loss_mask.shape):
         raise ValueError(
@@ -110,6 +122,10 @@ def apply_opd_to_advantages(
             f"advantages={tuple(advantages.shape)} action_log_probs={tuple(action_log_probs.shape)} "
             f"teacher_logprobs={tuple(teacher_logprobs.shape)} loss_mask={tuple(loss_mask.shape)}"
         )
+    if teacher_index is None:
+        teacher_index = torch.zeros(advantages.shape[0], dtype=torch.long)
+    if teacher_index.shape != advantages.shape[:1]:
+        raise ValueError(f"teacher_index={tuple(teacher_index.shape)} for {advantages.shape[0]} rows")
     mask = loss_mask.to(dtype=torch.bool)
     action_log_probs = action_log_probs.clamp(min=STUDENT_LOGPROB_FLOOR)
     reverse_kl = torch.where(mask, action_log_probs - teacher_logprobs, torch.zeros_like(action_log_probs))
@@ -128,20 +144,58 @@ def apply_opd_to_advantages(
     opd_term = opd.kl_coef * signal
     new_advantages = advantages + opd_term
 
+    metrics = {"opd/kl_coef": float(opd.kl_coef)}
+    row_tokens = mask.sum(dim=1)
+    has_teacher = teacher_index >= 0
+    total_tokens, total_rows = int(row_tokens[has_teacher].sum()), int(has_teacher.sum())
+    for d, name in enumerate(teacher_names):
+        rows = teacher_index == d
+        if not rows.any():
+            continue
+        teacher_metrics = _term_metrics(
+            advantages[rows],
+            opd_term[rows],
+            reverse_kl[rows],
+            divergence_clipped[rows],
+            advantage_clipped[rows],
+            mask[rows],
+            None if correct is None else correct[rows],
+        )
+        # Under a token-mean loss a teacher's share of the loss tokens is its share of the gradient.
+        teacher_metrics["token_share"] = int(row_tokens[rows].sum()) / total_tokens if total_tokens else 0.0
+        teacher_metrics["prompt_share"] = int(rows.sum()) / total_rows
+        metrics.update({f"opd/teacher/{name}/{key}": value for key, value in teacher_metrics.items()})
+    return new_advantages, metrics
+
+
+def _term_metrics(
+    advantages: torch.Tensor,
+    opd_term: torch.Tensor,
+    reverse_kl: torch.Tensor,
+    divergence_clipped: torch.Tensor,
+    advantage_clipped: torch.Tensor,
+    mask: torch.Tensor,
+    correct: Optional[torch.Tensor],
+) -> Dict[str, float]:
+    """``apply_opd_to_advantages``'s metrics over the rows it is given, one teacher's."""
     mask_f = mask.to(dtype=advantages.dtype)
     metrics = {
-        "opd/reverse_kl": masked_mean(reverse_kl, mask_f).item(),
-        "opd/reverse_kl_abs_max": reverse_kl.abs().max().item() if reverse_kl.numel() else 0.0,
-        "opd/adv_rl_abs_mean": masked_mean(advantages.abs(), mask_f).item(),
-        "opd/adv_opd_abs_mean": masked_mean(opd_term.abs(), mask_f).item(),
-        "opd/kl_coef": float(opd.kl_coef),
-        "opd/divergence_clip_fraction": masked_mean(divergence_clipped.to(mask_f.dtype), mask_f).item(),
-        "opd/advantage_clip_fraction": masked_mean(advantage_clipped.to(mask_f.dtype), mask_f).item(),
+        "reverse_kl": masked_mean(reverse_kl, mask_f).item(),
+        "reverse_kl_abs_max": reverse_kl.abs().max().item() if reverse_kl.numel() else 0.0,
+        "adv_rl_abs_mean": masked_mean(advantages.abs(), mask_f).item(),
+        "adv_opd_abs_mean": masked_mean(opd_term.abs(), mask_f).item(),
+        "divergence_clip_fraction": masked_mean(divergence_clipped.to(mask_f.dtype), mask_f).item(),
+        "advantage_clip_fraction": masked_mean(advantage_clipped.to(mask_f.dtype), mask_f).item(),
     }
     log_ratio = -reverse_kl[mask]
     if log_ratio.numel():
         # Percentiles of the raw log-ratio, to pick the advantage bounds from a run. NumPy, because torch.quantile
         # refuses inputs above 2**24 elements and a math step has about 25M tokens.
         low, high = np.quantile(log_ratio.float().cpu().numpy(), [0.01, 0.99])
-        metrics["opd/log_ratio_p01"], metrics["opd/log_ratio_p99"] = float(low), float(high)
-    return new_advantages, metrics
+        metrics["log_ratio_p01"], metrics["log_ratio_p99"] = float(low), float(high)
+    if correct is not None:
+        # -reverse_kl is log q - log p on trainable tokens and 0 elsewhere, which the mask leaves out anyway.
+        value = informativeness(-reverse_kl, mask, correct)
+        if value is not None:
+            metrics["informativeness"] = value
+    return metrics

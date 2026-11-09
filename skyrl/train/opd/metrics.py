@@ -60,16 +60,16 @@ class TopKStats:
     def __add__(self, other: "TopKStats") -> "TopKStats":
         return TopKStats(*(getattr(self, f.name) + getattr(other, f.name) for f in fields(self)))
 
-    def metrics(self) -> Dict[str, float]:
-        """The means, keyed for the tracker; none until a position was measured."""
+    def metrics(self, prefix: str = "opd/") -> Dict[str, float]:
+        """The means, keyed for the tracker under ``prefix``; none until a position was measured."""
         if not self.positions:
             return {}
         metrics = {
-            "opd/overlap_ratio": self.overlap / self.positions,
-            "opd/overlap_positions": self.positions,
+            f"{prefix}overlap_ratio": self.overlap / self.positions,
+            f"{prefix}overlap_positions": self.positions,
         }
         if self.advantage_positions:
-            metrics["opd/overlap_token_advantage"] = self.advantage / self.advantage_positions
+            metrics[f"{prefix}overlap_token_advantage"] = self.advantage / self.advantage_positions
         return metrics
 
 

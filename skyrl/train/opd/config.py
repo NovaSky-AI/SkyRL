@@ -2,16 +2,22 @@
 
 Adds two blocks to the standard config and changes two algorithm defaults:
 
-- ``trainer.teacher``: the frozen teacher, a sibling of ``trainer.ref`` (which stays independent:
-  a reference-KL penalty can still be turned on alongside the teacher). ``backend`` picks one of two
-  exclusive homes: launched by this job (``skyrl``, the default) or vLLM servers you run (``vllm``).
-- ``trainer.algorithm.opd``: the distillation knobs, and ``opd.topk_metrics``, the top-K overlap metrics.
+- ``trainer.teacher`` or ``trainer.teachers``, the frozen teacher(s), siblings of ``trainer.ref`` (which stays
+  independent: a reference-KL penalty can still be turned on alongside them). ``trainer.teacher`` is one teacher
+  that scores every row; ``trainer.teachers`` names several and routes each prompt group to the one its
+  ``opd.route_key`` label names (multi-teacher OPD, MOPD). Set one of the two. Once built, the config holds the
+  teachers in ``trainer.teachers`` only: a single ``trainer.teacher`` becomes ``{"default": teacher}`` and
+  ``trainer.teacher`` is reset to ``None``, so the rest of the code has one path. Each teacher's ``backend`` picks one
+  of two exclusive homes: launched by this job (``skyrl``, the default) or vLLM servers you run (``vllm``).
+- ``trainer.algorithm.opd``: the distillation knobs, ``opd.topk_metrics`` (the top-K overlap metrics) and
+  ``opd.route_key`` (which row label picks the teacher under ``trainer.teachers``).
 - ``trainer.algorithm.use_kl_loss`` defaults to ``False`` and
   ``policy_loss_type`` to ``"importance_sampling"``.
 """
 
+import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from loguru import logger
 
@@ -25,10 +31,15 @@ from skyrl.train.config import (
     TrainerConfig,
     make_config,
 )
-from skyrl.train.config.config import BaseConfig
+from skyrl.train.config.config import BaseConfig, build_nested_dataclass
 from skyrl.train.opd.teacher_client import normalize_server_url
 
 TEACHER_BACKENDS = ("skyrl", "vllm")
+DEFAULT_TEACHER = "default"
+"""``trainer.teacher``'s name once normalized into ``trainer.teachers``: it scores every row, with no route label.
+Reserved: ``trainer.teachers`` may use it only alone, as the normalized form does."""
+# Teacher names appear in metric keys.
+_TEACHER_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
 
 @dataclass
@@ -59,8 +70,9 @@ class OPDTopKMetricsConfig(BaseConfig):
     """
 
     num_rows: int = 0
-    """Rows per step, evenly spaced over the batch, on which the overlap metrics are measured; ``0`` is off.
-    Each asks the teacher for its own top ``top_k``, which vLLM returns as JSON over the whole sequence."""
+    """Rows per step and teacher, evenly spaced over each teacher's rows, on which the overlap metrics are measured;
+    ``0`` is off. Each asks its teacher for its own top ``top_k``, which vLLM returns as JSON over the whole
+    sequence."""
     top_k: int = 16
     """K, the number of top tokens of each distribution compared; at least 8. 16 is the paper's."""
 
@@ -90,6 +102,9 @@ class OPDConfig(BaseConfig):
     An alternative to the advantage clip bounds; setting both is a config error."""
     topk_metrics: OPDTopKMetricsConfig = field(default_factory=OPDTopKMetricsConfig)
     """Top-K overlap metrics: overlap ratio and overlap-token advantage. Off by default."""
+    route_key: str = "skyrl_mopd_domain"
+    """Which row label names the teacher of each prompt group under ``trainer.teachers``.
+    It names an ``env_extras`` field: any dataset column besides the prompt and ``env_class``."""
 
 
 @dataclass
@@ -141,11 +156,50 @@ class OPDAlgorithmConfig(AlgorithmConfig):
     """The Thinking Machines / tinker recipe. ``"regular"`` (PPO clip) is also valid."""
 
 
+def teacher_path(name: str) -> str:
+    """A teacher's config path, for messages: ``trainer.teacher`` or ``trainer.teachers.<name>``."""
+    return "trainer.teacher" if name == DEFAULT_TEACHER else f"trainer.teachers.{name}"
+
+
+def _as_teacher_config(name: str, entry: Any) -> TeacherConfig:
+    """One teacher as a ``TeacherConfig``; the loader passes a map's values through as dicts."""
+    if isinstance(entry, TeacherConfig):
+        return entry
+    if not isinstance(entry, dict):
+        raise ValueError(f"{teacher_path(name)} must be a teacher block, got {entry!r}")
+    try:
+        return build_nested_dataclass(TeacherConfig, entry)
+    except ValueError as e:
+        raise ValueError(f"{teacher_path(name)}: {e}") from e
+
+
 @dataclass
 class OPDTrainerConfig(TrainerConfig):
     algorithm: OPDAlgorithmConfig = field(default_factory=OPDAlgorithmConfig)
-    teacher: TeacherConfig = field(default_factory=TeacherConfig)
-    """The frozen teacher; a sibling of ``trainer.ref``."""
+    teacher: Optional[TeacherConfig] = None
+    """The frozen teacher, a sibling of ``trainer.ref``; it scores every row. For several teachers, set
+    ``trainer.teachers`` instead. Once built, the config moves it to ``trainer.teachers`` as ``default`` and
+    resets this field to ``None``."""
+    teachers: Optional[Dict[str, TeacherConfig]] = None
+    """Several frozen teachers by name, for multi-teacher OPD (MOPD); each entry is a ``trainer.teacher`` block.
+    Each prompt group is scored by the teacher its ``opd.route_key`` label names. Exclusive with ``trainer.teacher``."""
+
+    def __post_init__(self):
+        if self.teacher is not None and self.teachers is not None:
+            raise ValueError(
+                "trainer.teacher and trainer.teachers are alternatives; set one: trainer.teacher is a single teacher "
+                "that scores every row, trainer.teachers names several and routes each row by its label"
+            )
+        if self.teacher is not None:
+            # One teacher takes the same form as several, under the reserved name, so the rest of the code has one
+            # path; rerunning this on the normalized config leaves it as it is.
+            self.teachers = {DEFAULT_TEACHER: _as_teacher_config(DEFAULT_TEACHER, self.teacher)}
+            self.teacher = None
+        if not self.teachers:
+            raise ValueError("set trainer.teacher for one teacher, or trainer.teachers for several")
+        if DEFAULT_TEACHER in self.teachers and len(self.teachers) > 1:
+            raise ValueError(f"trainer.teachers.{DEFAULT_TEACHER}: the name is reserved for trainer.teacher")
+        self.teachers = {name: _as_teacher_config(name, entry) for name, entry in self.teachers.items()}
 
 
 OPDExpConfig = make_config(trainer_cls=OPDTrainerConfig)
@@ -170,47 +224,83 @@ _FROZEN_ENGINE_FIELDS_MUST_BE_NONE = (
 )
 
 
-def _validate_launched_teacher(teacher: TeacherConfig) -> None:
-    """``backend="skyrl"``: the job launches the teacher, so nothing may point elsewhere."""
+def _validate_launched_teacher(path: str, teacher: TeacherConfig) -> None:
+    """``backend="skyrl"``: the job launches the teacher, so nothing may point elsewhere. ``path`` is the teacher's
+    config path, ``trainer.teachers.<name>``."""
     ie_cfg: TeacherEngineConfig = teacher.inference_engine
     if teacher.server_url is not None:
         raise ValueError(
-            "trainer.teacher.server_url is for backend='vllm' (a server you run); backend='skyrl' launches the "
-            "teacher in this job from trainer.teacher.inference_engine"
+            f"{path}.server_url is for backend='vllm' (a server you run); backend='skyrl' launches the "
+            f"teacher in this job from {path}.inference_engine"
         )
     if ie_cfg.backend != "vllm":
-        raise ValueError(f"trainer.teacher.inference_engine.backend must be 'vllm', got {ie_cfg.backend!r}")
+        raise ValueError(f"{path}.inference_engine.backend must be 'vllm', got {ie_cfg.backend!r}")
     if not ie_cfg.run_engines_locally:
         raise ValueError(
-            "trainer.teacher.inference_engine.run_engines_locally must be true for backend='skyrl'; for a server "
-            "you run use backend='vllm' with trainer.teacher.server_url"
+            f"{path}.inference_engine.run_engines_locally must be true for backend='skyrl'; for a server "
+            f"you run use backend='vllm' with {path}.server_url"
         )
     for name in _FROZEN_ENGINE_FIELDS_MUST_BE_OFF:
         if getattr(ie_cfg, name):
-            raise ValueError(f"trainer.teacher.inference_engine.{name} does not apply to a frozen teacher")
+            raise ValueError(f"{path}.inference_engine.{name} does not apply to a frozen teacher")
     for name in _FROZEN_ENGINE_FIELDS_MUST_BE_NONE:
         if getattr(ie_cfg, name) is not None:
-            raise ValueError(f"trainer.teacher.inference_engine.{name} does not apply to a frozen teacher")
+            raise ValueError(f"{path}.inference_engine.{name} does not apply to a frozen teacher")
     num_gpus = (
         ie_cfg.num_engines * ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size * ie_cfg.data_parallel_size
     )
     if num_gpus < 1:
-        raise ValueError("trainer.teacher.inference_engine must describe at least one GPU")
+        raise ValueError(f"{path}.inference_engine must describe at least one GPU")
     if ie_cfg.engine_init_kwargs.get("max_model_len") is None:
         logger.warning(
-            "trainer.teacher.inference_engine.engine_init_kwargs.max_model_len is not set, so vLLM uses the teacher "
+            f"{path}.inference_engine.engine_init_kwargs.max_model_len is not set, so vLLM uses the teacher "
             "model's native context, whose KV cache may not fit on the teacher's GPUs. Set it to cover the longest "
             "prompt + response + 1."
         )
 
 
-def _reject_launch_settings(teacher: TeacherConfig) -> None:
+def _reject_launch_settings(path: str, teacher: TeacherConfig) -> None:
     """``backend`` names servers elsewhere, so a launch block is a mistake, not a no-op."""
     if teacher.inference_engine != TeacherEngineConfig():
         raise ValueError(
-            "trainer.teacher.inference_engine is for backend='skyrl' (a teacher this job launches); "
+            f"{path}.inference_engine is for backend='skyrl' (a teacher this job launches); "
             f"backend={teacher.backend!r} names servers elsewhere, so leave the block at its defaults"
         )
+
+
+def _validate_teacher(path: str, teacher: TeacherConfig) -> None:
+    """One teacher's backend rules; ``path`` is its config path, named in every message."""
+    if teacher.backend not in TEACHER_BACKENDS:
+        raise ValueError(f"{path}.backend must be one of {TEACHER_BACKENDS}, got {teacher.backend!r}")
+    if not teacher.model:
+        raise ValueError(f"{path}.model must be set")
+    if teacher.backend == "skyrl":
+        _validate_launched_teacher(path, teacher)
+    elif teacher.backend == "vllm":
+        if not teacher.server_url:
+            raise ValueError(f"{path}.backend='vllm' requires {path}.server_url")
+        normalize_server_url(teacher.server_url)  # refuses a trailing /v1 before anything launches
+        _reject_launch_settings(path, teacher)
+    if teacher.max_concurrency <= 0:
+        raise ValueError(f"{path}.max_concurrency must be positive")
+
+
+def _validate_teachers(cfg) -> None:
+    """The names, the route key, then each teacher's backend rules. ``OPDTrainerConfig.__post_init__`` has already
+    checked that one of ``trainer.teacher`` and ``trainer.teachers`` is set and moved a single teacher into the map."""
+    if cfg.trainer.teacher is not None:
+        raise ValueError(
+            "trainer.teacher was set after the config was built, so it was never moved into trainer.teachers; set it "
+            "when building the config"
+        )
+    teachers = cfg.trainer.teachers
+    for name in list(teachers):
+        if not isinstance(name, str) or not _TEACHER_NAME.fullmatch(name):
+            raise ValueError(f"teacher name {name!r} must match [A-Za-z0-9_-]+: it appears in metric keys")
+        teachers[name] = _as_teacher_config(name, teachers[name])  # entries assigned after the config was built
+        _validate_teacher(teacher_path(name), teachers[name])
+    if DEFAULT_TEACHER not in teachers and not cfg.trainer.algorithm.opd.route_key:
+        raise ValueError("trainer.algorithm.opd.route_key must be set")
 
 
 def teacher_logprob_width(cfg) -> int:
@@ -261,23 +351,10 @@ def validate_opd_cfg(cfg) -> None:
 
     With ``opd.topk_metrics.num_rows > 0`` it also turns on the student's top-K capture, so the user sets one field.
     """
-    teacher: TeacherConfig = cfg.trainer.teacher
     algorithm = cfg.trainer.algorithm
     opd: OPDConfig = algorithm.opd
 
-    if teacher.backend not in TEACHER_BACKENDS:
-        raise ValueError(f"trainer.teacher.backend must be one of {TEACHER_BACKENDS}, got {teacher.backend!r}")
-    if not teacher.model:
-        raise ValueError("trainer.teacher.model must be set")
-    if teacher.backend == "skyrl":
-        _validate_launched_teacher(teacher)
-    elif teacher.backend == "vllm":
-        if not teacher.server_url:
-            raise ValueError("trainer.teacher.backend='vllm' requires trainer.teacher.server_url")
-        normalize_server_url(teacher.server_url)  # refuses a trailing /v1 before anything launches
-        _reject_launch_settings(teacher)
-    if teacher.max_concurrency <= 0:
-        raise ValueError("trainer.teacher.max_concurrency must be positive")
+    _validate_teachers(cfg)
 
     if opd.kl_coef < 0:
         raise ValueError("trainer.algorithm.opd.kl_coef must be >= 0")
