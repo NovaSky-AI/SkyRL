@@ -756,16 +756,19 @@ async def test_failed_node_scrape_skips_partial_totals_and_reestablishes_baselin
         return httpx.Response(200, text=text)
 
     scraper = VLLMMetricsScraper(urls=["http://a/metrics", "http://b/metrics"], worker_ids=["a", "b"])
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
-        scraper._client = client
-        await scraper.sample(generation_time_s=1)
-        step = 1
-        assert await scraper.sample(generation_time_s=1) == {}
-        step = 2
-        recovered = await scraper.sample(generation_time_s=1)
-        assert "vllm/generation_throughput_tok_s" not in recovered
-        step = 3
-        metrics = await scraper.sample(generation_time_s=1)
+    with patch("skyrl.train.utils.vllm_metrics_scraper.logger") as mock_logger:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            scraper._client = client
+            await scraper.sample(generation_time_s=1)
+            step = 1
+            assert await scraper.sample(generation_time_s=1) == {}
+            step = 2
+            recovered = await scraper.sample(generation_time_s=1)
+            assert "vllm/generation_throughput_tok_s" not in recovered
+            step = 3
+            metrics = await scraper.sample(generation_time_s=1)
+    mock_logger.warning.assert_called_once()
+    assert "503" in mock_logger.warning.call_args.args[0]
     assert metrics["vllm/generation_throughput_tok_s"] == 20
 
 

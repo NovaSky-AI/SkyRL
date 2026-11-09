@@ -109,8 +109,7 @@ def _make_policy_cfg(model_name: str) -> SkyRLTrainConfig:
     cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.pipeline_model_parallel_size = 1
     cfg.trainer.policy.megatron_config.context_parallel_size = 1
-    # This test only round-trips MTP head weights; packing is irrelevant and Qwen3.5's GDN layers
-    # cannot sample-pack anyway (the wrapper rejects it -- see the 9B recipe's remove_microbatch_padding=false).
+    # This test only round-trips MTP head weights; packing is irrelevant.
     cfg.trainer.remove_microbatch_padding = False
     # Skip optimizer init for weight sync test
     cfg.trainer.policy.inference_only_init = True
