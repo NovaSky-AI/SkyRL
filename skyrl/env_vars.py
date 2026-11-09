@@ -30,6 +30,12 @@ Timeout for a training worker to fetch the stored rollouts of one streamed micro
 times out raises rather than leaving the other ranks waiting in a collective. Defaults to 10 minutes.
 """
 
+SKYRL_STAGE_TRACE_DIR = os.environ.get("SKYRL_STAGE_TRACE_DIR", "")
+"""
+Directory each process writes its data-path spans to as Chrome trace events (``skyrl.utils.stage_trace``),
+one file per process; on a cluster, a node-local path. Unset (the default), nothing is written.
+"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Inference Servers
 # ─────────────────────────────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils import deadline
 from skyrl.train.utils.async_utils import cleanup_preserving_primary
+from skyrl.utils import stage_trace
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -459,7 +460,8 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
         actor_infos = self._actor_groups[model].actor_infos
-        statuses = deadline.ray_get([call(info) for info in actor_infos], "forward_backward")
+        with stage_trace.span("trainer.forward_backward"):
+            statuses = deadline.ray_get([call(info) for info in actor_infos], "forward_backward")
         self._save_memory_snapshot(model, "forward_backward")
         return WorkerOutput.cat(actor_infos, statuses)
 
@@ -496,7 +498,8 @@ class WorkerDispatch:
         self._ensure_on_gpu(model, need_optimizer=True, need_model=True)
         self.ensure_active_adapter(model, model_id)
         refs = self._actor_groups[model].async_run_ray_method("pass_through", "optim_step")
-        grad_norms = deadline.ray_get(refs, "optim_step")
+        with stage_trace.span("trainer.optim_step"):
+            grad_norms = deadline.ray_get(refs, "optim_step")
 
         self._save_memory_snapshot(model, "optim_step")
         return grad_norms[0]

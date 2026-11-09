@@ -56,6 +56,7 @@ from skyrl.train.generators.skycap_store import (
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
+from skyrl.utils import stage_trace
 
 from ..harbor.trial_metrics import TrialAttempts, trial_metrics
 from .compose import TrialChecks, TrialOutcome, compose
@@ -208,6 +209,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         self, pool: StoredCapturePool, input_batch: GeneratorInput, disable_tqdm: bool
     ) -> StoredRolloutGroup:
         finished: List[str] = []
+        t_group = time.perf_counter()
         try:
             outcomes, metrics = await self._trials(input_batch, pool, finished, disable_tqdm)
         except BaseException:
@@ -216,7 +218,9 @@ class HarborSkycapGenerator(GeneratorInterface):
             raise
         composed = {o.capture_id for o in outcomes}
         discard = [trajectory_id for trajectory_id in finished if trajectory_id not in composed]
-        group = await pool.compose_group(outcomes, discard, self._compose_options(), self.support_id_bits)
+        with stage_trace.span("gen.compose_group", trajectories=len(outcomes)):
+            group = await pool.compose_group(outcomes, discard, self._compose_options(), self.support_id_bits)
+        stage_trace.record("gen.group", t_group, time.perf_counter(), trajectories=len(outcomes))
         group.group_fields["rollout_metrics"].update(metrics)
         return group
 

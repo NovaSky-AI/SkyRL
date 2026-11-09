@@ -11,10 +11,13 @@ Single-threaded and per pass: ``stage`` must be pure host work plus the copy (no
 prefetcher holds nothing once exhausted.
 """
 
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 import torch
+
+from skyrl.utils import stage_trace
 
 _COPY_STREAMS: Dict[int, torch.cuda.Stream] = {}
 
@@ -66,8 +69,9 @@ class MicrobatchPrefetcher:
         if self._next >= len(self._host):
             raise StopIteration
         if self._staged is None:
-            # The first microbatch, or one consumed before its prefetch: stage it now.
-            self._stage(self._next)
+            # The first microbatch, or one consumed before its prefetch: stage it now, while the
+            # computation waits (``mb.stage_exposed``, apart from the overlapped ``mb.stage``).
+            self._stage(self._next, exposed=True)
         staged, self._staged = self._staged, None
         self._next += 1
         if staged.copied is not None:
@@ -82,10 +86,12 @@ class MicrobatchPrefetcher:
         if self._enabled and self._staged is None and self._next < len(self._host):
             self._stage(self._next)
 
-    def _stage(self, index: int) -> None:
+    def _stage(self, index: int, exposed: bool = False) -> None:
+        t0 = time.perf_counter()
         try:
             if self._device.type != "cuda":
                 self._staged = _Staged(self._stage_fn(self._host[index]), [], None)
+                stage_trace.record("mb.stage_exposed" if exposed else "mb.stage", t0, time.perf_counter(), index=index)
                 return
             stream = _copy_stream(self._device)
             with torch.cuda.stream(stream):
@@ -98,3 +104,4 @@ class MicrobatchPrefetcher:
             raise
         tensors = [tensor for tensor in self._tensors(item) if tensor.is_cuda]
         self._staged = _Staged(item, tensors, copied)
+        stage_trace.record("mb.stage_exposed" if exposed else "mb.stage", t0, time.perf_counter(), index=index)
