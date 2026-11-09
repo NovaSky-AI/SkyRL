@@ -14,6 +14,11 @@ What to check and which tests to run when bumping a pinned dependency.
 
 For megatron-core and megatron-bridge, follow `skyrl/backends/skyrl_train/patches/megatron/README.md`.
 
+For megatron-core, megatron-bridge **and vLLM** bumps, run the GLM-5.3-Flash roundtrip rows vs vLLM and
+compare them with the measured values in that README's
+[Reference values](../../skyrl/backends/skyrl_train/patches/megatron/README.md#reference-values) table,
+then add a column for the bump.
+
 ## Transformer Engine
 
 TE sits under every Megatron kernel path, so run **all** Megatron GPU CI. Apply the PR labels

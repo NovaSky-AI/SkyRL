@@ -19,7 +19,6 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_FIELD,
-    SAMPLE_SUPPORT_PADDING,
     SAMPLE_SUPPORT_TORCH_DTYPE,
 )
 from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
@@ -28,6 +27,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     get_microbatch_iterator,
 )
 from skyrl.train.dataset.bin_packing import make_seq_packer
+from tests.backends.skyrl_train.sample_support_helpers import ragged_support
 
 
 def balanced_binpacking(token_counts: List[int], max_tokens_per_microbatch: int) -> List[List[int]]:
@@ -230,10 +230,7 @@ class TestTokenBasedBatchIterator:
             cu_seqlens_from_lengths([4, 4]),
         )
         batch["router_padding_mask"] = torch.zeros((2, 4), dtype=torch.bool)
-        batch[SAMPLE_SUPPORT_FIELD] = PackedTensor(
-            torch.full((4, 5), 11, dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
-            cu_seqlens_from_lengths([2, 2]),
-        )
+        batch[SAMPLE_SUPPORT_FIELD] = ragged_support([[[11] * 5] * 2, [[11] * 5] * 2])
 
     def test_padding_microbatch_uses_unique_dummy_routes(self):
         batch = self._make_batch([4, 4], num_actions=2)
@@ -259,24 +256,20 @@ class TestTokenBasedBatchIterator:
         padded_support = padding[SAMPLE_SUPPORT_FIELD]
         assert len(padded_support) == 1
         assert padded_support.sequence_lengths.tolist() == [0]
-        assert padded_support.values.shape == (0, 5)
-        assert padded_support.dtype == SAMPLE_SUPPORT_TORCH_DTYPE
+        assert padded_support.num_rows == 0
+        assert padded_support.num_members == 0
+        assert padded_support.column_dtypes == (SAMPLE_SUPPORT_TORCH_DTYPE,)
         assert padding["rollout_expert_indices"].sequence_lengths.tolist() == [1]
 
     def test_microbatch_selection_gathers_packed_sample_support_segments(self):
         batch = self._make_batch([4, 2], num_actions=2)
-        batch[SAMPLE_SUPPORT_FIELD] = PackedTensor.from_segments(
-            [
-                torch.full((2, 5), 1, dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
-                torch.full((1, 5), SAMPLE_SUPPORT_PADDING, dtype=SAMPLE_SUPPORT_TORCH_DTYPE),
-            ]
-        )
+        batch[SAMPLE_SUPPORT_FIELD] = ragged_support([[[1] * 5] * 2, [[-1] * 5]])
 
         microbatch = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)._create_microbatch_from_indices([1])
 
         support = microbatch[SAMPLE_SUPPORT_FIELD]
         assert support.sequence_lengths.tolist() == [1]
-        assert torch.all(support.segment(0) == SAMPLE_SUPPORT_PADDING)
+        assert support.row_lengths.tolist() == [0]
 
     def test_microbatch_selection_gathers_packed_route_segments(self):
         batch = self._make_batch([4, 2], num_actions=2)

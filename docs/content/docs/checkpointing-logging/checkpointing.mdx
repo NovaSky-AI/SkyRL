@@ -76,13 +76,19 @@ This comes with support for reloading checkpoints in a different parallelism sch
 │   │   ├── huggingface/                 # HuggingFace config and tokenizer
 │   │   ├── __0_0.distcp                 # Megatron checkpoint files
 │   │   ├── __0_1.distcp                 
-│   │   └── ...
+│   │   ├── ...
+│   │   └── optimizer_offload_to_disk/   # Only with optimizer_offload_to_disk: per-rank optimizer state
+│   │       └── rank{global rank}/opt{i}/{state.bin,manifest.json}
 ├── global_step_20/                      # Checkpoint at training step 20
 │   └── ...
 └── global_step_30/                      # Checkpoint at training step 30
     └── ...
 
 ```
+
+With [`optimizer_offload_to_disk`](/docs/examples/megatron#optimizer-state-on-disk), the optimizer state is not in the
+distributed checkpoint: each rank copies its state files into `optimizer_offload_to_disk/`. Such checkpoints need a
+local `ckpt_path` and resume only with the same parallelism.
 
 ## Key Configuration Parameters
 

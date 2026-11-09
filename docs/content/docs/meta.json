@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "getting-started",
+    "models",
     "tutorials",
     "examples",
     "sft",

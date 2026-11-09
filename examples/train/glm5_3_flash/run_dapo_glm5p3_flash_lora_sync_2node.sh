@@ -74,6 +74,8 @@ LORA_ALPHA=64
 MERGE_LORA=false
 SHARE_EXPERT_ADAPTERS=false
 NORMALIZE_MOE_LORA=true
+# Size vLLM's MoE expert LoRA slots at the expert rank (64 // top-8 = 8) instead of 64.
+SCALE_MOE_LORA_RANK=true
 LORA_TARGET_MODULES='[linear_q_down_proj,linear_q_up_proj,linear_kv_down_proj,linear_kv_up_proj,linear_proj,linear_fc1,linear_fc2,q_proj,k_proj,v_proj,b_proj,f_a_proj,g_a_proj,o_proj]'
 
 MEGATRON_TP=4
@@ -135,6 +137,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
+  trainer.algorithm.grpo_norm_by_std=true \
   trainer.algorithm.use_kl_loss=$USE_KL_LOSS \
   trainer.algorithm.overlong_buffer_len=$OVERLONG_BUFFER_LEN \
   trainer.algorithm.overlong_buffer_penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \
@@ -175,6 +178,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.megatron_config.lora_config.merge_lora=$MERGE_LORA \
   trainer.policy.model.lora.share_expert_adapters=$SHARE_EXPERT_ADAPTERS \
   trainer.policy.megatron_config.lora_config.normalize_moe_lora=$NORMALIZE_MOE_LORA \
+  generator.inference_engine.scale_moe_lora_rank=$SCALE_MOE_LORA_RANK \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
