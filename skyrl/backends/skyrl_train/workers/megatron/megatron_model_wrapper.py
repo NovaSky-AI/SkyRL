@@ -2,7 +2,7 @@ import math
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import megatron.core.parallel_state as mpu
 import torch
@@ -16,6 +16,7 @@ from megatron.core.utils import unwrap_model
 from omegaconf import OmegaConf
 
 from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
+    LM_HEAD_WEIGHT,
     call_model_with_fused_lm_head,
     fused_lm_head_output_processor,
 )
@@ -56,6 +57,7 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     unpadded_vocab_shard_width,
 )
 from skyrl.backends.skyrl_train.utils.microbatch_prefetch import MicrobatchPrefetcher
+from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import MemberWeight
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     PolicyLossType,
@@ -68,6 +70,7 @@ from skyrl.backends.skyrl_train.utils.replay_utils import (
     setup_per_microbatch_replay_backward,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    SampleSupportScores,
     score_centering_loss_inputs,
     score_centering_metrics,
     score_prepared_sample_support,
@@ -331,6 +334,161 @@ class MegatronModelWrapper:
             implicit_causal_mask=self._implicit_causal_mask_only,
         )
 
+    def _call_model(self, model, model_inputs, state: dict):
+        """Run ``model`` on a rank microbatch's model_inputs.
+
+        With the fused LM head the output processor returns decoder hidden states instead of logits
+        and stashes the LM-head weight in ``state``, so scoring folds the projection into its chunked
+        op and the full [B, S, vocab//TP] logits are never materialized.
+        """
+        if not self._fused_lm_head:
+            return model(
+                model_inputs.input_ids,
+                model_inputs.position_ids,
+                model_inputs.attention_mask,
+                **model_inputs.model_kwargs(),
+            )
+        context: dict = {}
+        outputs = call_model_with_fused_lm_head(
+            model,
+            model_inputs.input_ids,
+            model_inputs.position_ids,
+            model_inputs.attention_mask,
+            output_processor=fused_lm_head_output_processor,
+            output_processor_context=context,
+            **model_inputs.model_kwargs(),
+        )
+        # Only a stage with the output layer runs the processor.
+        state[LM_HEAD_WEIGHT] = context.get(LM_HEAD_WEIGHT)
+        return outputs
+
+    def _token_logprobs(
+        self,
+        logits: torch.Tensor,
+        loss_inputs: LossInputs,
+        state: dict,
+        temperature: float,
+        *,
+        inference_only: bool,
+        compute_entropy: bool = False,
+        entropy_requires_grad: bool = False,
+        centering_weight: Optional[MemberWeight] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[SampleSupportScores]]:
+        """Each token's logprob from this TP shard's logits (decoder hidden states with the fused LM head).
+
+        Also returns the token entropy when ``compute_entropy`` and the scorer computes it (sample-support
+        replay, fused LM head), and sample-support replay's scores.
+        """
+        tp_group = mpu.get_tensor_model_parallel_group()
+        tp_rank = mpu.get_tensor_model_parallel_rank()
+        lm_head_weight = state.get(LM_HEAD_WEIGHT)
+        fused_lm_head = self._fused_lm_head and lm_head_weight is not None
+        # The fused path applies the temperature inside the op.
+        if temperature != 1.0 and not fused_lm_head:
+            logits.div_(temperature)
+        shard_vocab_size = int(lm_head_weight.shape[0]) if fused_lm_head else logits.shape[-1]
+        vocab_start, vocab_end = tp_rank * shard_vocab_size, (tp_rank + 1) * shard_vocab_size
+
+        if self.cfg.algorithm.enable_sample_support_replay:
+            scores = score_prepared_sample_support(
+                logits,
+                loss_inputs.sample_support,
+                vocab_start_index=vocab_start,
+                vocab_end_index=vocab_end,
+                tp_group=tp_group,
+                lm_head_weight=lm_head_weight if fused_lm_head else None,
+                temperature=temperature,
+                chunk_size=self.cfg.logprobs_chunk_size,
+                compute_entropy=compute_entropy,
+                entropy_requires_grad=entropy_requires_grad,
+                centering_weight=centering_weight,
+            )
+            return scores.logprobs, scores.entropy, scores
+
+        def with_entropy(result) -> Tuple[torch.Tensor, Optional[torch.Tensor], None]:
+            return (*result, None) if compute_entropy else (result, None, None)
+
+        # Without the fused LM head nothing here computes the entropy; the caller takes it from the logits.
+        if fused_lm_head and loss_inputs.packed_targets is not None:
+            return with_entropy(
+                from_parallel_hidden_to_logprobs_packed_sequences(
+                    logits,  # decoder hidden states [1, T, H]
+                    lm_head_weight,
+                    loss_inputs.packed_targets,
+                    loss_inputs.cu_seqlens_padded,
+                    loss_inputs.seq_len,
+                    vocab_start_index=vocab_start,
+                    vocab_end_index=vocab_end,
+                    group=tp_group,
+                    inference_only=inference_only,
+                    cp_group=mpu.get_context_parallel_group(),
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                    attention_mask=loss_inputs.attention_mask,
+                    sub_seq_lengths=loss_inputs.sub_seq_lengths,
+                    temperature=temperature,
+                    fused_backend=self._fused_lm_head_backend,
+                    softcap=self._logit_softcap,
+                    active_mask=loss_inputs.active_mask,
+                    return_entropy=compute_entropy,
+                    entropy_requires_grad=entropy_requires_grad,
+                    targets_rolled=True,
+                )
+            )
+        if fused_lm_head:
+            return with_entropy(
+                from_parallel_hidden_to_logprobs(
+                    logits,  # decoder hidden states [B, S, H]
+                    lm_head_weight,
+                    loss_inputs.sequences,
+                    vocab_start_index=vocab_start,
+                    vocab_end_index=vocab_end,
+                    tp_group=tp_group,
+                    inference_only=inference_only,
+                    cp_group=None,
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                    temperature=temperature,
+                    fused_backend=self._fused_lm_head_backend,
+                    softcap=self._logit_softcap,
+                    active_mask=loss_inputs.active_mask,
+                    return_entropy=compute_entropy,
+                    entropy_requires_grad=entropy_requires_grad,
+                )
+            )
+        if loss_inputs.packed_targets is not None:
+            return (
+                from_parallel_logits_to_logprobs_packed_sequences(
+                    logits,
+                    loss_inputs.packed_targets,
+                    loss_inputs.cu_seqlens_padded,
+                    loss_inputs.seq_len,
+                    vocab_start_index=vocab_start,
+                    vocab_end_index=vocab_end,
+                    group=tp_group,
+                    inference_only=inference_only,
+                    cp_group=mpu.get_context_parallel_group(),
+                    chunk_size=self.cfg.logprobs_chunk_size,
+                    attention_mask=loss_inputs.attention_mask,
+                    sub_seq_lengths=loss_inputs.sub_seq_lengths,
+                    targets_rolled=True,
+                ),
+                None,
+                None,
+            )
+        return (
+            from_parallel_logits_to_logprobs(
+                logits,
+                loss_inputs.sequences,
+                vocab_start_index=vocab_start,
+                vocab_end_index=vocab_end,
+                tp_group=tp_group,
+                inference_only=inference_only,
+                cp_group=None,
+                chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
+            ),
+            None,
+            None,
+        )
+
     def forward(
         self,
         micro_batches: Sequence[HostMicrobatch],
@@ -355,137 +513,20 @@ class MegatronModelWrapper:
         forward_backward_func = get_forward_backward_func()
 
         def collection_func(logits, *, loss_inputs: LossInputs, state: dict):
-            tp_grp = mpu.get_tensor_model_parallel_group()
-            tp_rank = mpu.get_tensor_model_parallel_rank()
-
-            # Fused LM-head: `logits` is actually decoder hidden states [B, S, H]
-            # (the output_processor skipped the projection); fold the LM-head into
-            # the chunked log-prob so this forward-only pass never materializes the
-            # full [B, S, vocab//TP] logits (which would OOM at long context).
-            lm_head_weight = state.get("lm_head_weight")
-            fused_lm_head = self._fused_lm_head and lm_head_weight is not None
-            if fused_lm_head:
-                _v_local = int(lm_head_weight.shape[0])
-                fused_vocab_start, fused_vocab_end = tp_rank * _v_local, (tp_rank + 1) * _v_local
-
-            # temperature normalization (the fused path applies it inside the op)
-            if temperature != 1.0 and not fused_lm_head:
-                logits.div_(temperature)
-
-            shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
-            if self.cfg.algorithm.enable_sample_support_replay:
-                token_logprobs = score_prepared_sample_support(
-                    logits,
-                    loss_inputs.sample_support,
-                    vocab_start_index=tp_rank * shard_vocab_size,
-                    vocab_end_index=(tp_rank + 1) * shard_vocab_size,
-                    tp_group=tp_grp,
-                    lm_head_weight=lm_head_weight if fused_lm_head else None,
-                    temperature=temperature,
-                    chunk_size=self.cfg.logprobs_chunk_size,
-                    compute_entropy=False,
-                    entropy_requires_grad=False,
-                ).logprobs
-            elif fused_lm_head and loss_inputs.packed_targets is not None:
-                token_logprobs = from_parallel_hidden_to_logprobs_packed_sequences(
-                    logits,  # decoder hidden states [1, T, H]
-                    lm_head_weight,
-                    loss_inputs.packed_targets,
-                    loss_inputs.cu_seqlens_padded,
-                    loss_inputs.seq_len,
-                    vocab_start_index=fused_vocab_start,
-                    vocab_end_index=fused_vocab_end,
-                    group=tp_grp,
-                    inference_only=True,
-                    cp_group=mpu.get_context_parallel_group(),
-                    chunk_size=self.cfg.logprobs_chunk_size,
-                    attention_mask=loss_inputs.attention_mask,
-                    sub_seq_lengths=loss_inputs.sub_seq_lengths,
-                    temperature=temperature,
-                    fused_backend=self._fused_lm_head_backend,
-                    softcap=self._logit_softcap,
-                    targets_rolled=True,
-                )
-            elif fused_lm_head:
-                token_logprobs = from_parallel_hidden_to_logprobs(
-                    logits,  # decoder hidden states [B, S, H]
-                    lm_head_weight,
-                    loss_inputs.sequences,
-                    vocab_start_index=fused_vocab_start,
-                    vocab_end_index=fused_vocab_end,
-                    tp_group=tp_grp,
-                    inference_only=True,
-                    cp_group=None,
-                    chunk_size=self.cfg.logprobs_chunk_size,
-                    temperature=temperature,
-                    fused_backend=self._fused_lm_head_backend,
-                    softcap=self._logit_softcap,
-                )
-            elif loss_inputs.packed_targets is not None:
-                token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
-                    logits,
-                    loss_inputs.packed_targets,
-                    loss_inputs.cu_seqlens_padded,
-                    loss_inputs.seq_len,
-                    vocab_start_index=tp_rank * logits.shape[-1],
-                    vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-                    group=tp_grp,
-                    inference_only=True,
-                    cp_group=mpu.get_context_parallel_group(),
-                    chunk_size=self.cfg.logprobs_chunk_size,
-                    attention_mask=loss_inputs.attention_mask,
-                    sub_seq_lengths=loss_inputs.sub_seq_lengths,
-                    targets_rolled=True,
-                )
-            else:
-                token_logprobs = from_parallel_logits_to_logprobs(
-                    logits,
-                    loss_inputs.sequences,
-                    vocab_start_index=tp_rank * logits.shape[-1],
-                    vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-                    tp_group=tp_grp,
-                    inference_only=True,
-                    cp_group=None,
-                    chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
-                )
+            token_logprobs, _, _ = self._token_logprobs(logits, loss_inputs, state, temperature, inference_only=True)
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
         def forward_step(batch_iter, model):
             # Microbatches are held on the host; this rank's share was derived there and uploaded
             # in one copy while the previous microbatch computed (``MicrobatchPrefetcher``).
             microbatch = next(batch_iter)
-            model_inputs = microbatch.model_inputs
 
             if microbatch.replay_routes is not None:
                 install_replay_forward(microbatch.replay_routes)
 
             state: dict = {}
             with native_mtp_disabled(model):
-                if self._fused_lm_head:
-                    # Fused LM-head inference: the output_processor returns decoder
-                    # hidden states (not logits) and stashes the LM-head weight, so
-                    # collection_func can fold the projection into the chunked
-                    # log-prob op. Without this, a forward-only ref/old-logprob pass
-                    # (e.g. PPO reference logprobs) at long context would still
-                    # materialize the full [B, S, vocab//TP] logits and OOM.
-                    _op_ctx: dict = {}
-                    outputs = call_model_with_fused_lm_head(
-                        model,
-                        model_inputs.input_ids,
-                        model_inputs.position_ids,
-                        model_inputs.attention_mask,
-                        output_processor=fused_lm_head_output_processor,
-                        output_processor_context=_op_ctx,
-                        **model_inputs.model_kwargs(),
-                    )
-                    state["lm_head_weight"] = _op_ctx.get("lm_head_weight")
-                else:
-                    outputs = model(
-                        model_inputs.input_ids,
-                        model_inputs.position_ids,
-                        model_inputs.attention_mask,
-                        **model_inputs.model_kwargs(),
-                    )
+                outputs = self._call_model(model, microbatch.model_inputs, state)
 
             if microbatch.loss_inputs is not None and microbatch.loss_inputs.recover is not None:
                 outputs = recover_canonical_layout(outputs, microbatch.loss_inputs)
@@ -613,8 +654,6 @@ class MegatronModelWrapper:
             num_microbatches = loss_inputs.num_microbatches
             normalization = loss_inputs.loss_normalization
 
-            sparse_active_mask = loss_inputs.active_mask
-
             dp_size = mpu.get_data_parallel_world_size(with_context_parallel=False)
             tp_grp = mpu.get_tensor_model_parallel_group()
             tp_rank = mpu.get_tensor_model_parallel_rank()
@@ -645,119 +684,18 @@ class MegatronModelWrapper:
                     return loss, torch.tensor(num_tokens_local, dtype=torch.int, device=loss.device), metrics
                 return loss, metrics
 
-            # Fused LM-head: `logits` is actually decoder hidden states [B, S, H]
-            # (the output_processor skipped the projection); fold the LM-head into
-            # the chunked log-prob/entropy so the full logits tensor + its fp32
-            # grad are never materialized.
-            lm_head_weight = state.get("lm_head_weight")
-            fused_lm_head = self._fused_lm_head and lm_head_weight is not None
-            if fused_lm_head:
-                _v_local = int(lm_head_weight.shape[0])
-                fused_vocab_start, fused_vocab_end = tp_rank * _v_local, (tp_rank + 1) * _v_local
-
-            # temperature normalization (the fused path applies it inside the op)
-            if temperature != 1.0 and not fused_lm_head:
-                logits.div_(temperature)
-
-            shard_vocab_size = lm_head_weight.shape[0] if fused_lm_head else logits.shape[-1]
-            support_entropy = None
-            support_scores = None
-            fused_entropy_BS = None
-            compute_fused_entropy = resolved_loss_name != PolicyLossType.CROSS_ENTROPY
-            if self.cfg.algorithm.enable_sample_support_replay:
-                # The SFT path takes no entropy term at all, so nothing there pays for the row.
-                compute_support_entropy = resolved_loss_name != PolicyLossType.CROSS_ENTROPY
-                support_scores = score_prepared_sample_support(
-                    logits,
-                    loss_inputs.sample_support,
-                    vocab_start_index=tp_rank * shard_vocab_size,
-                    vocab_end_index=(tp_rank + 1) * shard_vocab_size,
-                    tp_group=tp_grp,
-                    lm_head_weight=lm_head_weight if fused_lm_head else None,
-                    temperature=temperature,
-                    chunk_size=self.cfg.logprobs_chunk_size,
-                    compute_entropy=compute_support_entropy,
-                    entropy_requires_grad=compute_support_entropy and loss_config.use_entropy_loss,
-                    centering_weight=centering_weight,
-                )
-                token_logprobs = support_scores.logprobs
-                support_entropy = support_scores.entropy
-            elif fused_lm_head and packed_targets is not None:
-                fused_result = from_parallel_hidden_to_logprobs_packed_sequences(
-                    logits,  # decoder hidden states [1, T, H]
-                    lm_head_weight,
-                    packed_targets,
-                    loss_inputs.cu_seqlens_padded,
-                    loss_inputs.seq_len,
-                    vocab_start_index=fused_vocab_start,
-                    vocab_end_index=fused_vocab_end,
-                    group=tp_grp,
-                    inference_only=False,
-                    cp_group=mpu.get_context_parallel_group(),
-                    chunk_size=self.cfg.logprobs_chunk_size,
-                    attention_mask=loss_inputs.attention_mask,
-                    sub_seq_lengths=loss_inputs.sub_seq_lengths,
-                    temperature=temperature,
-                    fused_backend=self._fused_lm_head_backend,
-                    softcap=self._logit_softcap,
-                    active_mask=sparse_active_mask,
-                    return_entropy=compute_fused_entropy,
-                    entropy_requires_grad=compute_fused_entropy and loss_config.use_entropy_loss,
-                    targets_rolled=True,
-                )
-                if compute_fused_entropy:
-                    token_logprobs, fused_entropy_BS = fused_result
-                else:
-                    token_logprobs = fused_result
-            elif fused_lm_head:
-                fused_result = from_parallel_hidden_to_logprobs(
-                    logits,  # decoder hidden states [B, S, H]
-                    lm_head_weight,
-                    loss_inputs.sequences,
-                    vocab_start_index=fused_vocab_start,
-                    vocab_end_index=fused_vocab_end,
-                    tp_group=tp_grp,
-                    inference_only=False,
-                    cp_group=None,
-                    chunk_size=self.cfg.logprobs_chunk_size,
-                    temperature=temperature,
-                    fused_backend=self._fused_lm_head_backend,
-                    softcap=self._logit_softcap,
-                    active_mask=sparse_active_mask,
-                    return_entropy=compute_fused_entropy,
-                    entropy_requires_grad=compute_fused_entropy and loss_config.use_entropy_loss,
-                )
-                if compute_fused_entropy:
-                    token_logprobs, fused_entropy_BS = fused_result
-                else:
-                    token_logprobs = fused_result
-            elif packed_targets is not None:
-                token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
-                    logits,
-                    packed_targets,
-                    loss_inputs.cu_seqlens_padded,
-                    loss_inputs.seq_len,
-                    vocab_start_index=tp_rank * logits.shape[-1],
-                    vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-                    group=tp_grp,
-                    inference_only=False,
-                    cp_group=mpu.get_context_parallel_group(),
-                    chunk_size=self.cfg.logprobs_chunk_size,
-                    attention_mask=loss_inputs.attention_mask,
-                    sub_seq_lengths=loss_inputs.sub_seq_lengths,
-                    targets_rolled=True,
-                )
-            else:
-                token_logprobs = from_parallel_logits_to_logprobs(
-                    logits,
-                    loss_inputs.sequences,
-                    vocab_start_index=tp_rank * logits.shape[-1],
-                    vocab_end_index=(tp_rank + 1) * logits.shape[-1],
-                    tp_group=tp_grp,
-                    inference_only=False,
-                    cp_group=None,
-                    chunk_size=self.cfg.logprobs_chunk_size,  # chunk seq dim to bound peak memory
-                )
+            # The SFT path takes no entropy term at all, so nothing there pays for it.
+            compute_entropy = resolved_loss_name != PolicyLossType.CROSS_ENTROPY
+            token_logprobs, scored_entropy, support_scores = self._token_logprobs(
+                logits,
+                loss_inputs,
+                state,
+                temperature,
+                inference_only=False,
+                compute_entropy=compute_entropy,
+                entropy_requires_grad=compute_entropy and loss_config.use_entropy_loss,
+                centering_weight=centering_weight,
+            )
 
             action_log_probs = token_logprobs[:, -num_actions:]
             if self._fused_lm_head_block_sparse and resolved_loss_name != PolicyLossType.CROSS_ENTROPY:
@@ -926,11 +864,8 @@ class MegatronModelWrapper:
 
             # RL path: add optional KL/entropy terms
             with torch.set_grad_enabled(loss_config.use_entropy_loss):
-                if support_entropy is not None:
-                    entropy = masked_mean(support_entropy[:, -num_actions:], loss_mask)
-                    entropy_for_loss = entropy
-                elif fused_entropy_BS is not None:
-                    entropy = masked_mean(fused_entropy_BS[:, -num_actions:], loss_mask)
+                if scored_entropy is not None:
+                    entropy = masked_mean(scored_entropy[:, -num_actions:], loss_mask)
                     entropy_for_loss = entropy
                 elif packed_targets is not None:
                     entropy, entropy_for_loss = vocab_parallel_entropy_packed_sequences(
@@ -1030,7 +965,6 @@ class MegatronModelWrapper:
             # Microbatches are held on the host; this rank's share was derived there and uploaded
             # in one copy while the previous microbatch computed (``MicrobatchPrefetcher``).
             microbatch = next(batch_iter)
-            model_inputs = microbatch.model_inputs
 
             # Exactly one forward setup per microbatch: each call appends this
             # microbatch's routes to the FIFO that activation-checkpoint
@@ -1068,27 +1002,7 @@ class MegatronModelWrapper:
             student_hidden = None
             student_model = None
             with maybe_capture_mtp_hidden(model, mtp_enabled) as capture:
-                if self._fused_lm_head:
-                    # output_processor returns decoder hidden states (not logits) and
-                    # stashes the LM-head weight; loss_func then fuses the projection.
-                    _op_ctx: dict = {}
-                    outputs = call_model_with_fused_lm_head(
-                        model,
-                        model_inputs.input_ids,
-                        model_inputs.position_ids,
-                        model_inputs.attention_mask,
-                        output_processor=fused_lm_head_output_processor,
-                        output_processor_context=_op_ctx,
-                        **model_inputs.model_kwargs(),
-                    )
-                    state["lm_head_weight"] = _op_ctx.get("lm_head_weight")
-                else:
-                    outputs = model(
-                        model_inputs.input_ids,
-                        model_inputs.position_ids,
-                        model_inputs.attention_mask,
-                        **model_inputs.model_kwargs(),
-                    )
+                outputs = self._call_model(model, microbatch.model_inputs, state)
                 # Replay the MTP block on *detached* trunk hidden states (decoupled draft forward)
                 # while still inside the capture context (so the MTP block stays in eval mode).
                 if mtp_enabled and capture is not None:
