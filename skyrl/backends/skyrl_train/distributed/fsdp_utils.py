@@ -16,7 +16,6 @@
 # limitations under the License.
 
 from collections import OrderedDict
-from dataclasses import asdict
 from enum import Enum
 from typing import Union
 
@@ -46,7 +45,7 @@ def serialize_peft_config(config) -> dict:
             return [serialize(item) for item in value]
         return value
 
-    return serialize(asdict(config))
+    return serialize(config.to_dict())
 
 
 if version.parse(torch.__version__) >= version.parse("2.6"):

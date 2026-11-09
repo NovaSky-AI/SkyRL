@@ -14,9 +14,10 @@ attributes (``supports_lora`` / ``packed_modules_mapping`` /
 packed submodules and skips the vision tower / projector.
 
 Applied at import time of ``new_inference_worker_wrap`` (the SkyRL worker
-extension), which every vLLM worker process imports before loading the model.
-Remove once vLLM adds ``SupportsLoRA`` to the class upstream (the patch then
-no-ops).
+extension), which every vLLM worker process imports before loading the model,
+and through the ``vllm.general_plugins`` entry point (``vllm_general_plugin``)
+for vLLM 0.33's config-time LoRA check in every other process. Remove both
+once vLLM adds ``SupportsLoRA`` to the class upstream (the patch then no-ops).
 """
 
 from __future__ import annotations
@@ -69,3 +70,33 @@ def apply_kimi_k25_lora_patch() -> None:
         )
 
     cls.get_mm_mapping = get_mm_mapping
+
+
+ARCH = "KimiK25ForConditionalGeneration"
+
+
+def __getattr__(name: str):
+    # Resolved lazily by vLLM's registry (see ``vllm_general_plugin``): importing this module must not import
+    # vLLM, so the patched class is only built when the registry asks for it.
+    if name == ARCH:
+        from vllm.model_executor.models.kimi_k25 import KimiK25ForConditionalGeneration
+
+        apply_kimi_k25_lora_patch()
+        return KimiK25ForConditionalGeneration
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def vllm_general_plugin() -> None:
+    """``vllm.general_plugins`` entry point: register the patched class under the same architecture.
+
+    From vLLM 0.33, ``VllmConfig`` rejects ``--enable-lora`` unless the registry's model info says the class
+    supports LoRA. That model info is inspected in a subprocess and cached on disk keyed by the hash of the
+    class's module file, so patching vLLM's class from the worker extension is too late, and patching it in
+    the plugin would leave a stale ``supports_lora=False`` cache entry valid. Pointing the architecture at
+    this module makes the inspection import the patched class, and keys the cache on this file.
+    """
+    try:
+        from vllm import ModelRegistry
+    except ImportError:
+        return
+    ModelRegistry.register_model(ARCH, f"{__name__}:{ARCH}")
