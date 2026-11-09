@@ -18,7 +18,7 @@ SkyRL builds against CUDA 13 and torch 2.14. It takes these packages from outsid
 | `causal-conv1d`, `mamba-ssm`, `transformer-engine`, `transformer-engine-cu13`, `transformer-engine-torch` | Astral's `cu130` index |
 | `flash-attn`, `flash-attn-4`, `flash-mla`, `fast-hadamard-transform` | SkyRL's prebuilt wheels on GitHub releases |
 
-**flashinfer's per-arch packages.** `flashinfer-jit-cache` is a metadata-only package. It depends on one `flashinfer-jit-cache-sm*` package per GPU architecture, and those are published only on flashinfer's `cu130` index. Two of them, `sm110a` and `sm121a`, exist only for aarch64, but uv applies one wheel's metadata to every platform. Pin them to aarch64 with `override-dependencies`, or x86_64 fails to resolve.
+**flashinfer's per-arch packages.** `flashinfer-jit-cache` is a metadata-only package. It depends on one `flashinfer-jit-cache-sm*` package per GPU architecture, and those are published only on flashinfer's `cu130` index.
 
 `[tool.uv.index]`, `[tool.uv.sources]` and `override-dependencies` in SkyRL's
 [`pyproject.toml`](https://github.com/NovaSky-AI/SkyRL/blob/main/pyproject.toml) have the exact indexes, versions and
