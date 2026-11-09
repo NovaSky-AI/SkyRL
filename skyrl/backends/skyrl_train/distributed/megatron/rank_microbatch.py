@@ -294,6 +294,12 @@ class RankMicrobatch:
     replay_routes: Optional[torch.Tensor]
     loss_inputs: Optional[LossInputs]
 
+    def tensors(self) -> list[torch.Tensor]:
+        """Every distinct tensor this microbatch holds."""
+        tensors: dict[int, torch.Tensor] = {}
+        _map_tensors(self, lambda tensor: tensors.setdefault(id(tensor), tensor))
+        return list(tensors.values())
+
     def to(self, device: torch.device | str | int) -> "RankMicrobatch":
         """Move every tensor to ``device`` in one pinned, non-blocking copy."""
         device = torch.device(device)

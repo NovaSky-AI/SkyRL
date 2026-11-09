@@ -21,7 +21,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     get_model_config,
-    make_batch_generator,
     model_owns_vlm_packing,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
@@ -39,6 +38,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.rank_microbatch import (
     HostMicrobatch,
     LossInputs,
     MicrobatchFeatures,
+    RankMicrobatch,
     RankView,
     build_rank_microbatch,
     recover_canonical_layout,
@@ -55,6 +55,7 @@ from skyrl.backends.skyrl_train.mtp.soft_ce import (
     shift_mask_for_mtp,
     unpadded_vocab_shard_width,
 )
+from skyrl.backends.skyrl_train.utils.microbatch_prefetch import MicrobatchPrefetcher
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
     PolicyLossType,
@@ -82,6 +83,13 @@ from skyrl.train.config import TrainerConfig
 from skyrl.train.fused_lm_head import FusedLmHeadBackend
 
 _MTP_STUDENT_LOGITS_KEY = "mtp_student_logits"
+
+
+def _upload_rank_microbatch(
+    micro_batch: dict, *, view: RankView, features: MicrobatchFeatures, device: torch.device
+) -> RankMicrobatch:
+    """This rank's share of a host microbatch, built on the host and uploaded in one copy."""
+    return build_rank_microbatch(micro_batch, view, features).to(device)
 
 
 class MegatronModelWrapper:
@@ -120,6 +128,9 @@ class MegatronModelWrapper:
         self._logit_softcap = getattr(config, "final_logit_softcapping", None) or None
         self.fp8_enabled = is_fp8_enabled(config.fp8)
         self.fp8_recipe = config.fp8_recipe
+        # Build and upload each microbatch while the previous one computes. The result is the same
+        # either way; tests turn it off to show that.
+        self.prefetch_microbatches = True
         # megatron-core's mlp_chunks_for_training splits the sequence with Tensor.chunk(n), which yields fewer
         # than n pieces unless n divides the length. Each MoE call is a set of expert-parallel collectives, so
         # a per-rank piece count hangs the EP group. Pad the unpacked length (the model inputs and the replay
@@ -277,6 +288,25 @@ class MegatronModelWrapper:
             mpu.get_tensor_model_parallel_world_size() == 1 or self.cfg.policy.sequence_parallel_size == 1
         ), "VLM + sequence parallelism unsupported"
 
+    def _microbatch_prefetchers(self, micro_batches: Sequence[dict], **feature_options: bool):
+        """Megatron's data iterator: one prefetcher per model chunk, staging that chunk's microbatches.
+
+        With virtual pipeline stages, each chunk reads its own iterator over the same microbatches.
+        """
+        device = torch.device("cuda", torch.cuda.current_device())
+        features = self._features(**feature_options)
+        prefetchers = [
+            MicrobatchPrefetcher(
+                micro_batches,
+                partial(_upload_rank_microbatch, view=self._rank_view(chunk), features=features, device=device),
+                RankMicrobatch.tensors,
+                device,
+                enabled=self.prefetch_microbatches,
+            )
+            for chunk in self.actor_module
+        ]
+        return prefetchers if len(prefetchers) > 1 else prefetchers[0]
+
     def _rank_view(self, model) -> RankView:
         """Describe this rank for one model chunk, as ``build_rank_microbatch`` consumes it."""
         return RankView.for_model(
@@ -421,11 +451,9 @@ class MegatronModelWrapper:
             return torch.tensor(0.0, device=token_logprobs.device), {"log_probs": token_logprobs}
 
         def forward_step(batch_iter, model):
-            # Microbatches are held on the host; derive this rank's share there and upload it
-            # in one copy just before its forward step.
-            microbatch = build_rank_microbatch(next(batch_iter), self._rank_view(model), self._features()).to(
-                torch.cuda.current_device()
-            )
+            # Microbatches are held on the host; this rank's share was derived there and uploaded
+            # in one copy while the previous microbatch computed (``MicrobatchPrefetcher``).
+            microbatch = next(batch_iter)
             model_inputs = microbatch.model_inputs
 
             if microbatch.replay_routes is not None:
@@ -462,9 +490,10 @@ class MegatronModelWrapper:
             if microbatch.loss_inputs is not None and microbatch.loss_inputs.recover is not None:
                 outputs = recover_canonical_layout(outputs, microbatch.loss_inputs)
 
+            batch_iter.prefetch()
             return outputs, partial(collection_func, loss_inputs=microbatch.loss_inputs, state=state)
 
-        batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
+        batch_generator = self._microbatch_prefetchers(micro_batches)
 
         summary = summarize_microbatches(micro_batches)
         with router_replay_schedule(summary.num_without_routes < len(micro_batches)):
@@ -998,12 +1027,9 @@ class MegatronModelWrapper:
             # and replay route selection. Especially relevant
             # after this PR https://github.com/NovaSky-AI/SkyRL/pull/1285.
             #
-            # Microbatches are held on the host; derive this rank's share there and upload it
-            # in one copy just before its forward step.
-            features = self._features(block_sparse=self._fused_lm_head_block_sparse, mtp=mtp_enabled)
-            microbatch = build_rank_microbatch(next(batch_iter), self._rank_view(model), features).to(
-                torch.cuda.current_device()
-            )
+            # Microbatches are held on the host; this rank's share was derived there and uploaded
+            # in one copy while the previous microbatch computed (``MicrobatchPrefetcher``).
+            microbatch = next(batch_iter)
             model_inputs = microbatch.model_inputs
 
             # Exactly one forward setup per microbatch: each call appends this
@@ -1090,10 +1116,12 @@ class MegatronModelWrapper:
             if microbatch.replay_routes is not None:
                 setup_per_microbatch_replay_backward()
 
+            batch_iter.prefetch()
             return outputs, partial(loss_func, loss_inputs=microbatch.loss_inputs, state=state)
 
-        # batch should be a list of micro-batches
-        batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.actor_module))
+        batch_generator = self._microbatch_prefetchers(
+            micro_batches, block_sparse=self._fused_lm_head_block_sparse, mtp=mtp_enabled
+        )
 
         replay_enabled = summary.num_without_routes < len(micro_batches)
 

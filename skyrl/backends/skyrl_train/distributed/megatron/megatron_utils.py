@@ -45,31 +45,6 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import Token
 ALL_MODULE_WRAPPER_CLASSNAMES = (DDP, Float16Module)
 
 
-def make_batch_generator(batches, vpp_size):
-    """
-    Creates a batch generator suitable for Megatron pipeline parallelism,
-    handling virtual pipeline parallelism (VPP).
-
-    If VPP is used (vpp_size > 1), it duplicates the batch iterator for each
-    virtual pipeline stage. Otherwise, it returns a single iterator.
-
-    Args:
-        batches: An iterable (e.g., list) of micro-batches.
-        vpp_size (int): The virtual pipeline model parallel size.
-
-    Returns:
-        An iterator or a list of iterators over the micro-batches.
-    """
-    if vpp_size > 1:
-        # has vpp
-        batch_generator = [batches] * vpp_size  # number of vpp chunks
-        batch_generator = [iter(b) for b in batch_generator]
-    else:
-        # no vpp
-        batch_generator = iter(batches)
-    return batch_generator
-
-
 def print_model_size(model: nn.Module, name: str = None):
     n_params, scale = get_model_size(model, scale="auto")
     if name is None:
