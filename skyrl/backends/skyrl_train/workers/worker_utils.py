@@ -161,8 +161,25 @@ class BaseBatchIterator:
         return self.data.batch_size
 
     @property
+    def seq_len(self) -> int:
+        """Every microbatch's padded sequence width."""
+        return self.data["sequences"].shape[1]
+
+    @property
     def num_actions(self) -> int:
         return self.data.metadata["response_length"]
+
+    @property
+    def has_routes(self) -> bool:
+        """Every real microbatch carries R3 routes."""
+        return self.data.get("rollout_expert_indices") is not None
+
+    def row_seqlens(self) -> List[List[int]]:
+        """Each row's attended sub-sequence lengths (one per row without controller packing)."""
+        sub_seq_lengths = self.data.get("sub_seq_lengths")
+        if sub_seq_lengths is None:
+            return [[int(n)] for n in self.data["attention_mask"].sum(dim=-1).tolist()]
+        return [[int(n) for n in row.tolist()] for row in sub_seq_lengths]
 
     def __iter__(self) -> Iterator[TrainingInputBatch]:
         raise NotImplementedError
@@ -170,6 +187,14 @@ class BaseBatchIterator:
     @property
     def num_padding_microbatches(self) -> int:
         return 0
+
+    def microbatch_rows(self) -> List[Optional[List[int]]]:
+        """Each microbatch's rows of ``data``, in order; None for a padding microbatch."""
+        raise NotImplementedError
+
+    def microbatch(self, index: int) -> TrainingInputBatch:
+        """Microbatch ``index``, built now: a caller can build each only when it trains it."""
+        raise NotImplementedError
 
     def reorder_and_combine_batches(self, batches: List[TensorBatch]) -> TensorBatch:
         """Reorder and combine output batches to form a single output."""
@@ -278,6 +303,16 @@ class SampleBasedBatchIterator(BaseBatchIterator):
     def __iter__(self) -> Iterator[TrainingInputBatch]:
         return iter(self._chunks)
 
+    def microbatch_rows(self) -> List[Optional[List[int]]]:
+        size = self.sample_batch_size
+        return [
+            list(range(start, min(start + size, self.total_batch_size)))
+            for start in range(0, self.total_batch_size, size)
+        ]
+
+    def microbatch(self, index: int) -> TrainingInputBatch:
+        return self._chunks[index]
+
     def reorder_and_combine_batches(self, batches: List[TensorBatch]) -> TensorBatch:
         """Concatenate output batches. No reordering needed for sample-based splitting."""
         return TensorBatch.cat(batches)
@@ -353,7 +388,9 @@ class TokenBasedBatchIterator(BaseBatchIterator):
 
         data = TrainingInputBatch(
             {
-                "sequences": torch.randint(0, 100, (batch_size, seq_len), device=device),
+                # Fixed ids: a padding microbatch may be built at any point of the schedule, and
+                # drawing them would advance the global RNG there.
+                "sequences": torch.zeros((batch_size, seq_len), dtype=torch.long, device=device),
                 "attention_mask": attention_mask,
                 "action_log_probs": 0.4 * torch.ones((batch_size, num_actions), device=device),
                 "base_action_log_probs": 0.3 * torch.ones((batch_size, num_actions), device=device),
@@ -412,11 +449,16 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         return self._num_padding_microbatches
 
     def __iter__(self) -> Iterator[TrainingInputBatch]:
-        for microbatch_indices in self._microbatches:
-            yield self._create_microbatch_from_indices(microbatch_indices)
+        for index in range(len(self)):
+            yield self.microbatch(index)
 
-        for _ in range(self._num_padding_microbatches):
-            yield self._create_padding_microbatch()
+    def microbatch_rows(self) -> List[Optional[List[int]]]:
+        return [*self._microbatches, *([None] * self._num_padding_microbatches)]
+
+    def microbatch(self, index: int) -> TrainingInputBatch:
+        if index < len(self._microbatches):
+            return self._create_microbatch_from_indices(self._microbatches[index])
+        return self._create_padding_microbatch()
 
     def reorder_and_combine_batches(self, batches: List[TensorBatch]) -> TensorBatch:
         """Reorder and combine output batches into a single batch with
@@ -516,22 +558,27 @@ class StoredShardBatchIterator(TokenBasedBatchIterator):
         return self._rows.num_rows
 
     @property
+    def seq_len(self) -> int:
+        return self._rows.padded_shape[0]
+
+    @property
     def num_actions(self) -> int:
         return self._rows.padded_shape[1]
 
-    def __iter__(self) -> Iterator[TrainingInputBatch]:
-        for index, indices in enumerate(self._microbatches):
-            self._pull_ahead(index)
-            yield self._create_microbatch_from_indices(indices)
-        for _ in range(self._num_padding_microbatches):
-            yield self._create_padding_microbatch()
+    @property
+    def has_routes(self) -> bool:
+        # Collation refuses a trained row without routes, and every shard has one that trains.
+        return self._rows.shard.collation.routes_expected
 
-    def _pull_ahead(self, index: int) -> None:
-        """Start pulling the payloads of the microbatches after ``index`` that are within reach."""
+    def row_seqlens(self) -> List[List[int]]:
+        return [[n] for n in self._rows.token_counts]
+
+    def microbatch(self, index: int) -> TrainingInputBatch:
         for ahead in range(index + 1, min(index + 1 + PULL_AHEAD_MICROBATCHES, len(self._microbatches))):
             if ahead not in self._pulled:
                 self._pulled.add(ahead)
                 pull_payloads(self._rows.payload_refs(self._microbatches[ahead]))
+        return super().microbatch(index)
 
     def _create_microbatch_from_indices(self, indices: List[int]) -> TrainingInputBatch:
         batch = self._rows.collate(indices)

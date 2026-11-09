@@ -5,7 +5,7 @@ import shutil
 import time
 from collections import defaultdict
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import megatron.core.parallel_state as mpu
 import ray
@@ -133,6 +133,12 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
     LoraSignature,
     iter_opts,
 )
+from skyrl.backends.skyrl_train.workers.megatron.lazy_microbatches import (
+    LazyMicrobatches,
+    MicrobatchSummary,
+    microbatch_seqlens,
+    per_token_loss_counts,
+)
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
@@ -190,6 +196,11 @@ apply_distopt_mixed_dtype_group_index_patch()
 # Grad norm / clip over mixed fp32/bf16 decoupled grads (precision-aware optimizer on mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#7279 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_clip_grads_mixed_dtype_patch()
+
+
+def _padded_microbatch_size(rows: List[Optional[List[int]]]) -> int:
+    """The batch size token-batched microbatches pad to: the largest's; a padding microbatch has one row."""
+    return max((len(microbatch_rows) if microbatch_rows is not None else 1 for microbatch_rows in rows), default=1)
 
 
 # Selective-recompute modules an attention variant cannot take.
@@ -867,44 +878,45 @@ class MegatronWorker:
     def _forward_logprobs_microbatches(self, microbatch_iterator: BaseBatchIterator) -> torch.Tensor:
         """``_forward_logprobs`` over the microbatches ``microbatch_iterator`` builds, in its input order."""
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
+        rows = microbatch_iterator.microbatch_rows()
+        # Megatron's schedule needs one micro_batch_size: token-batched microbatches pad to the largest.
+        mbs = _padded_microbatch_size(rows) if use_token_batching else len(rows[0])
 
-        host_microbatches = [
-            self._host_microbatch(BaseBatchIterator.batch_to_experience(micro), scores_only=True)
-            for micro in microbatch_iterator
-        ]
+        def build(index: int) -> HostMicrobatch:
+            experience = BaseBatchIterator.batch_to_experience(microbatch_iterator.microbatch(index))
+            micro = self._host_microbatch(experience, scores_only=True)
+            return micro.padded(mbs) if use_token_batching else micro
 
-        if use_token_batching:
-            # Pad microbatches to uniform batch size for Megatron compatibility
-            max_micro_bsz = max(m.batch_size for m in host_microbatches) if host_microbatches else 1
-            host_microbatches = [m.padded(max_micro_bsz) for m in host_microbatches]
-            mbs = max_micro_bsz
-        else:
-            mbs = host_microbatches[0].batch_size if host_microbatches else 1
+        routed = self.enable_router_replay and microbatch_iterator.has_routes
+        micro_batches = LazyMicrobatches(
+            build,
+            len(rows),
+            MicrobatchSummary(
+                num_actions=microbatch_iterator.num_actions, num_without_routes=0 if routed else len(rows)
+            ),
+            # One reader per virtual pipeline chunk.
+            readers=len(self.model.actor_module),
+        )
 
         self.model.eval()
-        seq_len = host_microbatches[0].sequences.shape[1]
         with torch.no_grad():
             log_probs = self.model.forward(
-                micro_batches=host_microbatches,
-                seq_len=seq_len,
+                micro_batches=micro_batches,
+                seq_len=microbatch_iterator.seq_len,
                 micro_batch_size=mbs,
                 temperature=self.cfg.algorithm.temperature,
             )
 
         output = TrainingOutputBatch({"output": log_probs.to("cpu")})
         if use_token_batching:
-            # The output from Megatron is concatenated across microbatches.
-            # We need to extract only the real (non-padded) samples and reorder.
+            # The output is concatenated across microbatches: keep the real samples, in input order.
             output = self._reorder_megatron_forward_output(output, microbatch_iterator, mbs)
         return output["output"]
 
     def _reorder_megatron_forward_output(
-        self, output: TrainingOutputBatch, microbatch_iterator, padded_mbs
+        self, output: TrainingOutputBatch, microbatch_iterator: TokenBasedBatchIterator, padded_mbs: int
     ) -> TrainingOutputBatch:
         """Reorder forward output from token-based microbatching back to original sample order."""
-        if not isinstance(microbatch_iterator, TokenBasedBatchIterator):
-            return output
-
         # With PP > 1 only the last pipeline stage produces real per-sample logprobs;
         # other stages return a dummy placeholder (e.g. [1, 1]). There is nothing to
         # reorder there, and indexing it by microbatch would raise — so return as-is,
@@ -922,7 +934,10 @@ class MegatronWorker:
         num_actions = log_probs.shape[1]
         reordered = torch.zeros((batch_size, num_actions), dtype=log_probs.dtype, device=log_probs.device)
 
-        for mb_idx, original_indices in enumerate(microbatch_iterator._microbatches):
+        for mb_idx, original_indices in enumerate(microbatch_iterator.microbatch_rows()):
+            if original_indices is None:
+                # A padding microbatch, which holds no real sample.
+                continue
             mb_log_probs = all_log_probs[mb_idx]
             for sample_idx, original_idx in enumerate(original_indices):
                 reordered[original_idx] = mb_log_probs[sample_idx]
@@ -975,7 +990,6 @@ class MegatronWorker:
             rollout_sample_support=experience.rollout_sample_support if self.enable_sample_support_replay else None,
             pixel_values=experience.pixel_values,
             image_grid_thw=experience.image_grid_thw,
-            is_padding_batch=bool(experience.metadata and experience.metadata.get("is_padding_batch", False)),
             loss=loss,
         )
 
@@ -1309,13 +1323,20 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
-    def _set_per_token_loss_counts(self, micro_buffer: List[HostMicrobatch]) -> None:
-        """Attach token counts for Megatron's per-token loss normalization, if it is on."""
-        if not getattr(get_model_config(self.actor_module[0]), "calculate_per_token_loss", False):
-            return
+    def _per_token_loss_counts(
+        self, microbatch_iterator: BaseBatchIterator, rows: List[Optional[List[int]]], padded_size: Optional[int]
+    ) -> Optional[Tuple[List[int], int]]:
+        """Each microbatch's and the call's token count for Megatron's per-token loss normalization,
+        from the plan alone, if it is on. Every rank joins the count's all-reduce.
+
+        ``padded_size`` is the batch size token-batched microbatches pad to; padding rows and
+        padding microbatches attend one token.
+        """
+        model_config = get_model_config(self.actor_module[0])
+        if not getattr(model_config, "calculate_per_token_loss", False):
+            return None
         if not self.cfg.remove_microbatch_padding:
             raise ValueError("calculate_per_token_loss requires trainer.remove_microbatch_padding=true")
-        model_config = get_model_config(self.actor_module[0])
         cp_size = mpu.get_context_parallel_world_size()
         align = get_packed_seq_align_size(
             mpu.get_tensor_model_parallel_world_size(),
@@ -1323,19 +1344,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             fp8_enabled=is_fp8_enabled(getattr(model_config, "fp8", None)),
             fp8_recipe=getattr(model_config, "fp8_recipe", None),
         )
-        local_counts = []
-        for m_batch in micro_buffer:
-            if m_batch.sub_seq_lengths is not None:
-                seqlens = [int(n) for row in m_batch.sub_seq_lengths for n in row.tolist()]
-            else:
-                seqlens = m_batch.attention_mask.sum(dim=-1).tolist()
-            padded_total = sum(-(-int(n) // align) * align for n in seqlens)
-            local_counts.append(padded_total // cp_size)
+        local_counts = per_token_loss_counts(
+            microbatch_seqlens(microbatch_iterator.row_seqlens(), rows, padded_size), align, cp_size
+        )
         total = torch.tensor(sum(local_counts), dtype=torch.int64, device=torch.cuda.current_device())
         torch.distributed.all_reduce(total, group=mpu.get_data_parallel_group(with_context_parallel=True))
-        for m_batch, count in zip(micro_buffer, local_counts):
-            m_batch.loss.num_tokens_local = count
-            m_batch.loss.num_tokens_global = int(total.item())
+        return local_counts, int(total.item())
 
     @_counts_train_compute
     def forward_backward(
@@ -1404,34 +1418,38 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         all_metrics = defaultdict(list)
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
 
-        # Both iterator modes share the same batch-to-experience conversion.
-        micro_buffer = [
-            self._host_microbatch(BaseBatchIterator.batch_to_experience(mb), loss_normalization)
-            for mb in microbatch_iterator
-        ]
-
+        rows = microbatch_iterator.microbatch_rows()
         num_padding_microbatches = microbatch_iterator.num_padding_microbatches
-        for m_batch in micro_buffer:
-            m_batch.loss.num_microbatches = len(micro_buffer)
-
-        if not micro_buffer:
-            # Still join the per-token count all-reduce so ranks with microbatches don't hang.
-            self._set_per_token_loss_counts(micro_buffer)
+        # Megatron's schedule needs one micro_batch_size: token-batched microbatches pad to the largest.
+        micro_bsz = _padded_microbatch_size(rows) if use_token_batching else len(rows[0]) if rows else 1
+        token_counts = self._per_token_loss_counts(microbatch_iterator, rows, micro_bsz if use_token_batching else None)
+        if not rows:
             return WorkerOutput()
 
-        seq_len = micro_buffer[0].sequences.shape[1]
+        def build(index: int) -> HostMicrobatch:
+            experience = BaseBatchIterator.batch_to_experience(microbatch_iterator.microbatch(index))
+            micro = self._host_microbatch(experience, loss_normalization)
+            micro.loss.num_microbatches = len(rows)
+            if use_token_batching:
+                micro = micro.padded(micro_bsz)
+            if token_counts is not None:
+                micro.loss.num_tokens_local, micro.loss.num_tokens_global = token_counts[0][index], token_counts[1]
+            return micro
 
-        if use_token_batching:
-            # With token-based batching, microbatches may have different batch sizes.
-            # Megatron's forward_backward_func requires uniform micro_batch_size,
-            # so pad all microbatches to the max batch size across microbatches.
-            max_micro_bsz = max(m.batch_size for m in micro_buffer)
-            micro_buffer = [m.padded(max_micro_bsz) for m in micro_buffer]
-            micro_bsz = max_micro_bsz
-        else:
-            micro_bsz = micro_buffer[0].batch_size
-
-        self._set_per_token_loss_counts(micro_buffer)
+        routed = self.enable_router_replay and microbatch_iterator.has_routes
+        # Each microbatch is built when the schedule reaches it, so the first trains while the
+        # rest are not built yet.
+        micro_buffer = LazyMicrobatches(
+            build,
+            len(rows),
+            MicrobatchSummary(
+                num_actions=microbatch_iterator.num_actions,
+                num_without_routes=0 if routed else len(rows),
+                num_tokens_global=token_counts[1] if token_counts is not None else None,
+            ),
+            readers=len(self.actor_module),
+        )
+        seq_len = microbatch_iterator.seq_len
 
         # Gate on first PP/TP/CP rank so we emit exactly one line per DP rank
         # (matches how status all-reduce treats metrics as identical within a DP group).
@@ -1440,7 +1458,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             and mpu.get_pipeline_model_parallel_rank() == 0
             and mpu.get_context_parallel_rank() == 0
         ):
-            real_tokens = int(sum(int(mb.attention_mask.sum().item()) for mb in micro_buffer))
+            real_tokens = sum(sum(seqlens) for seqlens in microbatch_iterator.row_seqlens())
             num_microbatches = len(micro_buffer)
             dp_rank = mpu.get_data_parallel_rank()
             logger.info(
@@ -1463,7 +1481,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         # Aggregate metrics across micro-batches
         loss_fn_output_batches = []
-        for m_batch, metrics in zip(micro_buffer, metrics_list):
+        for microbatch_rows, metrics in zip(rows, metrics_list):
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
             if metrics is None:
                 loss_fn_output_batches.append([])
@@ -1473,7 +1491,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # ...) are meaningless and would drag down the mean-reduced metrics. Summed
             # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but
             # excluding them here keeps both reductions correct.
-            if m_batch.is_padding_batch:
+            if microbatch_rows is None:
                 continue
             for k, v in metrics.items():
                 all_metrics[k].append(v)
