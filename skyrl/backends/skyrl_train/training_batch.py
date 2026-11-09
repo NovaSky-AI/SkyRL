@@ -664,6 +664,17 @@ def append_tensor_list_padding(key: str, field: TensorList, count: int) -> Tenso
     return TensorList.cat([field, TensorList([row.clone() for _ in range(count)])])
 
 
+def padding_rows(key: str, field: torch.Tensor, count: int) -> torch.Tensor:
+    """``count`` rows of dense ``key`` that train nothing: not real samples, without loss tokens, routers
+    masked. Other fields copy row 0, so their values have a valid shape and dtype and are never read."""
+    shape = (count, *field.shape[1:])
+    if key in ("loss_mask", REAL_SAMPLE_MASK):
+        return torch.zeros(shape, dtype=field.dtype, device=field.device)
+    if key == "router_padding_mask":
+        return torch.ones(shape, dtype=torch.bool, device=field.device)
+    return field[[0] * count].clone()
+
+
 def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) -> TrainingInputBatch:
     """Pad `pad_size` entries to `unpadded_batch`, return a newly allocated TrainingInputBatch. If pad_size is 0, return the original batch."""
     # TODO(Charlie): This incurs 2x CPU memory usage when pad_size > 0. Optimize when needed.
@@ -696,24 +707,13 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
             new_tensors[key] = append_packed_field_padding(
                 key, tensor, segment_lengths=[int(tensor.sequence_lengths[0])] * pad_size
             )
-        elif key == "loss_mask":
-            # Ensures that padding tensors don't count towards the loss
-            additional_dims = tensor.shape[1:]
-            padding_tensor = torch.zeros(pad_size, *additional_dims, dtype=tensor.dtype, device=tensor.device)
-            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
-        elif key == "router_padding_mask":
-            additional_dims = tensor.shape[1:]
-            padding_tensor = torch.ones(pad_size, *additional_dims, dtype=torch.bool, device=tensor.device)
-            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
         else:
-            # Copy row 0 `pad_size` times. Loss masked so values don't affect the loss. Just need valid shape/dtype.
             assert tensor.shape[0] > 0, f"Cannot pad empty tensor field {key!r}"
-            pad_indices = [0] * pad_size
-            padding_tensor = tensor[pad_indices].clone()
-            new_tensors[key] = torch.cat([tensor, padding_tensor], dim=0)
+            new_tensors[key] = torch.cat([tensor, padding_rows(key, tensor, pad_size)], dim=0)
 
+    real_sample_mask = unpadded_batch.real_sample_mask
     new_tensors[REAL_SAMPLE_MASK] = torch.cat(
-        [unpadded_batch.real_sample_mask, torch.zeros(pad_size, dtype=torch.bool)]
+        [real_sample_mask, padding_rows(REAL_SAMPLE_MASK, real_sample_mask, pad_size)]
     )
 
     # Update metadata as well.
