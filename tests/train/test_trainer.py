@@ -11,15 +11,12 @@ from jaxtyping import Float, Integer
 from pytest import approx
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_DTYPE,
-    SAMPLE_SUPPORT_PADDING,
-)
 from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.utils import validate_batch_sizes
+from tests.backends.skyrl_train.sample_support_helpers import csr
 from tests.train.util import example_dummy_config
 
 
@@ -131,15 +128,15 @@ def test_convert_to_training_input_records_sample_support_metrics(dummy_config, 
     )
     trainer.dispatch = MagicMock()
     trainer.dispatch.get_lcm_dp_size.return_value = 1
-    padding_row = [SAMPLE_SUPPORT_PADDING] * 4
+    padding_row = [-1] * 4
     generator_output = {
         "prompt_token_ids": [[1, 2], [3]],
         "response_ids": [[4, 5, 6], [7, 8]],
         "rewards": [[0.0, 0.0, 1.0], [0.0, 1.0]],
         "loss_masks": [[1, 1, 0], [1, 1]],
         "rollout_sample_support": [
-            np.array([[4, 14, -1, -1], [5, 15, 25, 35], padding_row], dtype=SAMPLE_SUPPORT_DTYPE),
-            np.array([[7, -1, -1, -1], [8, 18, 28, -1]], dtype=SAMPLE_SUPPORT_DTYPE),
+            csr([[4, 14, -1, -1], [5, 15, 25, 35], padding_row]),
+            csr([[7, -1, -1, -1], [8, 18, 28, -1]]),
         ],
     }
 

@@ -63,9 +63,11 @@ from skyrl.train.utils.async_batch_collator import AsyncBatchCollator
 from skyrl.train.utils.callbacks import (
     CallbackHandler,
     CallbackInput,
+    ReleaseOptimizerStateFilesCallback,
     TrainingCallback,
     TrainingControl,
 )
+from skyrl.train.utils.mfu import MFUTracker, mfu_support
 from skyrl.train.utils.ray_gpu_monitor import RayGpuMonitor
 from skyrl.train.utils.tracking import Tracking
 from skyrl.train.utils.trainer_utils import (
@@ -836,9 +838,18 @@ class SFTTrainer:
 
         self._num_training_gpus: int = cfg.placement.num_nodes * cfg.placement.num_gpus_per_node
         self._ray_gpu_monitor = RayGpuMonitor() if cfg.enable_ray_gpu_monitor else None
+        self._mfu_tracker: MFUTracker | None = None
+        if cfg.log_mfu:
+            self._mfu_tracker = MFUTracker(
+                mfu_support(cfg.strategy, cfg.megatron_config, cfg.model.lora.rank),
+                num_gpus=self._num_training_gpus,
+                prefix="train",
+            )
 
         self._callback_handler = CallbackHandler(callbacks)
         self._training_control = TrainingControl()
+        if self.cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir is not None:
+            self.add_callback(ReleaseOptimizerStateFilesCallback())
         # Loop metadata used to build CallbackInput. Populated in train().
         self._total_steps: int = 0
         self._steps_per_epoch: int = 0
@@ -934,10 +945,12 @@ class SFTTrainer:
         )
         if self.is_vlm:
             self.processor = get_processor(self.cfg.trainer.policy.model.path, **tokenizer_kwargs)
-            # Sequence packing / microbatch padding removal are unsupported for
-            # VLMs (3D RoPE + image token positions). ``remove_microbatch_padding``
-            # defaults to True, so disable both unconditionally and mirror the
-            # change onto the already-built trainer config the workers receive.
+            # VLM microbatch padding removal is enabled for RL only (Megatron, on
+            # Megatron-Bridge's Qwen3VLModel); VLM SFT runs unpacked for now.
+            # ``remove_microbatch_padding`` defaults to True, so disable both
+            # unconditionally and mirror the change onto the already-built trainer
+            # config the workers receive.
+            # TODO(xgui): enable remove_microbatch_padding for VLM SFT on Megatron.
             if self.sft_cfg.use_sequence_packing or self.sft_cfg.remove_microbatch_padding:
                 logger.warning("VLM detected: disabling sequence packing / microbatch padding removal.")
             self.sft_cfg.use_sequence_packing = False
@@ -1720,6 +1733,17 @@ class SFTTrainer:
             "peak_mem": {k: v for k, v in metrics.items() if k.startswith("peak_mem_")},
         }
 
+    def _mfu_metrics(self, batch: TrainingInputBatch, timings: dict[str, float]) -> dict[str, float]:
+        """Returns FLOPs/MFU metrics for one training step.
+
+        ``mfu`` divides by the workers' time in ``forward_backward`` and ``optim_step``, and
+        ``mfu_e2e`` by the driver's ``forward_backward`` + ``optim_step`` timings.
+        """
+        if self._mfu_tracker is None:
+            return {}
+        seconds = timings.get("forward_backward", 0.0) + timings.get("optim_step", 0.0)
+        return self._mfu_tracker.step_metrics(self.dispatch, batch, seconds)
+
     def _validate_batch_parallelism(self):
         """Validate that batch_size is compatible with data-parallel and micro-batch sizes."""
         batch_size = self.sft_cfg.batch_size
@@ -1742,9 +1766,7 @@ class SFTTrainer:
                 )
             return
         if self.sft_cfg.strategy == "megatron":
-            tp = self.sft_cfg.megatron_config.tensor_model_parallel_size
-            pp = self.sft_cfg.megatron_config.pipeline_model_parallel_size
-            dp_size = total_gpus // (tp * pp)
+            dp_size = self._dp_size()
         else:
             # FSDP: all GPUs are data-parallel
             dp_size = total_gpus
@@ -1797,17 +1819,29 @@ class SFTTrainer:
             f"(batch_size={self.sft_cfg.batch_size}, max_length={self.sft_cfg.max_length})..."
         )
 
+        self._total_steps = num_steps
+        self._steps_per_epoch = num_steps
+        self._current_epoch = 0
+        self._training_control.reset()
+
         if self._ray_gpu_monitor is not None:
             self._ray_gpu_monitor.start()
+        self._fire("on_train_start")
+        # SkyRL starts counting at step 1
+        self.global_step = 1
+        self._fire("on_epoch_start")
         if self._torch_profiler_enabled:
             self.dispatch.start_profile("policy")
         try:
-            for step in range(num_steps):
+            for step in range(1, num_steps + 1):
+                self.global_step = step
                 all_timings: dict[str, float] = {}
 
+                self._fire("on_step_start", batch=batch)
                 with Timer("step", all_timings):
                     step_result = self.train_step(batch, step)
                     all_timings.update(step_result["timings"])
+                self._fire("on_step_end", batch=batch, metrics=step_result)
 
                 actual_num_tokens = batch["attention_mask"].sum().item()
                 self._total_tokens_processed += actual_num_tokens
@@ -1821,11 +1855,13 @@ class SFTTrainer:
                     "train/actual_num_tokens": actual_num_tokens,
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
+                log_dict.update(self._mfu_metrics(batch, step_result["timings"]))
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
                 log_dict.update({f"memory/{k}": v for k, v in step_result["peak_mem"].items()})
                 if self._ray_gpu_monitor is not None:
                     log_dict.update(self._ray_gpu_monitor.flush())
 
+                self._fire("on_log", logs=log_dict)
                 self.tracker.log(log_dict, step=step, commit=True)
                 peak_mem_str = ", ".join(f"{k}={v:.1f}" for k, v in step_result["peak_mem"].items())
                 logger.info(
@@ -1838,6 +1874,8 @@ class SFTTrainer:
             if self._torch_profiler_enabled:
                 self.dispatch.stop_profile("policy")
 
+        self._fire("on_epoch_end")
+        self._fire("on_train_end")
         logger.info("Dummy SFT training complete!")
 
     @staticmethod
@@ -2052,6 +2090,7 @@ class SFTTrainer:
                     "train/batch_padded_seq_len": batch_padded_seq_len,
                     "train/total_tokens_processed": self._total_tokens_processed,
                 }
+                log_dict.update(self._mfu_metrics(batch, step_result["timings"]))
                 log_dict.update({f"timing/{k}": v for k, v in all_timings.items()})
                 if self._ray_gpu_monitor is not None:
                     log_dict.update(self._ray_gpu_monitor.flush())

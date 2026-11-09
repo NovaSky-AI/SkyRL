@@ -1,11 +1,25 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
-from skyrl.backends.skyrl_train.weight_sync.fp8 import resolve_fp8_spec
+from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+    BLOCKWISE_FP8,
+    MXFP8,
+    engine_exclude_list,
+    iter_serialized_fp8_tensors,
+    resolve_fp8_spec,
+    resolve_serialized_fp8_config,
+    resolve_user_provided_exclude_list,
+)
 from skyrl.backends.skyrl_train.weight_sync.fp8.models import GLM5_FP8_SPEC
 
 _LINEAR = (2048, 6144)
+
+
+def _glm5_config():
+    """A small GLM-5 layout: one dense layer, then two MoE layers of four routed experts."""
+    return SimpleNamespace(model_type="glm_moe_dsa", num_hidden_layers=3, first_k_dense_replace=1, n_routed_experts=4)
 
 
 def test_glm5_spec_resolves_for_glm_moe_dsa():
@@ -50,9 +64,83 @@ def test_glm5_bf16_weights_stay_unquantized(name):
     assert not GLM5_FP8_SPEC.should_quantize(name, _LINEAR)
 
 
-def test_glm5_spec_has_no_batched_experts_or_ignored_layers():
-    assert GLM5_FP8_SPEC.moe_expert_spec("model.layers.3.mlp.experts.gate_up_proj") is None
-    assert GLM5_FP8_SPEC.ignored_layers(SimpleNamespace(model_type="glm_moe_dsa")) == []
+def test_glm5_spec_has_no_stacked_experts_or_base_exclusions():
+    assert GLM5_FP8_SPEC.stacked_experts("model.layers.3.mlp.experts.gate_up_proj") is None
+    assert GLM5_FP8_SPEC.base_exclude_list(SimpleNamespace(model_type="glm_moe_dsa")) == []
+
+
+def test_glm5_fp8_modules_list_every_routed_expert_tensor():
+    attention = [
+        f"self_attn.{proj}"
+        for proj in ("q_a_proj", "q_b_proj", "kv_a_proj_with_mqa", "kv_b_proj", "o_proj", "indexer.wq_b")
+    ]
+    dense_mlp = ["mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"]
+    moe_mlp = [
+        *(f"mlp.experts.{expert}.{proj}" for expert in range(4) for proj in ("gate_proj", "up_proj", "down_proj")),
+        "mlp.shared_experts.gate_proj",
+        "mlp.shared_experts.up_proj",
+        "mlp.shared_experts.down_proj",
+    ]
+
+    assert GLM5_FP8_SPEC.fp8_modules(_glm5_config()) == [
+        *(f"model.layers.0.{module}" for module in attention + dense_mlp),
+        *(f"model.layers.{layer}.{module}" for layer in (1, 2) for module in attention + moe_mlp),
+    ]
+
+
+@pytest.mark.parametrize("wire_format", [BLOCKWISE_FP8, MXFP8])
+def test_glm5_every_fp8_module_is_a_tensor_the_sender_quantizes(wire_format):
+    for module in GLM5_FP8_SPEC.fp8_modules(_glm5_config(), wire_format):
+        assert GLM5_FP8_SPEC.should_quantize(f"{module}.weight", _LINEAR, wire_format), module
+
+
+def test_glm5_kv_b_proj_is_excludable_only_on_the_wire_that_sends_it_fp8():
+    hf_config = _glm5_config()
+
+    excluded = resolve_user_provided_exclude_list(GLM5_FP8_SPEC, hf_config, BLOCKWISE_FP8, ["*.kv_b_proj"])
+    assert sorted(excluded) == [f"model.layers.{layer}.self_attn.kv_b_proj" for layer in range(3)]
+    with pytest.raises(ValueError, match="'\\*.kv_b_proj' matches none"):
+        resolve_user_provided_exclude_list(GLM5_FP8_SPEC, hf_config, MXFP8, ["*.kv_b_proj"])
+
+
+def test_glm5_excludes_a_layers_routed_experts_as_vllms_expert_0_names():
+    hf_config = _glm5_config()
+
+    excluded = resolve_user_provided_exclude_list(GLM5_FP8_SPEC, hf_config, BLOCKWISE_FP8, ["*.layers.1.mlp.experts.*"])
+
+    assert len(excluded) == 4 * 3
+    assert engine_exclude_list(GLM5_FP8_SPEC, hf_config, BLOCKWISE_FP8, excluded) == [
+        "model.layers.1.mlp.experts.0.gate_proj",
+        "model.layers.1.mlp.experts.0.up_proj",
+        "model.layers.1.mlp.experts.0.down_proj",
+    ]
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "*.layers.1.mlp.experts.2.*",  # one expert
+        "*.layers.1.mlp.experts.*.down_proj",  # one projection of every expert
+        "*.gate_proj",  # every expert's gate_proj, along with the dense and shared-expert ones
+    ],
+)
+def test_glm5_rejects_excluding_part_of_a_layers_routed_experts(pattern):
+    with pytest.raises(ValueError, match="routed-expert tensors in 'model.layers.1.mlp.experts', but not"):
+        resolve_user_provided_exclude_list(GLM5_FP8_SPEC, _glm5_config(), BLOCKWISE_FP8, [pattern])
+
+
+def test_glm5_sender_keeps_excluded_expert_tensors_in_model_dtype():
+    config = resolve_serialized_fp8_config(BLOCKWISE_FP8, _glm5_config(), ["*.layers.1.mlp.experts.*"])
+    tensor = torch.randn(256, 256, dtype=torch.bfloat16)
+
+    name = "model.layers.1.mlp.experts.2.up_proj.weight"
+    excluded = list(iter_serialized_fp8_tensors(name, tensor, torch.bfloat16, config))
+    assert [(n, t.dtype) for n, t in excluded] == [(name, torch.bfloat16)]
+
+    other_layer = list(
+        iter_serialized_fp8_tensors("model.layers.2.mlp.experts.2.up_proj.weight", tensor, torch.bfloat16, config)
+    )
+    assert other_layer[0][1].dtype == torch.float8_e4m3fn
 
 
 def test_glm5_mxfp8_wire_requires_32_aligned_reduction_dim():
@@ -76,8 +164,8 @@ def test_glm5_mxfp8_wire_keeps_kv_b_proj_bf16():
     hf_config = SimpleNamespace(model_type="glm_moe_dsa")
     assert not GLM5_FP8_SPEC.should_quantize(name, (28672, 512), MXFP8)
     assert GLM5_FP8_SPEC.should_quantize(name, (28672, 512), BLOCKWISE_FP8)
-    assert GLM5_FP8_SPEC.ignored_layers(hf_config, MXFP8) == ["re:.*self_attn\\.kv_b_proj"]
-    assert GLM5_FP8_SPEC.ignored_layers(hf_config, BLOCKWISE_FP8) == []
+    assert GLM5_FP8_SPEC.base_exclude_list(hf_config, MXFP8) == ["re:.*self_attn\\.kv_b_proj"]
+    assert GLM5_FP8_SPEC.base_exclude_list(hf_config, BLOCKWISE_FP8) == []
 
 
 @pytest.mark.vllm
@@ -91,7 +179,7 @@ def test_glm5_mxfp8_ignore_matches_vllm_modules():
 
     from skyrl.backends.skyrl_train.weight_sync.fp8.models.base import MXFP8
 
-    ignore = GLM5_FP8_SPEC.ignored_layers(SimpleNamespace(model_type="glm_moe_dsa"), MXFP8)
+    ignore = GLM5_FP8_SPEC.base_exclude_list(SimpleNamespace(model_type="glm_moe_dsa"), MXFP8)
     # vLLM's GLM-5 (DeepSeek-V2/V3 family) packed modules.
     fused = {"fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"], "gate_up_proj": ["gate_proj", "up_proj"]}
     assert should_ignore_layer("model.layers.3.self_attn.kv_b_proj", ignore, fused)

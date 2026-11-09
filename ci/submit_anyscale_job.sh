@@ -245,7 +245,7 @@ print_remote_log_tail() {
     local logs
 
     echo "--- Anyscale log tail for ${job_name} (last ${LOG_TAIL_LINES} lines) ---" >&2
-    if ! logs="$(anyscale job logs --cloud "$CLOUD" --name "$job_name" --tail --max-lines "$LOG_TAIL_LINES" 2>/dev/null)"; then
+    if ! logs="$(anyscale_retry anyscale job logs --cloud "$CLOUD" --name "$job_name" --tail --max-lines "$LOG_TAIL_LINES")"; then
         echo "Unable to fetch Anyscale logs for ${job_name}." >&2
         return 0
     fi

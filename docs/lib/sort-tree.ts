@@ -1,6 +1,7 @@
 // Define the order of folders in the sidebar
 const folderOrder = [
   'getting-started',
+  'models',
   'datasets',
   'tutorials',
   'examples',
@@ -17,6 +18,7 @@ const folderOrder = [
 // Define the order of pages within each folder
 const pageOrder: Record<string, string[]> = {
   'getting-started': ['installation', 'quickstart', 'overview', 'development'],
+  'models': ['index', 'beam', 'glm', 'kimi', 'nemotron', 'qwen3_8_flash_next', 'qwen'],
   'datasets': ['dataset-preparation'],
   'tutorials': ['new_env', 'one_step_off_async', 'fully_async', 'tools_guide', 'skyrl_gym_generator'],
   'examples': ['megatron', 'ppo', 'lora', 'llm_as_a_judge', 'remote_server', 'training_backends', 'multi_turn_text2sql', 'search', 'quantized_rollouts', 'mini_swe_agent', 'openenv'],
