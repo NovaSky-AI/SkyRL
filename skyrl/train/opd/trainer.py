@@ -17,6 +17,12 @@ from typing import List, Optional, Tuple
 import torch
 from tqdm.asyncio import tqdm
 
+from skyrl.backends.skyrl_train.fields import (
+    BatchMetadataKey,
+    GeneratorInputKey,
+    GeneratorOutputKey,
+    TrainingField,
+)
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.utils import concatenate_generator_outputs
@@ -55,7 +61,7 @@ class OPDTrainer(RayPPOTrainer):
 
         Eval batches take the base path: one ``generator.generate`` call, no teacher.
         """
-        batch_metadata = input_batch.get("batch_metadata")
+        batch_metadata = input_batch.get(GeneratorInputKey.BATCH_METADATA)
         if batch_metadata is not None and batch_metadata.training_phase != "train":
             return await super().generate_on_input_batch(input_batch)
 
@@ -70,7 +76,9 @@ class OPDTrainer(RayPPOTrainer):
                 await asyncio.gather(
                     *(
                         self.teacher_client.compute_logprobs(prompt_ids, response_ids)
-                        for prompt_ids, response_ids in zip(output["prompt_token_ids"], output["response_ids"])
+                        for prompt_ids, response_ids in zip(
+                            output[GeneratorOutputKey.PROMPT_TOKEN_IDS], output[GeneratorOutputKey.RESPONSE_IDS]
+                        )
                     )
                 )
             )
@@ -105,7 +113,9 @@ class OPDTrainer(RayPPOTrainer):
             # Pure OPD: the estimator sees zeros, so A_rl = 0 and the advantage is the teacher term
             # alone. super() already logged the verifier's pass rate (reward/avg_pass_at_n) from the
             # real rewards, which stays a free diagnostic for pure runs.
-            generator_output["rewards"] = [[0.0] * len(reward) for reward in generator_output["rewards"]]
+            generator_output[GeneratorOutputKey.REWARDS] = [
+                [0.0] * len(reward) for reward in generator_output[GeneratorOutputKey.REWARDS]
+            ]
         return generator_output, uids
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
@@ -117,7 +127,7 @@ class OPDTrainer(RayPPOTrainer):
             )
         batch = super().convert_to_training_input(generator_output, uids)
         batch[TEACHER_LOGPROBS_KEY] = pad_teacher_logprobs(
-            teacher_logprobs, batch["response_mask"], batch.metadata.get("pad_size", 0)
+            teacher_logprobs, batch[TrainingField.RESPONSE_MASK], batch.metadata.get(BatchMetadataKey.PAD_SIZE, 0)
         )
         return batch
 
@@ -125,19 +135,19 @@ class OPDTrainer(RayPPOTrainer):
     def compute_advantages_and_returns(self, data: TrainingInputBatch) -> TrainingInputBatch:
         data = super().compute_advantages_and_returns(data)  # the configured estimator; moves data to CPU
         teacher_logprobs: torch.Tensor = data.pop(TEACHER_LOGPROBS_KEY)  # never shipped to the workers
-        action_log_probs = data["action_log_probs"]
+        action_log_probs = data[TrainingField.ACTION_LOG_PROBS]
         if action_log_probs is None:
             raise RuntimeError(
                 "action_log_probs is None: the policy forward pass was skipped, but the OPD term needs the "
                 "old-policy logprobs (see validate_opd_cfg)"
             )
         advantages, metrics = apply_opd_to_advantages(
-            advantages=data["advantages"],
+            advantages=data[TrainingField.ADVANTAGES],
             action_log_probs=action_log_probs,
             teacher_logprobs=teacher_logprobs.to(action_log_probs.device),
-            loss_mask=data["loss_mask"],
+            loss_mask=data[TrainingField.LOSS_MASK],
             kl_coef=self.cfg.trainer.algorithm.opd.kl_coef,
         )
-        data["advantages"] = advantages
+        data[TrainingField.ADVANTAGES] = advantages
         self.all_metrics.update(metrics)
         return data

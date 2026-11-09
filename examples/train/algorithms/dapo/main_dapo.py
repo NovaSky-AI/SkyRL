@@ -3,18 +3,18 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo
 """
 
 import sys
-
-import ray
-import torch
 from dataclasses import dataclass
 from typing import List, Tuple, Union
 
+import ray
+import torch
+
+from skyrl.backends.skyrl_train.fields import GeneratorOutputKey
 from skyrl.train.config import AlgorithmConfig, make_config
+from skyrl.train.entrypoints.main_base import BasePPOExp
+from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import initialize_ray, validate_cfg
-from skyrl.train.entrypoints.main_base import BasePPOExp
-
-from skyrl.train.generators.base import GeneratorOutput
 
 
 @dataclass
@@ -98,11 +98,11 @@ class DAPOTrainer(RayPPOTrainer):
         overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor
         if self.cfg.generator.step_wise_trajectories:
             raise ValueError("`DAPOTrainer` does not support `generator.step_wise_trajectories=true`.")
-        response_lengths = [len(response) for response in generator_output["response_ids"]]
+        response_lengths = [len(response) for response in generator_output[GeneratorOutputKey.RESPONSE_IDS]]
         # NOTE: this is only valid for single turn generation
         max_response_length = self.cfg.generator.sampling_params.max_generate_length
-        generator_output["rewards"] = apply_soft_overlong_punishment(
-            generator_output["rewards"],
+        generator_output[GeneratorOutputKey.REWARDS] = apply_soft_overlong_punishment(
+            generator_output[GeneratorOutputKey.REWARDS],
             response_lengths,
             max_response_length,
             overlong_buffer_len,

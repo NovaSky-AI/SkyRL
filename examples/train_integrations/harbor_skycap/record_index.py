@@ -49,6 +49,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from loguru import logger
 
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.train.utils.callbacks import CallbackInput, TrainingCallback, TrainingControl
 
 ARTIFACT_TYPE = "skycap-records"
@@ -145,7 +146,7 @@ def trained_keys(callback_input: CallbackInput) -> Optional[Set[Tuple[str, int]]
     if callback_input.streamed_rows is not None:
         tokens = callback_input.streamed_rows.trained_loss_tokens
     else:
-        loss_mask = None if callback_input.batch is None else callback_input.batch.get("loss_mask")
+        loss_mask = None if callback_input.batch is None else callback_input.batch[TrainingField.LOSS_MASK]
         if loss_mask is None:
             return {(str(t.instance_id), t.repetition_id) for t in ids}
         tokens = loss_mask[: len(ids)].sum(dim=-1).tolist()

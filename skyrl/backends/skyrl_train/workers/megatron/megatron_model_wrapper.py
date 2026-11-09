@@ -44,6 +44,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.rank_microbatch import (
     build_rank_microbatch,
     recover_canonical_layout,
 )
+from skyrl.backends.skyrl_train.fields import ForwardOutputKey
 from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits
 from skyrl.backends.skyrl_train.mtp.hidden_capture import (
     maybe_capture_mtp_hidden,
@@ -854,7 +855,7 @@ class MegatronModelWrapper:
                 metrics = {
                     "loss": unscaled_loss.detach().item(),
                     "response_length": num_actions,
-                    "loss_fn_outputs": loss_fn_outputs,
+                    ForwardOutputKey.LOSS_FN_OUTPUTS: loss_fn_outputs,
                 }
                 for key, value in loss_metrics.items():
                     metrics["loss_metrics/" + key] = value
@@ -943,7 +944,7 @@ class MegatronModelWrapper:
                 "policy_loss": policy_loss.detach().item(),
                 "policy_entropy": entropy.detach().item(),
                 "policy_kl": kl_loss.detach().item(),
-                "loss_fn_outputs": loss_fn_outputs,
+                ForwardOutputKey.LOSS_FN_OUTPUTS: loss_fn_outputs,
             }
             if draft_loss is not None:
                 metrics["mtp_loss"] = draft_loss.detach().item()

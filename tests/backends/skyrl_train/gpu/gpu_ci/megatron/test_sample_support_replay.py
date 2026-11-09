@@ -14,10 +14,10 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
 )
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
 from skyrl.backends.skyrl_train.utils.packed_tensor import cu_seqlens_from_lengths
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     sample_support_scores,
 )
@@ -112,7 +112,7 @@ def _training_inputs() -> tuple[TrainingInputBatch, TrainingInputBatch]:
     }
     support = _synthetic_support(responses, tokenizer.vocab_size)
     full_vocabulary = TrainingInputBatch(fields)
-    support_conditioned = TrainingInputBatch({**fields, SAMPLE_SUPPORT_FIELD: support})
+    support_conditioned = TrainingInputBatch({**fields, TrainingField.ROLLOUT_SAMPLE_SUPPORT: support})
     for batch in (full_vocabulary, support_conditioned):
         batch.metadata = {"response_length": response_mask.shape[1]}
     return full_vocabulary, support_conditioned

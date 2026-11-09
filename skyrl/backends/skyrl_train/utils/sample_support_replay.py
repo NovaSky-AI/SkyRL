@@ -9,10 +9,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     PackedScatter,
     TokenLayout,
 )
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import MemberWeight
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import PackedRaggedTensor
 from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_FIELD,
     SAMPLE_SUPPORT_NO_ROW,
     SAMPLE_SUPPORT_TORCH_DTYPE,
     PackedSampleSupport,
@@ -27,7 +27,7 @@ def missing_sample_support_message(backend: str) -> str:
     """Describe how to enable and forward a missing support payload."""
     return (
         f"sample-support replay is enabled but the {backend} forward received no "
-        f"{SAMPLE_SUPPORT_FIELD!r}. Set generator.inference_engine.enable_return_sample_support_set=true "
+        f"{TrainingField.ROLLOUT_SAMPLE_SUPPORT!r}. Set generator.inference_engine.enable_return_sample_support_set=true "
         "so the sampler records it; if it is already set, the generator is dropping the field before "
         "the trainer sees it -- SkyRLGymGenerator forwards it, and a custom generator must too."
     )

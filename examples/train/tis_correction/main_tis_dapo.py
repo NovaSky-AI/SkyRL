@@ -3,18 +3,18 @@ uv run --isolated --extra fsdp -m examples.train.tis_correction.main_tis_dapo
 """
 
 import sys
-
-import ray
-import torch
 from dataclasses import dataclass
 from typing import List, Tuple
 
+import ray
+import torch
+
+from skyrl.backends.skyrl_train.fields import GeneratorOutputKey
 from skyrl.train.config import AlgorithmConfig, make_config
+from skyrl.train.entrypoints.main_base import BasePPOExp
+from skyrl.train.generators.base import GeneratorOutput
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import initialize_ray, validate_cfg
-from skyrl.train.entrypoints.main_base import BasePPOExp
-
-from skyrl.train.generators.base import GeneratorOutput
 
 
 @dataclass
@@ -52,9 +52,9 @@ class DAPOTrainer(RayPPOTrainer):
         overlong_buffer_len = self.cfg.trainer.algorithm.overlong_buffer_len
         overlong_buffer_penalty_factor = self.cfg.trainer.algorithm.overlong_buffer_penalty_factor
         # modify rewards here
-        prompt_token_ids = generator_output["prompt_token_ids"]
-        response_ids = generator_output["response_ids"]
-        rewards = generator_output["rewards"]
+        prompt_token_ids = generator_output[GeneratorOutputKey.PROMPT_TOKEN_IDS]
+        response_ids = generator_output[GeneratorOutputKey.RESPONSE_IDS]
+        rewards = generator_output[GeneratorOutputKey.REWARDS]
 
         assert not isinstance(rewards[0], list), "we assume verifiable sequence level rewards here"
 
@@ -84,7 +84,7 @@ class DAPOTrainer(RayPPOTrainer):
                 # if self.cfg.generator.apply_overlong_filtering is true, loss masks are already set to 0 for these responses
                 rewards[i] = 0.0
 
-        generator_output["rewards"] = rewards
+        generator_output[GeneratorOutputKey.REWARDS] = rewards
 
         # use base class impl for metrics and per-token reward conversion
         return super().postprocess_generator_output(generator_output, uids)

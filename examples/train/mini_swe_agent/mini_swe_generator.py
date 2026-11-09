@@ -12,6 +12,7 @@ from minisweagent.config import get_config_path
 from minisweagent.models import get_model
 from minisweagent.run.utils.save import save_traj
 
+from skyrl.backends.skyrl_train.fields import GeneratorInputKey, GeneratorOutputKey
 from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     InferenceEngineInterface,
@@ -234,10 +235,10 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         Returns:
             GeneratorOutput
         """
-        prompts = input_batch["prompts"]
-        env_extras = input_batch["env_extras"]
-        trajectory_ids = input_batch["trajectory_ids"]
-        batch_metadata = input_batch["batch_metadata"]
+        prompts = input_batch[GeneratorInputKey.PROMPTS]
+        env_extras = input_batch[GeneratorInputKey.ENV_EXTRAS]
+        trajectory_ids = input_batch[GeneratorInputKey.TRAJECTORY_IDS]
+        batch_metadata = input_batch[GeneratorInputKey.BATCH_METADATA]
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
         max_input_length = self.generator_cfg.max_input_length
         sampling_params = get_sampling_params_for_backend(
@@ -274,13 +275,13 @@ class MiniSweAgentGenerator(SkyRLGymGenerator):
         rollout_metrics = get_rollout_metrics(responses, rewards)
 
         generator_output: GeneratorOutput = {
-            "prompt_token_ids": prompt_token_ids,
-            "response_ids": responses,
-            "rewards": rewards,
-            "loss_masks": loss_masks,
-            "stop_reasons": stop_reasons,
-            "rollout_metrics": rollout_metrics,
-            "rollout_logprobs": None,
+            GeneratorOutputKey.PROMPT_TOKEN_IDS: prompt_token_ids,
+            GeneratorOutputKey.RESPONSE_IDS: responses,
+            GeneratorOutputKey.REWARDS: rewards,
+            GeneratorOutputKey.LOSS_MASKS: loss_masks,
+            GeneratorOutputKey.STOP_REASONS: stop_reasons,
+            GeneratorOutputKey.ROLLOUT_METRICS: rollout_metrics,
+            GeneratorOutputKey.ROLLOUT_LOGPROBS: None,
         }
 
         return generator_output

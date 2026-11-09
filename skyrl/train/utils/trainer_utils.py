@@ -14,8 +14,8 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
+from skyrl.backends.skyrl_train.fields import GeneratorOutputKey
 from skyrl.backends.skyrl_train.utils.io import io
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     MINIBATCH_ROLLOUT_LOGPROB_DIFF_MEAN_KEY,
@@ -281,13 +281,13 @@ def get_intra_group_completion_time_std_cv(
     is the coefficient of variation (``std / mean``). Both are ``None`` when the group recorded no
     completion times or has fewer than two trajectories.
     """
-    traj_times = generator_output.get("trajectory_generation_times")
+    traj_times = generator_output.get(GeneratorOutputKey.TRAJECTORY_GENERATION_TIMES)
     group_std = None
     group_cv = None
     if traj_times and len(traj_times) > 1:
         # For step wise training, each turn /step contributes one entry.
         # Only take the metrics from the last step
-        is_last_step = generator_output.get("is_last_step")
+        is_last_step = generator_output.get(GeneratorOutputKey.IS_LAST_STEP)
         if is_last_step:
             traj_times = [t for t, last in zip(traj_times, is_last_step) if last]
         traj_times_arr = np.array(traj_times, dtype=np.float64)
@@ -341,8 +341,12 @@ def dump_per_dataset_eval_results(
     """Dump evaluation results per dataset and overall aggregated results."""
 
     # Prepare common data
-    input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
-    output_responses = [tokenizer.decode(response) for response in concat_generator_outputs["response_ids"]]
+    input_prompts = [
+        tokenizer.decode(prompt) for prompt in concat_generator_outputs[GeneratorOutputKey.PROMPT_TOKEN_IDS]
+    ]
+    output_responses = [
+        tokenizer.decode(response) for response in concat_generator_outputs[GeneratorOutputKey.RESPONSE_IDS]
+    ]
 
     # Group indices by data source
     data_source_indices = {}
@@ -363,8 +367,10 @@ def dump_per_dataset_eval_results(
                 entry = {
                     "input_prompt": input_prompts[i],
                     "output_response": output_responses[i],
-                    "score": concat_generator_outputs["rewards"][i],
-                    "stop_reason": concat_generator_outputs.get("stop_reasons", [None] * len(input_prompts))[i],
+                    "score": concat_generator_outputs[GeneratorOutputKey.REWARDS][i],
+                    "stop_reason": concat_generator_outputs.get(
+                        GeneratorOutputKey.STOP_REASONS, [None] * len(input_prompts)
+                    )[i],
                     "env_class": concat_all_envs[i],
                     "env_extras": concat_env_extras[i],
                     "data_source": data_source,
@@ -456,7 +462,7 @@ def handle_replace_sampling(
     min_replace_ratio = sampling_config["min_replace_ratio"]
 
     # Extract rewards and convert to sequence-level if needed
-    rewards_list = generator_output["rewards"]
+    rewards_list = generator_output[GeneratorOutputKey.REWARDS]
     if rewards_list and isinstance(rewards_list[0], list):
         # Token-level rewards: sum to get sequence rewards
         rewards = np.array([sum(r) for r in rewards_list])
@@ -544,7 +550,7 @@ def handle_filter_sampling(
     n_samples_per_prompt = sampling_config["n_samples_per_prompt"]
 
     # Extract rewards from collected output
-    rewards_list = generator_output["rewards"]
+    rewards_list = generator_output[GeneratorOutputKey.REWARDS]
     if rewards_list and isinstance(rewards_list[0], list):
         # Token-level rewards: sum to get sequence rewards
         rewards = np.array([sum(r) for r in rewards_list])
@@ -701,11 +707,11 @@ def validate_generator_output(
         support_scores_expected: score centering is on, so every support present must carry the
             sampler's member logprobs.
     """
-    if len(generator_output["response_ids"]) <= 0:
+    if len(generator_output[GeneratorOutputKey.RESPONSE_IDS]) <= 0:
         raise RuntimeError("No outputs generated")
 
-    num_responses = len(generator_output["response_ids"])
-    num_prompt_tokens = len(generator_output["prompt_token_ids"])
+    num_responses = len(generator_output[GeneratorOutputKey.RESPONSE_IDS])
+    num_prompt_tokens = len(generator_output[GeneratorOutputKey.PROMPT_TOKEN_IDS])
 
     if not step_wise:
         assert num_prompts == num_responses, f"Mismatch between prompts ({num_prompts}) and responses ({num_responses})"
@@ -717,27 +723,31 @@ def validate_generator_output(
     # make sure all batch elements have the same length as response_ids (which should be non-zero)
     for key in generator_output:
         if isinstance(generator_output[key], list) and key in [
-            "response_ids",
-            "loss_masks",
-            "rewards",
-            "rollout_logprobs",
-            "stop_reasons",
-            "trajectory_ids",
-            "rollout_expert_indices",
-            "rollout_sample_support",
-            "is_last_step",
-            "pixel_values",
-            "image_grid_thw",
+            GeneratorOutputKey.RESPONSE_IDS,
+            GeneratorOutputKey.LOSS_MASKS,
+            GeneratorOutputKey.REWARDS,
+            GeneratorOutputKey.ROLLOUT_LOGPROBS,
+            GeneratorOutputKey.STOP_REASONS,
+            GeneratorOutputKey.TRAJECTORY_IDS,
+            GeneratorOutputKey.ROLLOUT_EXPERT_INDICES,
+            GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT,
+            GeneratorOutputKey.IS_LAST_STEP,
+            GeneratorOutputKey.PIXEL_VALUES,
+            GeneratorOutputKey.IMAGE_GRID_THW,
         ]:
-            assert len(generator_output[key]) == len(generator_output["response_ids"]), (
+            assert len(generator_output[key]) == len(generator_output[GeneratorOutputKey.RESPONSE_IDS]), (
                 f"Generator output {key} length must be equal to response_ids length, "
-                f"got {len(generator_output[key])} and {len(generator_output['response_ids'])}"
+                f"got {len(generator_output[key])} and {len(generator_output[GeneratorOutputKey.RESPONSE_IDS])}"
             )
 
     # make sure that each element of response ids and loss masks are all the same length
     # (and token level rewards if used)
     for i, (response_ids, loss_masks, rewards) in enumerate(
-        zip(generator_output["response_ids"], generator_output["loss_masks"], generator_output["rewards"])
+        zip(
+            generator_output[GeneratorOutputKey.RESPONSE_IDS],
+            generator_output[GeneratorOutputKey.LOSS_MASKS],
+            generator_output[GeneratorOutputKey.REWARDS],
+        )
     ):
         assert len(response_ids) == len(loss_masks), (
             f"Response ids and loss masks must have the same length, "
@@ -749,18 +759,18 @@ def validate_generator_output(
                 f"for sample {i} got {len(rewards)} and {len(response_ids)}"
             )
 
-        if generator_output["rollout_logprobs"]:
-            assert len(response_ids) == len(generator_output["rollout_logprobs"][i]), (
+        if generator_output[GeneratorOutputKey.ROLLOUT_LOGPROBS]:
+            assert len(response_ids) == len(generator_output[GeneratorOutputKey.ROLLOUT_LOGPROBS][i]), (
                 f"Response ids and rollout logprobs must have the same length, "
-                f"for sample {i} got {len(response_ids)} and {len(generator_output['rollout_logprobs'][i])}"
+                f"for sample {i} got {len(response_ids)} and {len(generator_output[GeneratorOutputKey.ROLLOUT_LOGPROBS][i])}"
             )
 
     # loss masks should be non-zero for at least one element for trainer
-    if np.concatenate(generator_output["loss_masks"]).sum() == 0:
+    if np.concatenate(generator_output[GeneratorOutputKey.LOSS_MASKS]).sum() == 0:
         logger.warning("All outputs are loss masked, which may lead to NaN loss, please check your generation logic!!")
 
     # check that the rewards are either List[float-like] or List[List[float-like]]
-    rewards = generator_output["rewards"]
+    rewards = generator_output[GeneratorOutputKey.REWARDS]
     if isinstance(rewards[0], list):
         assert all(
             isinstance(reward, list) for reward in rewards
@@ -772,28 +782,28 @@ def validate_generator_output(
 
     _validate_per_token_side_channels(generator_output, step_wise)
 
-    if routes_expected and generator_output.get("rollout_expert_indices") is None:
+    if routes_expected and generator_output.get(GeneratorOutputKey.ROLLOUT_EXPERT_INDICES) is None:
         # A batch with nothing to train (every rollout failed) has nothing to replay either.
-        assert not any(any(mask) for mask in generator_output["loss_masks"]), (
+        assert not any(any(mask) for mask in generator_output[GeneratorOutputKey.LOSS_MASKS]), (
             "generator.inference_engine.enable_return_routed_experts=True, but the generator returned no "
             "rollout_expert_indices for a batch with trainable tokens, so routing replay would silently be "
             "skipped. Use a generator that returns routed experts, or disable R3."
         )
-    if support_expected and generator_output.get(SAMPLE_SUPPORT_FIELD) is None:
-        assert not any(any(mask) for mask in generator_output["loss_masks"]), (
+    if support_expected and generator_output.get(GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT) is None:
+        assert not any(any(mask) for mask in generator_output[GeneratorOutputKey.LOSS_MASKS]), (
             "trainer.algorithm.enable_sample_support_replay=True, but the generator returned no "
-            f"{SAMPLE_SUPPORT_FIELD} for a batch with trainable tokens. Use a generator that captures "
+            f"{GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT} for a batch with trainable tokens. Use a generator that captures "
             "sampler support (it must call generate with return_sample_support), or disable replay."
         )
-    if support_scores_expected and generator_output.get(SAMPLE_SUPPORT_FIELD) is not None:
+    if support_scores_expected and generator_output.get(GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT) is not None:
         # A support with no members (a placeholder row) has nothing to score.
         unscored = [
             i
-            for i, support in enumerate(generator_output[SAMPLE_SUPPORT_FIELD])
+            for i, support in enumerate(generator_output[GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT])
             if support.logprobs is None and support.num_members
         ]
         assert not unscored, (
-            f"trainer.algorithm.enable_score_centering=True, but {len(unscored)} {SAMPLE_SUPPORT_FIELD} entries "
+            f"trainer.algorithm.enable_score_centering=True, but {len(unscored)} {GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT} entries "
             f"(first: {unscored[0]}) carry no sampler member logprobs"
         )
 
@@ -803,13 +813,13 @@ def validate_generator_output(
 
 def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wise: bool):
     """Validate side-channel row counts against their token domains."""
-    rollout_expert_indices = generator_output.get("rollout_expert_indices")
-    rollout_sample_support = generator_output.get(SAMPLE_SUPPORT_FIELD)
-    prompt_token_ids = generator_output["prompt_token_ids"]
-    response_ids = generator_output["response_ids"]
+    rollout_expert_indices = generator_output.get(GeneratorOutputKey.ROLLOUT_EXPERT_INDICES)
+    rollout_sample_support = generator_output.get(GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT)
+    prompt_token_ids = generator_output[GeneratorOutputKey.PROMPT_TOKEN_IDS]
+    response_ids = generator_output[GeneratorOutputKey.RESPONSE_IDS]
 
     if rollout_expert_indices is not None:
-        loss_masks = generator_output["loss_masks"]
+        loss_masks = generator_output[GeneratorOutputKey.LOSS_MASKS]
         for i, sample_indices in enumerate(rollout_expert_indices):
             assert sample_indices is not None, f"rollout_expert_indices[{i}] is None, expected captured routes"
             prompt_length = len(prompt_token_ids[i])
@@ -840,9 +850,11 @@ def _validate_per_token_side_channels(generator_output: GeneratorOutput, step_wi
 
     if rollout_sample_support is not None:
         for i, sample_support in enumerate(rollout_sample_support):
-            assert sample_support is not None, f"{SAMPLE_SUPPORT_FIELD}[{i}] is None, expected captured support"
+            assert (
+                sample_support is not None
+            ), f"{GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT}[{i}] is None, expected captured support"
             assert len(sample_support) == len(response_ids[i]), (
-                f"{SAMPLE_SUPPORT_FIELD}[{i}] has {len(sample_support)} support rows for "
+                f"{GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT}[{i}] has {len(sample_support)} support rows for "
                 f"{len(response_ids[i])} response tokens, expected one row per response token"
             )
 
@@ -861,14 +873,14 @@ def _validate_step_wise_fields(generator_output: GeneratorOutput, num_responses:
     For more, see https://docs.skyrl.ai/docs/tutorials/step-wise-training#generatoroutput-format
     """
     assert (
-        generator_output.get("is_last_step") is not None
+        generator_output.get(GeneratorOutputKey.IS_LAST_STEP) is not None
     ), "step_wise=True but `is_last_step` is missing from generator output"
     assert (
-        generator_output.get("trajectory_ids") is not None
+        generator_output.get(GeneratorOutputKey.TRAJECTORY_IDS) is not None
     ), "step_wise=True but `trajectory_ids` is missing from generator output"
 
-    is_last_step = generator_output["is_last_step"]
-    trajectory_ids = generator_output["trajectory_ids"]
+    is_last_step = generator_output[GeneratorOutputKey.IS_LAST_STEP]
+    trajectory_ids = generator_output[GeneratorOutputKey.TRAJECTORY_IDS]
 
     assert (
         len(is_last_step) == num_responses

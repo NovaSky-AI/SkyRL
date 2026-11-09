@@ -12,8 +12,8 @@ from typing import List
 
 import torch
 
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.backends.skyrl_train.training_batch import (
-    REAL_SAMPLE_MASK,
     TensorList,
     TrainingInputBatch,
 )
@@ -25,7 +25,6 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
     cu_seqlens_from_lengths,
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_FIELD,
     SAMPLE_SUPPORT_TORCH_DTYPE,
 )
 from skyrl.backends.skyrl_train.workers.worker import PolicyWorkerBase
@@ -114,7 +113,7 @@ class TestTokenBasedBatchIterator:
     def test_training_outputs_keep_one_item_per_input_row(self):
         # Callers trim their own input padding by count, so synthetic input rows stay.
         batch = self._make_batch([6, 10, 4, 8])
-        batch[REAL_SAMPLE_MASK] = torch.tensor([True, True, True, False])
+        batch[TrainingField.REAL_SAMPLE_MASK] = torch.tensor([True, True, True, False])
         iterator = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=12)
         outputs = [
             [{"sample": index} for index in indices] + [{"sample": "pipeline-padding"}]
@@ -253,7 +252,7 @@ class TestTokenBasedBatchIterator:
             cu_seqlens_from_lengths([4, 4]),
         )
         batch["router_padding_mask"] = torch.zeros((2, 4), dtype=torch.bool)
-        batch[SAMPLE_SUPPORT_FIELD] = ragged_support([[[11] * 5] * 2, [[11] * 5] * 2])
+        batch[TrainingField.ROLLOUT_SAMPLE_SUPPORT] = ragged_support([[[11] * 5] * 2, [[11] * 5] * 2])
 
     def test_padding_microbatch_uses_unique_dummy_routes(self):
         batch = self._make_batch([4, 4], num_actions=2)
@@ -276,7 +275,7 @@ class TestTokenBasedBatchIterator:
 
         padding = iterator._create_padding_microbatch()
 
-        padded_support = padding[SAMPLE_SUPPORT_FIELD]
+        padded_support = padding[TrainingField.ROLLOUT_SAMPLE_SUPPORT]
         assert len(padded_support) == 1
         assert padded_support.sequence_lengths.tolist() == [0]
         assert padded_support.num_rows == 0
@@ -286,11 +285,11 @@ class TestTokenBasedBatchIterator:
 
     def test_microbatch_selection_gathers_packed_sample_support_segments(self):
         batch = self._make_batch([4, 2], num_actions=2)
-        batch[SAMPLE_SUPPORT_FIELD] = ragged_support([[[1] * 5] * 2, [[-1] * 5]])
+        batch[TrainingField.ROLLOUT_SAMPLE_SUPPORT] = ragged_support([[[1] * 5] * 2, [[-1] * 5]])
 
         microbatch = TokenBasedBatchIterator(batch, max_tokens_per_microbatch=8)._create_microbatch_from_indices([1])
 
-        support = microbatch[SAMPLE_SUPPORT_FIELD]
+        support = microbatch[TrainingField.ROLLOUT_SAMPLE_SUPPORT]
         assert support.sequence_lengths.tolist() == [1]
         assert support.row_lengths.tolist() == [0]
 

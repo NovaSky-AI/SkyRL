@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple
 
 import torch
 
+from skyrl.backends.skyrl_train.fields import GeneratorInputKey
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.generators.base import GeneratorInput
 
@@ -20,7 +21,7 @@ def split_generator_input(input_batch: GeneratorInput, group_size: int) -> List[
     fields are sliced; ``sampling_params`` and ``batch_metadata`` are shared (the generator never
     mutates them). The inverse of ``concatenate_generator_outputs``.
     """
-    num_rows = len(input_batch["prompts"])
+    num_rows = len(input_batch[GeneratorInputKey.PROMPTS])
     if group_size <= 0 or num_rows % group_size != 0:
         raise ValueError(f"cannot split {num_rows} rows into groups of {group_size}")
 
@@ -30,12 +31,12 @@ def split_generator_input(input_batch: GeneratorInput, group_size: int) -> List[
 
     return [
         {
-            "prompts": rows("prompts", start),
-            "env_classes": rows("env_classes", start),
-            "env_extras": rows("env_extras", start),
-            "sampling_params": input_batch.get("sampling_params"),
-            "trajectory_ids": rows("trajectory_ids", start),
-            "batch_metadata": input_batch.get("batch_metadata"),
+            GeneratorInputKey.PROMPTS: rows(GeneratorInputKey.PROMPTS, start),
+            GeneratorInputKey.ENV_CLASSES: rows(GeneratorInputKey.ENV_CLASSES, start),
+            GeneratorInputKey.ENV_EXTRAS: rows(GeneratorInputKey.ENV_EXTRAS, start),
+            GeneratorInputKey.SAMPLING_PARAMS: input_batch.get(GeneratorInputKey.SAMPLING_PARAMS),
+            GeneratorInputKey.TRAJECTORY_IDS: rows(GeneratorInputKey.TRAJECTORY_IDS, start),
+            GeneratorInputKey.BATCH_METADATA: input_batch.get(GeneratorInputKey.BATCH_METADATA),
         }
         for start in range(0, num_rows, group_size)
     ]

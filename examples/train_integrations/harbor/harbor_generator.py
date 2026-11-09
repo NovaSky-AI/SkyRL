@@ -15,6 +15,7 @@ from tqdm import tqdm
 from harbor.models.agent.rollout_detail import RolloutDetail
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
+from skyrl.backends.skyrl_train.fields import GeneratorInputKey, GeneratorOutputKey
 from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     InferenceEngineInterface,
@@ -133,7 +134,7 @@ def build_step_wise_generator_output(
         # TODO(Charlie): Support summarization.
         assert len(traj.rollout_details) == 1, f"Expected exactly one rollout segment, got {len(traj.rollout_details)}."
         rollout_detail = traj.rollout_details[0]
-        prompt_token_ids_per_turn = rollout_detail["prompt_token_ids"]
+        prompt_token_ids_per_turn = rollout_detail[GeneratorOutputKey.PROMPT_TOKEN_IDS]
         completion_token_ids_per_turn = rollout_detail["completion_token_ids"]
         logprobs_per_turn = rollout_detail["logprobs"]
         n_turns = len(completion_token_ids_per_turn)
@@ -314,8 +315,8 @@ class HarborGenerator(GeneratorInterface):
         return build_vllm_cache_salt(weight_version, self._served_model_name)
 
     async def generate(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> GeneratorOutput:
-        prompts = input_batch["prompts"]
-        trajectory_ids = input_batch["trajectory_ids"]
+        prompts = input_batch[GeneratorInputKey.PROMPTS]
+        trajectory_ids = input_batch[GeneratorInputKey.TRAJECTORY_IDS]
 
         if trajectory_ids is None:
             raise ValueError("`trajectory_ids` is required in the input batch")
@@ -354,7 +355,7 @@ class HarborGenerator(GeneratorInterface):
         output = build_step_wise_generator_output(
             all_outputs, overlong_filtering=self.generator_cfg.apply_overlong_filtering
         )
-        output["rollout_metrics"].update(trial_metrics(all_attempts))
+        output[GeneratorOutputKey.ROLLOUT_METRICS].update(trial_metrics(all_attempts))
         return output
 
     async def _harbor_agent_loop(

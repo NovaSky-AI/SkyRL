@@ -16,12 +16,9 @@ from typing import (
 
 import torch
 
+from skyrl.backends.skyrl_train.fields import PAYLOAD_KEYS, GeneratorOutputKey
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
-from skyrl.backends.skyrl_train.rollout_shard import (
-    PAYLOAD_KEYS,
-    RolloutPayloadKey,
-    encode_payload,
-)
+from skyrl.backends.skyrl_train.rollout_shard import encode_payload
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertIndices
 from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
 
@@ -153,13 +150,13 @@ class RolloutSummary:
     def from_output(cls, output: GeneratorOutput) -> "RolloutSummary":
         from skyrl.train.generators.utils import compute_turn_token_counts
 
-        support = output.get(RolloutPayloadKey.ROLLOUT_SAMPLE_SUPPORT)
+        support = output.get(GeneratorOutputKey.ROLLOUT_SAMPLE_SUPPORT)
         return cls(
-            rewards=[scalar_reward(r) for r in output["rewards"]],
-            num_loss_tokens=[float(sum(mask)) for mask in output["loss_masks"]],
-            prompt_lengths=[len(ids) for ids in output["prompt_token_ids"]],
-            response_lengths=[len(ids) for ids in output["response_ids"]],
-            turn_token_counts=[compute_turn_token_counts([mask]) for mask in output["loss_masks"]],
+            rewards=[scalar_reward(r) for r in output[GeneratorOutputKey.REWARDS]],
+            num_loss_tokens=[float(sum(mask)) for mask in output[GeneratorOutputKey.LOSS_MASKS]],
+            prompt_lengths=[len(ids) for ids in output[GeneratorOutputKey.PROMPT_TOKEN_IDS]],
+            response_lengths=[len(ids) for ids in output[GeneratorOutputKey.RESPONSE_IDS]],
+            turn_token_counts=[compute_turn_token_counts([mask]) for mask in output[GeneratorOutputKey.LOSS_MASKS]],
             sample_support=None if support is None else [SupportCounts.of(rows) for rows in support],
         )
 
@@ -186,7 +183,7 @@ class RolloutMetadataView(dict):
     @classmethod
     def cat(cls, views: List["RolloutMetadataView"]) -> "RolloutMetadataView":
         """The views' per-row fields, concatenated; fields that are not per row are left out."""
-        num_rows = [len(view["rewards"]) for view in views]
+        num_rows = [len(view[GeneratorOutputKey.REWARDS]) for view in views]
         keys = [key for key in views[0] if all(_is_per_row(view.get(key), n) for view, n in zip(views, num_rows))]
         return cls({key: _cat_rows([view[key] for view in views]) for key in keys})
 
@@ -224,7 +221,7 @@ class StoredRolloutGroup:
     trajectories: List[StoredTrajectory]
     # Fields that are not per row, e.g. ``rollout_metrics``, and fields that are None.
     group_fields: Dict[str, Any]
-    # The ``RolloutPayloadKey``s every trajectory's payload holds.
+    # The ``GeneratorOutputKey``s every trajectory's payload holds.
     payload_keys: FrozenSet[str] = frozenset()
 
     @classmethod
@@ -237,7 +234,7 @@ class StoredRolloutGroup:
         ``support_id_bits`` (``support_id_bits(vocab_size)``) when given. A producer that stores the
         payloads itself attaches the refs with ``attach_payloads``.
         """
-        num_rows = len(output[RolloutPayloadKey.RESPONSE_IDS])
+        num_rows = len(output[GeneratorOutputKey.RESPONSE_IDS])
         if num_rows == 0:
             raise ValueError("cannot store an output with no rows")
         row_fields, group_fields = {}, {}
@@ -247,7 +244,7 @@ class StoredRolloutGroup:
             else:
                 group_fields[key] = value
         trajectories, payloads = [], []
-        for start, end in _trajectory_row_spans(output.get("is_last_step"), num_rows):
+        for start, end in _trajectory_row_spans(output.get(GeneratorOutputKey.IS_LAST_STEP), num_rows):
             rows = {key: _slice_rows(value, start, end) for key, value in row_fields.items()}
             payload = {key: rows.pop(key) for key in list(rows) if key in PAYLOAD_KEYS}
             summary = RolloutSummary.from_output({**rows, **payload})
