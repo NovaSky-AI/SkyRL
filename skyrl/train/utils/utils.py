@@ -42,6 +42,7 @@ from skyrl.env_vars import (
     SKYRL_LD_LIBRARY_PATH_EXPORT,
     SKYRL_PYTHONPATH_EXPORT,
     SKYRL_RAY_PG_TIMEOUT_IN_S,
+    SKYRL_STAGE_TRACE_DIR,
     SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
 )
 from skyrl.train.config.config import (
@@ -51,10 +52,14 @@ from skyrl.train.config.config import (
     get_config_as_dict,
 )
 from skyrl.train.utils import deadline
+from skyrl.utils import stage_trace
 
 
 class Timer:
-    """Times a block and names it as the current step-deadline stage (see ``deadline.stage``)."""
+    """Times a block and names it as the current step-deadline stage (see ``deadline.stage``).
+
+    The block is also a ``t.<message>`` span of ``stage_trace``, so traced runs show the phase.
+    """
 
     def __init__(self, message, update_dict=None):
         self.message = message
@@ -62,6 +67,7 @@ class Timer:
 
     def __enter__(self):
         self.start_time = time.time()
+        self._t0 = time.perf_counter()
         self._stage = deadline.stage(self.message)
         self._stage.__enter__()
         logger.opt(depth=1).info(f"Started: '{self.message}'")
@@ -69,12 +75,14 @@ class Timer:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self._stage.__exit__(exc_type, exc_val, exc_tb)
+        stage_trace.record(f"t.{self.message}", self._t0, time.perf_counter(), failed=exc_type is not None)
         logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
     async def __aenter__(self):
         self.start_time = time.time()
+        self._t0 = time.perf_counter()
         self._stage = deadline.stage(self.message)
         self._stage.__enter__()
         logger.opt(depth=1).info(f"Started: '{self.message}'")
@@ -82,6 +90,7 @@ class Timer:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self._stage.__exit__(exc_type, exc_val, exc_tb)
+        stage_trace.record(f"t.{self.message}", self._t0, time.perf_counter(), failed=exc_type is not None)
         logger.opt(depth=1).info(f"Finished: '{self.message}', time cost: {time.time() - self.start_time:.2f}s")
         if self.update_dict is not None:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
@@ -1021,6 +1030,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     """
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
+    if SKYRL_STAGE_TRACE_DIR:
+        # Every actor writes its own data-path spans (skyrl.utils.stage_trace).
+        env_vars["SKYRL_STAGE_TRACE_DIR"] = SKYRL_STAGE_TRACE_DIR
     annotation_cfg = cfg.trainer.grafana_annotations
     if annotation_cfg.enabled and (token := os.environ.get(annotation_cfg.token_env_var)):
         env_vars[annotation_cfg.token_env_var] = token

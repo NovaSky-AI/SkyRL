@@ -182,6 +182,7 @@ from skyrl.backends.skyrl_train.workers.megatron.model_flops import (
     model_flops,
     unsupported_reason,
 )
+from skyrl.utils import stage_trace
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
@@ -1414,6 +1415,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         """``forward_backward`` over the microbatches ``microbatch_iterator`` builds."""
         self.model.train()
         torch.cuda.reset_peak_memory_stats()
+        t_plan = time.perf_counter()
 
         all_metrics = defaultdict(list)
         use_token_batching = self.cfg.max_tokens_per_microbatch > 0
@@ -1427,6 +1429,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             return WorkerOutput()
 
         def build(index: int) -> HostMicrobatch:
+            t_build = time.perf_counter()
             experience = BaseBatchIterator.batch_to_experience(microbatch_iterator.microbatch(index))
             micro = self._host_microbatch(experience, loss_normalization)
             micro.loss.num_microbatches = len(rows)
@@ -1434,6 +1437,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 micro = micro.padded(micro_bsz)
             if token_counts is not None:
                 micro.loss.num_tokens_local, micro.loss.num_tokens_global = token_counts[0][index], token_counts[1]
+            stage_trace.record("mb.build", t_build, time.perf_counter(), index=index)
             return micro
 
         routed = self.enable_router_replay and microbatch_iterator.has_routes
@@ -1450,6 +1454,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             readers=len(self.actor_module),
         )
         seq_len = microbatch_iterator.seq_len
+        stage_trace.record(
+            "worker.mb_plan",
+            t_plan,
+            time.perf_counter(),
+            microbatches=len(rows),
+            padding_microbatches=num_padding_microbatches,
+            seq_len=seq_len,
+        )
 
         # Gate on first PP/TP/CP rank so we emit exactly one line per DP rank
         # (matches how status all-reduce treats metrics as identical within a DP group).
@@ -1466,15 +1478,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 f"seq_len={seq_len} tokens={real_tokens}"
             )
 
-        metrics_list = self.model.forward_backward_mini_batch(
-            micro_batches=micro_buffer,
-            seq_len=seq_len,
-            micro_batch_size=micro_bsz,
-            temperature=self.cfg.algorithm.temperature,
-            loss_fn=loss_fn,
-            loss_fn_config=loss_fn_config,
-            return_per_token_outputs=return_per_token_outputs,
-        )
+        # Host time through the schedule; the GPU may still be finishing its last kernels.
+        with stage_trace.span("worker.fb_schedule", microbatches=len(micro_buffer)):
+            metrics_list = self.model.forward_backward_mini_batch(
+                micro_batches=micro_buffer,
+                seq_len=seq_len,
+                micro_batch_size=micro_bsz,
+                temperature=self.cfg.algorithm.temperature,
+                loss_fn=loss_fn,
+                loss_fn_config=loss_fn_config,
+                return_per_token_outputs=return_per_token_outputs,
+            )
 
         if self.empty_cuda_cache_after_backward:
             torch.cuda.empty_cache()
@@ -1568,9 +1582,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # whole accumulated window. Deferred out of forward_backward because the reduce
         # is not idempotent -- running it per call corrupts gradients once a window
         # spans more than one call.
-        self.model.run_pending_grad_sync()
+        with stage_trace.span("worker.grad_sync"):
+            self.model.run_pending_grad_sync()
 
-        grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+        with stage_trace.span("worker.optimizer_step"):
+            grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
 
         # Clear the DDP grad buffers for the next window. `optimizer.zero_grad()` inside
         # `optimizer_step` only drops `param.grad` / the fp32 main-param grads -- the

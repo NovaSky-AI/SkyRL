@@ -9,6 +9,7 @@ a node holds the payloads of the microbatches in flight, never a collated copy o
 
 import logging
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
@@ -28,6 +29,7 @@ from skyrl.backends.skyrl_train.utils.bit_packing import pack_ids, unpack_ids
 from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
 from skyrl.env_vars import SKYRL_PAYLOAD_FETCH_TIMEOUT_S
 from skyrl.train.dataset.preprocess import RowCollation, rows_to_training_input
+from skyrl.utils import stage_trace
 
 
 class RolloutPayloadKey(StrEnum):
@@ -212,7 +214,10 @@ class ShardRows:
     def collate(self, rows: Sequence[int]) -> TrainingInputBatch:
         """``rows`` of the shard, in this order, as one padded batch with their advantages."""
         indices = list(dict.fromkeys(self._locations[row][0] for row in rows))
-        payloads = dict(zip(indices, fetch_payloads([self.shard.payload_refs[i] for i in indices])))
+        # Blocks only for payloads the pull-ahead hasn't brought to this node yet.
+        with stage_trace.span("mb.fetch", payloads=len(indices)):
+            payloads = dict(zip(indices, fetch_payloads([self.shard.payload_refs[i] for i in indices])))
+        t_collate = time.perf_counter()
         keys = payloads[indices[0]].keys()
         gathered = {key: [payloads[p][key][r] for p, r in (self._locations[row] for row in rows)] for key in keys}
         del payloads
@@ -224,6 +229,7 @@ class ShardRows:
         )
         if self.old_logprobs is not None:
             batch["action_log_probs"] = self.old_logprobs[index]
+        stage_trace.record("mb.collate", t_collate, time.perf_counter(), rows=len(rows))
         return batch
 
 
@@ -252,7 +258,13 @@ def pull_payloads(refs: List[ObjectRef]) -> None:
     global _PULLS
     if _PULLS is None:
         _PULLS = ThreadPoolExecutor(max_workers=PULL_AHEAD_MICROBATCHES, thread_name_prefix="skyrl-payload-pull")
-    _PULLS.submit(ray.wait, refs, num_returns=len(refs), timeout=SKYRL_PAYLOAD_FETCH_TIMEOUT_S, fetch_local=True)
+    _PULLS.submit(_pull, refs)
+
+
+def _pull(refs: List[ObjectRef]) -> None:
+    with stage_trace.span("mb.pull_ahead", payloads=len(refs)) as span:
+        ready, _ = ray.wait(refs, num_returns=len(refs), timeout=SKYRL_PAYLOAD_FETCH_TIMEOUT_S, fetch_local=True)
+        span["ready"] = len(ready)
 
 
 # A dumped shard's advantages before z-scoring and the loss reduction: the unstreamed dump's advantages.

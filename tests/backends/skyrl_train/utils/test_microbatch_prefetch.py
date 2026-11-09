@@ -80,3 +80,17 @@ def test_an_exhausted_prefetcher_holds_no_microbatch():
     second = next(prefetcher)
     gc.collect()
     assert ref() is None and second is not None and next(prefetcher, None) is None
+
+
+def test_staging_the_computation_waits_for_is_traced_apart(monkeypatch):
+    from skyrl.utils import stage_trace
+
+    monkeypatch.setattr(stage_trace, "_totals", {})
+    prefetcher, _ = _prefetcher()
+    next(prefetcher)  # nothing staged ahead: exposed
+    prefetcher.prefetch()
+    next(prefetcher)  # staged while the previous one computed
+    next(prefetcher)  # consumed before its prefetch: exposed
+    taken = stage_trace.take_totals("mb.")
+    assert taken["mb.stage_exposed"][0] == 2
+    assert taken["mb.stage"][0] == 1

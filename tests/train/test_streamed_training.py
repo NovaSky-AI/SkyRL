@@ -5,6 +5,7 @@ uv run --isolated --extra skyrl-train --extra dev pytest tests/train/test_stream
 
 import asyncio
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -585,6 +586,31 @@ async def test_collection_propagates_a_background_generation_failure():
     failure.record(RuntimeError("generator failed while collecting"), "generator")
     with pytest.raises(RuntimeError, match="generator failed while collecting"):
         await asyncio.wait_for(pending, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_collection_splits_its_wait_into_rollouts_and_its_own_work():
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer.mini_batch_size = 1
+    trainer.sample_full_batch = True
+    trainer._phase_gauge = SimpleNamespace(timed_phase=lambda *args: nullcontext())
+
+    def slow_keep_check(group):
+        time.sleep(0.1)
+        return True
+
+    trainer._should_keep_group = slow_keep_check
+    buffer, done, failure = asyncio.Queue(), asyncio.Event(), BackgroundFailure()
+    # The group arrives 0.1 s in; its keep check then takes 0.1 s of the collector's own time.
+    asyncio.get_running_loop().call_later(0.1, buffer.put_nowait, object())
+
+    kept, dropped, exhausted = await trainer._collect_generation_mini_batch(buffer, done, failure)
+
+    assert len(kept) == 1 and not dropped and not exhausted
+    assert 0.08 <= trainer.all_timings["wait_for_rollouts"] < 0.18
+    assert 0.08 <= trainer.all_timings["collect_mini_batch_work"] < 0.18
 
 
 def _with_mixed_support(output):

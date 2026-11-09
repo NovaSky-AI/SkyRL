@@ -1849,7 +1849,7 @@ class TrainerConfig(BaseConfig):
     """Logger to use: ``"wandb"``, ``"mlflow"``, ``"swanlab"``, ``"tensorboard"``, or ``"console"``.
     See https://docs.skyrl.ai/docs/checkpointing-logging/logging"""
     enable_ray_gpu_monitor: bool = True
-    """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    """Enable background Ray GPU/RAM, object store and spill metrics collection and logging to wandb."""
     log_mfu: bool = True
     """Log model FLOPs utilization (MFU) metrics for policy training each step.
 

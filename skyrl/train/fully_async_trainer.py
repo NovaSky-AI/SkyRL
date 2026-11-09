@@ -75,6 +75,7 @@ from skyrl.train.utils.trainer_utils import (
     get_intra_group_completion_time_std_cv,
     zero_variance_filter,
 )
+from skyrl.utils import stage_trace
 
 
 @dataclass
@@ -1018,17 +1019,24 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         epoch_exhausted = False
         # Buffer occupancy when this step starts waiting.
         self.all_metrics["async/gen_buffer_qsize_at_wait_start"] = generation_output_group_buffer.qsize()
+        # wait_for_generation_buffer splits into the time blocked on the rollouts for a group and the
+        # collector's own work (keep checks, drops), which no rollout speedup removes.
+        blocked = 0.0
+        start = time.perf_counter()
         with self._phase_gauge.timed_phase("wait_for_generation_buffer", self.all_timings):
             buffer_pbar = tqdm(total=self.mini_batch_size, initial=0, desc="Generation Buffer Progress", position=1)
             while len(kept_groups) < self.mini_batch_size:
                 # We do finish-time FIFO here (not schedule-time FIFO).
+                waited = time.perf_counter()
                 if not self.sample_full_batch:
                     kept_groups.append(await failure.guard(generation_output_group_buffer.get()))
+                    blocked += time.perf_counter() - waited
                     buffer_pbar.update(1)
                     buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
                     continue
 
                 group = await self._drain_next_group(generation_output_group_buffer, all_generators_done, failure)
+                blocked += time.perf_counter() - waited
                 if group is None:
                     epoch_exhausted = True
                     break
@@ -1049,6 +1057,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     self._log_group_processing_error(group, len(kept_groups), len(dropped_groups))
                     raise
             buffer_pbar.close()
+        self.all_timings["wait_for_rollouts"] = blocked
+        self.all_timings["collect_mini_batch_work"] = time.perf_counter() - start - blocked
         return kept_groups, dropped_groups, epoch_exhausted
 
     @staticmethod
@@ -1371,6 +1381,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 else:
                     cur_generator_output = await self.generator.generate(generator_input, **generate_kwargs)
                 group_completion_time_s = time.monotonic() - group_start_time
+                stage_trace.instant(
+                    "trainer.group_buffered",
+                    group_s=group_completion_time_s,
+                    scheduled_step=global_step_at_start,
+                    buffered=generation_output_group_buffer.qsize() + 1,
+                )
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
                 try:
