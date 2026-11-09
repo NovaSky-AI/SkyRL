@@ -54,6 +54,11 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 
 ## Concurrency and Batching
 
+- Forwarded sampling is durably queued in `FutureDB`. `TinkerEngine` claims
+  `PENDING` rows as `DISPATCHED` and owns the forwarding tasks. On restart it
+  returns interrupted rows to `PENDING`, retaining the original future IDs.
+  `sampling_concurrency.enabled` with `initial_limit` bounds dispatched sampling
+  requests when a fixed window is needed.
 - `forward_backward` and `forward` requests are batched using look-ahead scheduling -- the engine groups all pending ops before the next barrier (`optim_step` or `load_weights`).
 - `sample` requests are batched ensuring one checkpoint_id per model_id per batch.
 - `optim_step`, `create_model`, `save_weights`, `load_weights` are processed individually and act as barriers.

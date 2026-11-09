@@ -5,6 +5,7 @@ Pair to :class:`ExternalInferenceClient`; resolves the target URL from
 """
 
 import asyncio
+from datetime import datetime, timezone
 
 import aiohttp
 import orjson
@@ -14,9 +15,8 @@ from skyrl.backends.renderer import render_model_input
 from skyrl.backends.utils import convert_vllm_prompt_logprobs
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
-from skyrl.tinker.db_models import EngineStateDB, RequestStatus
+from skyrl.tinker.db_models import EngineStateDB, FutureDB, RequestStatus
 from skyrl.tinker.external_future_store import ExternalFutureStore
-from skyrl.tinker.proto_serialization import serialize_sample_output
 from skyrl.utils.log import logger
 
 
@@ -34,7 +34,7 @@ class SkyRLTrainInferenceForwardingClient:
         self,
         engine_config: EngineConfig,
         db_engine,
-        external_future_store: ExternalFutureStore,
+        external_future_store: ExternalFutureStore | None = None,
     ):
         self.engine_config = engine_config
         self.db_engine = db_engine
@@ -80,7 +80,7 @@ class SkyRLTrainInferenceForwardingClient:
         return self._session
 
     async def aclose(self) -> None:
-        """Close the shared aiohttp session. Called from api.py lifespan shutdown."""
+        """Close the shared aiohttp session."""
         if self._session is not None and not self._session.closed:
             await self._session.close()
 
@@ -112,7 +112,7 @@ class SkyRLTrainInferenceForwardingClient:
         *,
         base_model: str | None = None,
     ):
-        """Forward a sample request to vLLM and resolve its in-memory future."""
+        """Forward a sample request to vLLM and store its result."""
         try:
             result = await self._forward_with_retry(sample_req, model_id, base_model=base_model)
             status = RequestStatus.COMPLETED
@@ -121,9 +121,21 @@ class SkyRLTrainInferenceForwardingClient:
             result = types.ErrorResponse(error=str(e), status="failed")
             status = RequestStatus.FAILED
 
-        await self.external_future_store.complete(request_id, result, status)
+        if self.external_future_store is not None:
+            await self.external_future_store.complete(request_id, result, status)
+            return
 
-    async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> bytes:
+        async with AsyncSession(self.db_engine) as session:
+            future = await session.get(FutureDB, request_id)
+            if future is None:
+                logger.warning("FutureDB row %s missing on completion write; skipping", request_id)
+                return
+            future.result_data = result.model_dump_json()
+            future.status = status
+            future.completed_at = datetime.now(timezone.utc)
+            await session.commit()
+
+    async def _forward_with_retry(self, sample_req, model_id: str, *, base_model: str | None) -> types.SampleOutput:
         # Retry only failures where the request demonstrably did not execute:
         # connect-phase errors and 5xx rejections from the router. Read and
         # write failures are ambiguous: vLLM may still be executing the
@@ -155,12 +167,14 @@ class SkyRLTrainInferenceForwardingClient:
                 "the SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC environment variable."
             ) from e
 
-    async def _forward(self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None) -> bytes:
+    async def _forward(
+        self, proxy_url: str, sample_req, model_id: str, *, base_model: str | None
+    ) -> types.SampleOutput:
         # model_id matches the LoRA name registered with vLLM during
         # save_weights_for_sampler; base_model is used for non-LoRA sampling.
         model_name = base_model if base_model else model_id
 
-        model_input = sample_req.prompt.to_types()
+        model_input = sample_req.prompt.to_types() if hasattr(sample_req.prompt, "to_types") else sample_req.prompt
         prompt_tokens = render_model_input([model_input])[0].prompt_ids
 
         sp = sample_req.sampling_params
@@ -240,8 +254,16 @@ class SkyRLTrainInferenceForwardingClient:
             # Tinker's stop_reason is Literal["stop", "length"]; vLLM emits a wider set.
             finish_reason = choice.get("finish_reason")
             stop_reason = "stop" if finish_reason in ("stop", "stop_token") else "length"
-            sequences.append((stop_reason, tokens, logprobs))
+            sequences.append(
+                types.GeneratedSequence(
+                    stop_reason=stop_reason,
+                    tokens=tokens,
+                    logprobs=logprobs,
+                )
+            )
 
-        # Encode straight to the proto wire form the SDK retrieves; no pydantic
-        # model or JSON text is built for the result.
-        return serialize_sample_output(sequences, prompt_logprobs, topk)
+        return types.SampleOutput(
+            sequences=sequences,
+            prompt_logprobs=prompt_logprobs,
+            topk_prompt_logprobs=topk,
+        )
