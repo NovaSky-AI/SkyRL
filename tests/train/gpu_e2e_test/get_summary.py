@@ -1,12 +1,14 @@
 import argparse
 import operator
 import sys
+import time
 
 import wandb
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--run_name", type=str, required=True)
 parser.add_argument("--project_name", type=str, required=True)
+parser.add_argument("--expected_global_step", type=int)
 
 parser.add_argument(
     "--asserts",
@@ -28,12 +30,24 @@ OPERATORS = {
 args = parser.parse_args()
 
 api = wandb.Api()
-# get latest run with the run name
-runs = api.runs(f"{args.project_name}", filters={"display_name": args.run_name}, order="-created_at")
-matched_run = next(iter(runs), None)
-
-if matched_run is None:
-    raise ValueError(f"Run {args.run_name} not found in project {args.project_name}")
+# W&B can expose an older summary immediately after the training process exits.
+# Wait for the final training step before checking convergence metrics.
+deadline = time.monotonic() + 180
+while True:
+    runs = api.runs(f"{args.project_name}", filters={"display_name": args.run_name}, order="-created_at")
+    matched_run = next(iter(runs), None)
+    if matched_run is None and args.expected_global_step is None:
+        raise ValueError(f"Run {args.run_name} not found in project {args.project_name}")
+    if matched_run is not None and (
+        args.expected_global_step is None
+        or matched_run.summary_metrics.get("trainer/global_step", -1) >= args.expected_global_step
+    ):
+        break
+    if time.monotonic() >= deadline:
+        raise ValueError(
+            f"Run {args.run_name} did not report trainer/global_step >= {args.expected_global_step} within 180 seconds"
+        )
+    time.sleep(10)
 
 for assertion in args.asserts:
     metric_name, operator_str, threshold = assertion.lstrip().rstrip().split()
