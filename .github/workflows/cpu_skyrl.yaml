@@ -75,10 +75,12 @@ jobs:
         uses: astral-sh/setup-uv@v6
         with:
           activate-environment: true
-      - name: Run cpu tests (without vllm)
-        run:  uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "not vllm"
+      - name: Run cpu tests (without vllm or megatron)
+        run:  uv run --isolated --extra skyrl-train --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "not (vllm or megatron)"
       - name: Run cpu tests (with vllm)
-        run: uv run --isolated --extra fsdp --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "vllm"
+        run: uv run --isolated --extra fsdp --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "vllm and not megatron"
+      - name: Run cpu tests (with megatron)
+        run: uv run --isolated --extra megatron --extra dev pytest tests/train/ tests/backends/skyrl_train/ --ignore=tests/backends/skyrl_train/gpu -m "megatron"
       - name: Run tinker tests
         run: uv run --isolated --extra fsdp --extra tinker --extra dev pytest tests/tinker/skyrl_train/
   

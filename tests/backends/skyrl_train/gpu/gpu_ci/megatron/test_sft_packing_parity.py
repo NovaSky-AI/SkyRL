@@ -101,7 +101,7 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
             from_parallel_logits_to_logprobs_packed_sequences,
         )
         from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
-            _build_packed_targets,
+            _pack_sequence_values,
         )
         from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 
@@ -195,7 +195,7 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
                     sub_seq_lengths=sub_seq_lengths,
                 )
                 batch["packed_seq_params"] = packed_seq_params
-                batch["packed_targets"] = _build_packed_targets(
+                batch["packed_targets"] = _pack_sequence_values(
                     sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
                 )
                 new_attention_mask = None

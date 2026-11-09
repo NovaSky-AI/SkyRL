@@ -142,6 +142,14 @@ class SFTConfig(BaseConfig):
     For Megatron, use ``megatron_config.transformer_config_kwargs`` instead."""
     use_torch_compile: bool = False
     """Apply torch.compile to logits calculation."""
+    language_model_only: bool = False
+    """Build only the language-model backbone of a multimodal checkpoint (required for GLM-5.3-Flash).
+    Maps to ``trainer.policy.language_model_only``."""
+    fused_lm_head_logprob: bool = False
+    """Compute the LM head + log-probs in ``logprobs_chunk_size`` token chunks without materializing
+    the full ``[T, vocab]`` logits (Megatron). Maps to ``trainer.fused_lm_head_logprob``."""
+    logprobs_chunk_size: Optional[int] = 1024
+    """Token chunk size for the fused LM head. Maps to ``trainer.logprobs_chunk_size``."""
     record_memory: bool = False
     """Save memory snapshots to ``{ckpt_path}/memory_snapshots/``.
     Visualize by dragging pickle files to https://docs.pytorch.org/memory_viz."""
@@ -231,6 +239,13 @@ class SFTConfig(BaseConfig):
     ckpt_interval: int = 0  # <= 0 -> no checkpointing
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    log_mfu: bool = True
+    """Log model FLOPs utilization (MFU) metrics each step.
+
+    Logs ``train/mfu``, ``train/mfu_e2e``, ``train/model_tflops_per_gpu``, ``train/flops_per_token``
+    and, under full activation recompute, ``train/hfu_est``. Megatron only; not logged for LoRA or
+    with active MTP heads, and the utilization ratios are not logged for FP8 training or on GPUs
+    without a known peak."""
     max_ckpts_to_keep: int = -1
     """-1 to keep all checkpoints, N to keep only the last N."""
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir
@@ -603,6 +618,20 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             f"found sequence_parallel_size={cfg.sequence_parallel_size}, ulysses style sequence "
             f"parallel is not supported for megatron"
         )
+        if cfg.log_mfu:
+            from skyrl.train.utils.mfu import mfu_support
+
+            mfu_warning = mfu_support(cfg.strategy, cfg.megatron_config, cfg.model.lora.rank).warning
+            if mfu_warning:
+                logger.warning(mfu_warning)
+
+    if cfg.megatron_config.optimizer_offload_to_disk.dir is not None:
+        from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
+
+        if cfg.strategy != "megatron":
+            raise ValueError("optimizer_offload_to_disk requires strategy='megatron'.")
+        if is_cloud_path(cfg.ckpt_path):
+            raise ValueError("optimizer_offload_to_disk requires a local ckpt_path.")
 
     # ---- sequence packing checks ----
     if cfg.use_sequence_packing:
@@ -657,6 +686,9 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
     cfg.trainer.policy.model_config_kwargs = sft_cfg.model_config_kwargs
     cfg.trainer.policy.use_torch_compile = sft_cfg.use_torch_compile
     cfg.trainer.policy.record_memory = sft_cfg.record_memory
+    cfg.trainer.policy.language_model_only = sft_cfg.language_model_only
+    cfg.trainer.fused_lm_head_logprob = sft_cfg.fused_lm_head_logprob
+    cfg.trainer.logprobs_chunk_size = sft_cfg.logprobs_chunk_size
     cfg.trainer.policy.torch_profiler_config = sft_cfg.torch_profiler_config
 
     # SFT doesn't use KL/ref model
@@ -678,6 +710,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
 
     # Logging & checkpointing
     cfg.trainer.logger = sft_cfg.logger
+    cfg.trainer.log_mfu = sft_cfg.log_mfu
     cfg.trainer.project_name = sft_cfg.project_name
     cfg.trainer.run_name = sft_cfg.run_name
     cfg.trainer.tags = sft_cfg.tags

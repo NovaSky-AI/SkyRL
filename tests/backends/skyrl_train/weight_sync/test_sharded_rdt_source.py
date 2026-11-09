@@ -12,6 +12,8 @@ Adapted from the vLLM RDT fork (`tests/distributed/test_weight_transfer.py`).
 Marked `vllm`: `sharded_rdt_base` imports the base ABCs from the wheel.
 """
 
+from functools import cached_property
+
 import pytest
 import torch
 
@@ -29,7 +31,7 @@ from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import 
 class TestGroupedWeightSourceContract:
     """`groups()` / `iter_groups()` on the GroupedWeightSource ABC. Group indices are
     what backends gather and free by, and `held_names()` is what narrows them,
-    so the default must agree with `layerwise_groups` over `metadata()`."""
+    so the default must agree with `layerwise_groups` over `metadata`."""
 
     class _Source(GroupedWeightSource):
         """Minimal source over an ordered (name, tensor) list, optionally owning
@@ -44,13 +46,14 @@ class TestGroupedWeightSourceContract:
                 all_groups = layerwise_groups(names)
                 self._held = [n for i in sorted(set(owned)) for n in all_groups[i]]
 
+        @cached_property
         def metadata(self):
             return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
 
         def held_names(self):
             return self._held
 
-        def __iter__(self):
+        def iter_full(self):
             pairs = self._pairs
             if self._owned is not None:
                 all_groups = layerwise_groups([n for n, _ in pairs])
@@ -143,7 +146,7 @@ class TestRdtFsdpWeightSource:
     """RDT's FSDP source is the shared one re-ordered **group-major**.
 
     That reorder is not cosmetic: ``layerwise_groups`` must partition
-    ``metadata()`` exactly, because that partition IS the group index the
+    ``metadata`` exactly, because that partition IS the group index the
     consumers' pull plans and the producer's free barrier are keyed on. A
     ``state_dict()`` whose layers interleave with the pre/post block would
     otherwise produce groups that are not contiguous runs of the metadata.
@@ -183,7 +186,7 @@ class TestRdtFsdpWeightSource:
 
     def test_reorders_into_group_major_order(self):
         src = self._source(self._INTERLEAVED)
-        assert [m.name for m in src.metadata()] == [
+        assert [m.name for m in src.metadata] == [
             "model.embed_tokens.weight",
             "model.layers.0.a",
             "model.layers.1.a",
@@ -193,7 +196,7 @@ class TestRdtFsdpWeightSource:
     def test_groups_partition_metadata_exactly(self):
         src = self._source(self._INTERLEAVED)
         flat = [n for g in src.groups() for n in g]
-        assert flat == [m.name for m in src.metadata()]
+        assert flat == [m.name for m in src.metadata]
         assert src.groups() == [
             ["model.embed_tokens.weight"],
             ["model.layers.0.a"],
@@ -214,8 +217,8 @@ class TestRdtFsdpWeightSource:
 
     def test_channels_agree_after_the_reorder(self):
         src = self._source(self._INTERLEAVED)
-        meta = src.metadata()
-        pairs = list(src)
+        meta = src.metadata
+        pairs = list(src.iter_full())
         assert [m.name for m in meta] == [n for n, _ in pairs]
         assert [m.shape for m in meta] == [tuple(t.shape) for _, t in pairs]
         assert [m.dtype for m in meta] == [t.dtype for _, t in pairs]
@@ -262,8 +265,8 @@ class TestRdtMegatronWeightSource:
 
     def test_instantiates_and_streams(self):
         src = self._source(["model.embed_tokens.weight", "model.layers.0.a"])
-        assert [m.name for m in src.metadata()] == ["model.embed_tokens.weight", "model.layers.0.a"]
-        assert [n for n, _ in src] == ["model.embed_tokens.weight", "model.layers.0.a"]
+        assert [m.name for m in src.metadata] == ["model.embed_tokens.weight", "model.layers.0.a"]
+        assert [n for n, _ in src.iter_full()] == ["model.embed_tokens.weight", "model.layers.0.a"]
 
     def test_groups_partition_the_bridges_canonical_order(self):
         """The bridge yields HF-canonical order, which is already
@@ -292,9 +295,9 @@ class TestExpertNameResolution:
     which is what lets this be a CPU test.
     """
 
+    @pytest.mark.megatron
     @pytest.mark.parametrize("projection", ["fc1", "fc2"])
     def test_lora_expert_template_resolves_in_qwen_registry(self, projection):
-        pytest.importorskip("megatron.bridge", reason="needs the megatron extra")
         from megatron.bridge.models.qwen.qwen3_moe_bridge import Qwen3MoEBridge
 
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
@@ -329,6 +332,7 @@ class TestExpertNameResolution:
         t = S._mg_expert_template("language_model.decoder.layers.3.mlp.experts.linear_fc2.weight5")
         assert t.format(layer=0, e=2) == "language_model.decoder.layers.0.mlp.experts.linear_fc2.weight2"
 
+    @pytest.mark.megatron
     @pytest.mark.parametrize(
         "module,cls_hint,mg_prefix,hf_prefix",
         [
@@ -349,7 +353,6 @@ class TestExpertNameResolution:
         import importlib
         import inspect
 
-        pytest.importorskip("megatron.bridge", reason="needs the megatron extra")
         mod = importlib.import_module(module)
         bridge_cls = next(
             o for n, o in vars(mod).items() if inspect.isclass(o) and cls_hint in n and o.__module__ == mod.__name__

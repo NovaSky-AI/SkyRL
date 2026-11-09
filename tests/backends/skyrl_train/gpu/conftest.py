@@ -9,17 +9,22 @@ def pytest_configure(config):
         "markers",
         "h100: opt-in tests that require H100 GPUs; auto-skipped unless `-m h100` is passed.",
     )
+    config.addinivalue_line(
+        "markers",
+        "b200: opt-in tests that require B200 (SM100+) GPUs; auto-skipped unless `-m b200` is passed.",
+    )
     config.addinivalue_line("markers", "megatron: tests that require the Megatron backend extra.")
 
 
 def pytest_collection_modifyitems(config, items):
     markexpr = config.getoption("markexpr", default="") or ""
-    if "h100" in markexpr:
-        return
-    skip_h100 = pytest.mark.skip(reason="H100 test — run explicitly with `-m h100`")
-    for item in items:
-        if "h100" in item.keywords:
-            item.add_marker(skip_h100)
+    for mark in ("h100", "b200"):
+        if mark in markexpr:
+            continue
+        skip = pytest.mark.skip(reason=f"{mark.upper()} test — run explicitly with `-m {mark}`")
+        for item in items:
+            if mark in item.keywords:
+                item.add_marker(skip)
 
 
 @pytest.fixture

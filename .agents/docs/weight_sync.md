@@ -21,10 +21,11 @@ skyrl/backends/skyrl_train/weight_sync/
 ├── __init__.py             # backend selection: get_transfer_strategy / get_vllm_receive_backend
 ├── base.py                 # LoraLoadRequest (not a weight transfer -- an adapter path)
 ├── register.py             # the ONE home for both factories' registrations
-├── sources.py              # FsdpWeightSource / MegatronWeightSource (vLLM's metadata()+__iter__)
+├── sources.py              # FsdpWeightSource / MegatronWeightSource / the LoRA adapter source
+├── lora_target.py          # LoRA adapter as a receive *target*: the wire dict, dedupe, aliases
 ├── weight_senders.py       # build_trainer_engine: init info + client -> trainer_init
 ├── control_plane.py        # SkyrlWeightSyncClient (blocking HTTP) + per-server init rewrites
-├── weight_receivers.py     # receive side: skyrl_nccl / skyrl_ipc (+ the drafter-reload proxy)
+├── weight_receivers.py     # receive side: skyrl_nccl / skyrl_ipc (+ FP8 load proxy + LoRA staging)
 ├── delta/                  # the checkpoint-delta backend; __init__ is import-free
 │   ├── trainer.py              # DeltaTrainerWeightTransferEngine (send side)
 │   ├── engine.py               # DeltaWeightTransferEngine (receive side, in the vLLM worker)
@@ -72,8 +73,9 @@ vLLM worker-extension class (loaded via `--worker-extension-cls`):
 | `sharded_rdt` | `ShardedRDTTrainerWeightTransferEngine` (`sharded_rdt`) | `sharded_rdt` |
 
 Both sides take new names for NCCL and IPC because SkyRL subclasses vLLM's engines --
-the receive side to reload the spec-decode drafter, the send side to declare the capability
-attributes above -- and `register_engine` raises on an already-registered name.
+the receive side to load compact FP8 wire tensors and stage LoRA adapter updates, the send
+side to declare the capability attributes above and run the draft session -- and
+`register_engine` raises on an already-registered name.
 
 ## Transfer backends
 
@@ -97,20 +99,45 @@ disagree.
 ### Weight sources
 
 `sources.py` implements exactly vLLM's two-channel contract, and the two channels must
-agree element for element — `metadata()` declares what iteration will yield, and the
+agree element for element — `metadata` declares what `iter_full()` will yield, and the
 engine sizes the worker's receive buffers and cuts its packed chunk boundaries from it.
+Since vLLM 0.33, `metadata` must be a `functools.cached_property` (`WeightSource`
+rejects anything else at class definition) and iteration is `iter_full()`. A source whose
+metadata changes between rounds (the LoRA adapter) drops the cached value itself.
+
+vLLM 0.33's NCCL and IPC `trainer_init` read `source.metadata` for ownership checks. For a
+Megatron source that would be a full dry export at init, possibly against an offloaded
+model, so `build_trainer_engine` seeds the cached value empty for that call: metadata is
+first computed at the first send. The checks are vacuous for SkyRL (every rank owns every
+parameter). `sharded_rdt` reads real metadata at init, to plan the pulls.
+
+vLLM 0.33's NCCL engine also skips the names when a round's metadata equals the last one's,
+and the worker then looks the old update info up by `self.model`. SkyRL's receivers swap
+`self.model` for a per-round proxy, so that lookup would miss and the broadcast would hang:
+`SkyrlNCCLTrainerWeightTransferEngine.send_weights` resets `_sent_meta` so the names always
+ship, and the receive mixin clears vLLM's update-info cache after every round so no proxy
+(or the LoRA adapter copy it stages) outlives its round.
 `NCCLTrainerWeightTransferEngine._checked_iter` enforces that at runtime and names the
 first divergent parameter; the Megatron GPU test
 (`gpu_ci/megatron/test_megatron_weight_source.py`) is the regression check that gets
 there first.
 
 - `FsdpWeightSource` — `state_dict()` for metadata (FSDP2 `DTensor.shape` is already the
-  global shape, so declaring costs no collective); iteration all-gathers via
+  global shape, so declaring costs no collective); `iter_full()` all-gathers via
   `materialize_full_tensor`. `weight_prefix` handles syncing a CausalLM backbone into a
   vLLM multimodal namespace.
 - `MegatronWeightSource` — `bridge.export_hf_weights(conversion_tasks=None)`, a lazy
-  generator in HF-canonical order that gathers TP/PP/EP internally. `metadata()` must
+  generator in HF-canonical order that gathers TP/PP/EP internally. `metadata` must
   materialize once to learn shapes, so it runs a dry export and caches.
+  Tensors go out in the inference dtype except fp32 and integer ones (`sources.wire_dtype`):
+  parameters the trainer keeps in fp32 (MoE router expert bias, DeepSeek-V4 mHC weights and
+  attention sinks) and integer tables keep their dtype, so vLLM routes as the trainer does.
+  `MegatronStackedWeightSource` (sharded RDT) applies the same rule, and its PP-local
+  metadata exchange carries each name's dtype so every stage declares the same ones.
+- `LoraAdapterWeightSource` / `MegatronLoraAdapterSource` — a PEFT adapter rather than the
+  model, for `lora.sync_mode=memory` (see *Targets* below). The one source that must be
+  **prepared before the send**: the dedupe decides which keys exist, so one export has to
+  serve both channels, and the alias map it produces has to reach the workers first.
 
 ### Serialized FP8 rollout sync
 
@@ -122,7 +149,25 @@ metadata is derived from that same serialized stream, so the trainer engine's bu
 layout remains identical to the tensors sent on the wire.
 
 The inference launch path supplies vLLM's FP8 dummy-load configuration, including the
-model-specific ignored layers. The receiver reload proxy recognizes the compact batched
+model-specific base exclude list. That quantization config is built entirely by SkyRL; a
+user-supplied `engine_init_kwargs.hf_overrides.quantization_config` raises an error.
+
+`generator.inference_engine.fp8_weight_sync_exclude_modules` (HF module-name globs) keeps
+more modules in the model dtype. `resolve_user_provided_exclude_list` expands it against
+the spec's `fp8_modules` (one name per FP8 tensor, as exported minus `.weight`); the driver
+calls it for the engine (`engine_exclude_list`, the spec's `base_exclude_list` plus the
+user's modules) and each trainer rank calls it for the sender
+(`SerializedFp8Config.user_provided_exclude_list`), on the same config, so the two cannot
+disagree. A pattern that matches nothing is rejected before engine init, and so is excluding
+only some of a layer's routed experts, which vLLM runs at one precision without rejecting the
+split; vLLM itself rejects excluding part of a fused module. Excluded routed experts go out
+in BF16 under their checkpoint names (Qwen3.5's stacked tensors, GLM-5's per-expert ones)
+through the model's own loader. The Megatron side has its
+own, independent knobs (`fp8_exclude_modules`, `num_layers_at_{start,end}_in_bf16`,
+`te_precision_config_file` on `MegatronConfig`); nothing checks the two sides against each
+other. See `fp8/models/README.md`.
+
+The receiver reload proxy recognizes the compact batched
 MoE FP8 tensors before forwarding ordinary weights to `model.load_weights`; this keeps
 the compact expert representation intact for both NCCL and IPC reloads. FP8 serialization
 is incompatible with the delta and sharded-RDT transfer backends.
@@ -179,6 +224,137 @@ trainer engines therefore declare all three attributes, so a misspelled name is 
 `skyrl_set_reset_prefix_cache(bool)` stays a `getattr` probe: it is a per-round value and
 only delta implements it, since `send_weights()` takes no arguments.
 
+## Targets: base model vs LoRA adapter
+
+The transport says *how* tensors move. The **target** says what they are and how the
+receiver applies them. Sender side it is the `WeightSource`; receiver side it is the sink
+the receive engine feeds.
+
+| target | source | receive-side sink | selected by |
+|---|---|---|---|
+| base model (default) | `MegatronWeightSource` / `FsdpWeightSource` | layerwise reload + `model.load_weights` | nothing armed |
+| LoRA adapter | `MegatronLoraAdapterSource` | clone chunks into a staging dict; at finish, `stage_in_memory_adapter` for vLLM's LoRA manager | `trainer.policy.model.lora.sync_mode=memory` with Megatron `merge_lora=false` |
+
+**LoRA adapter over the transport (`sync_mode=memory`).** The same `skyrl_nccl` /
+`skyrl_ipc` engine pair as the base model, and nothing is written to `lora_sync_path`.
+
+Because the round trip is vLLM's and its per-round payload is a fixed dataclass of names,
+dtypes and shapes, the adapter's name, config and alias map cannot ride it. They are armed
+out of band instead, one round at a time, over `/collective_rpc`. Hence the ordering:
+
+```
+trainer (all ranks)  source.prepare()
+                       bridge.export_adapter_weights(cpu=False)  collective, tensors stay on GPU
+                       dedupe_shared_expert_adapters             one tensor per EP-rank expert group,
+                                                                  verified with torch.equal; rest -> aliases
+                       finalize_adapter                          rank-scale fold, 3D->flat MoE rewrite,
+                                                                  adapter_config -- the same rewrites, in the
+                                                                  same order, as the disk path
+rank 0               POST /collective_rpc skyrl_set_lora_receive_target
+                       {kind: lora, lora_name, adapter_config, aliases}   arms exactly ONE round
+all ranks            engine.send_weights()                       the ordinary NCCL / IPC round trip
+worker               start:  no layerwise reload (the base model is untouched)
+                     receive: staging proxy over self.model -> private GPU clone per tensor
+                     finish: expand_lora_aliases -> stage_in_memory_adapter(name, tensors, config)
+                             then skyrl_release_receive_buffers (IPC: close the packed-buffer importer)
+rank 0               POST /skyrl/v1/load_lora_adapter {lora_name, in_memory: true}
+API server           add_lora(LoRARequest(lora_path="skyrl-memory://<name>", load_inplace=True))
+worker (patched)     WorkerLoRAManager._load_adapter -> from_lora_tensors(device=GPU) from the stage
+                     add_adapter: pack + activate into the LoRA slots, then
+                       offload_in_memory_adapter                 LoRAModel + stage -> pinned host
+```
+
+Arming lasts exactly one round — `finish_weight_update` disarms — so a missing or failed
+arm can never apply an adapter stream to the base model, or the reverse.
+
+An armed round skips vLLM's `finish_weight_update`, which on the IPC engine also closes
+the `PackedBufferImporter`: the worker's mapping of the trainer's packed staging buffer.
+The trainer frees that buffer (`ipc_collect`) only after the mapping is released, so
+the LoRA finish calls `skyrl_release_receive_buffers` instead, even when staging fails.
+
+The vLLM side is a runtime patch, `patches/vllm/patch_lora_in_memory.py`, applied by the
+worker-extension import like the other vLLM patches: stock vLLM can only load an
+adapter from a directory. The adapter is built on the GPU so the
+sender's dtype cast makes vLLM's per-key `.to()` a no-op and aliases keep sharing storage;
+building on CPU would pin a private copy per key and re-inflate a deduplicated adapter to
+its public size (30.77 GB vs 0.62 GB on GLM-5.3 rank 32).
+
+Not supported with `delta` or `sharded_rdt` (neither has a chunk stream to carry an
+adapter: delta publishes checkpoint diffs and sharded_rdt bakes a pull plan into model
+params), nor with FSDP yet; `validate_inference_engine_cfg` rejects those. `sync_mode=disk`
+is the existing PEFT-files path and remains the default.
+
+Memory and lifecycle, per inference GPU:
+
+- **Trainer export.** The bridge yields the *public* adapter (one key per expert); the
+  source dedupes while streaming, so peak GPU memory is the unique adapter plus one
+  tensor, not the public size. Duplicate groups are per `(module, EP-rank expert group,
+  lora_A|lora_B)`, verified with `torch.equal`, so a wrong group size costs bandwidth only.
+- **Staged tensors** (`patch_lora_in_memory._STAGED`, keyed by adapter name) are the unique
+  tensors in the inference dtype. They are kept after the load because vLLM rebuilds
+  an LRU-evicted adapter by calling `_load_adapter` again: with a directory it re-reads the
+  files, here it re-reads the stage. After activation they live on pinned host memory (see
+  below), so a rebuild builds on the host like the directory path, including `pack_moe`,
+  which is several times slower there than on the GPU. A resync for the same
+  name replaces the stage; `RemoteInferenceClient.unload_lora_adapter` also issues
+  `skyrl_discard_in_memory_lora` so an unloaded tenant frees its tensors.
+- **The stage must never be written by vLLM.** vLLM applies `lora_alpha / r` by multiplying
+  `lora_b` *in place* on every load (`LoRALayerWeights.optimize`), and since the `LoRAModel`
+  shares the staged storage, a non-unit scale would compound on every LRU rebuild (dense and
+  packed-linear modules; `pack_moe` copies experts into a stacked tensor, so they would stay
+  correct, making the drift hard to spot). Both publication paths therefore fold `alpha / r`
+  into `lora_B` (`fold_lora_alpha_for_vllm`, after the per-module rank fold) and publish
+  `lora_alpha == r`, so vLLM's scale is exactly 1 and `optimize` is a no-op; the in-memory
+  loader rejects a config where they differ. The published adapter is vLLM-shaped, not the
+  trainer's raw tensors: a consumer reading `lora_B` directly sees it pre-scaled.
+- **The registered `LoRAModel` lives on pinned host memory after activation**, as on the
+  directory path. It is built on the GPU (fast `pack_moe`, aliases kept shared), and the
+  patched `add_adapter` calls `offload_in_memory_adapter` once vLLM has copied it into its
+  pre-allocated LoRA slots: `lora_a` / `lora_b` of every module and the staged tensors move
+  to pinned host memory (tensors that shared GPU storage share one host copy), then
+  `torch.cuda.empty_cache()`. Generation reads only the slots; an evicted adapter is
+  re-activated by vLLM's `set_lora` from the host tensors. The GPU therefore holds the
+  built adapter only during the sync. vLLM packs per-expert LoRA into stacked tensors sized
+  to the local experts, so a MoE `LoRAModel` costs roughly its *local un-deduplicated* size
+  -- per MoE layer and local expert, `3 * r * (hidden + moe_intermediate)` elements in the
+  LoRA dtype. That copy plus the staged tensors is the transient GPU peak of each sync,
+  and the pinned host memory each worker holds per registered adapter (freed host blocks
+  return to PyTorch's pinned-host cache, not to the OS). The LoRA slots themselves are allocated at startup and
+  scale with `max_loras`; with multi-tenant `max_loras` above 1, budget the slots per
+  resident adapter.
+  Measured on GLM-5.3 (`glm_moe_dsa`, 256 routed experts, Megatron EP8 -> vLLM TP8, B300
+  268 GiB): **~22.4 GiB per resident adapter per inference GPU** — vLLM's weight-load
+  memory fell from 220.94 to 198.56 GiB going `max_loras` 2 -> 1. On a 1.4 TB base model
+  that is the binding constraint: with `max_loras=2` and `gpu_memory_utilization=0.8` the
+  weights alone exceeded vLLM's budget (no KV cache), and raising utilization only let the KV
+  cache grow into the freed space, because the staged tensors are received into the worker
+  process outside what `gpu_memory_utilization`'s profiling accounts for. For a single tenant
+  on many-expert models use `max_loras=1` (the adapter is replaced in place; register stage
+  stayed 0.4-0.5 s across syncs) and size utilization so `total * util - weights - activations`
+  leaves both a KV cache and headroom for the stage.
+- **Measured (4xH100-80G, one node).** GLM-4.7-Flash (31B, 64 routed experts),
+  Megatron EP2 -> vLLM TP2, non-colocated, LoRA rank 32, GSM8K GRPO with
+  `use_kl_loss=false`, 48 prompts at batch 16 (3 syncs), the same job run once per
+  `sync_mode`. Mean `timing/sync_weights`
+  over three syncs, two runs: **disk 6.74 s then 5.83 s, memory 0.486 s then
+  0.490 s -- 12-14x, and ~5.5 s saved per sync.** The disk path is what varies
+  (file write, then a read per worker); the memory path is stable to a
+  millisecond. The rollout-vs-trainer logprob gap is unchanged between modes
+  (0.034 vs 0.032), which is what says the adapter actually landed. Rank-0 stage
+  split for the memory path: export 0.28-0.29 s, send 0.10-0.11 s, register on
+  vLLM 0.09-0.10 s. Dedupe on this model: **928 unique tensors against 17112
+  public (19.4x)** -- the per-expert keys alias 32-to-1 under EP2, while
+  attention and shared-expert keys never alias. Note the disk baseline is the
+  *favourable* case: trainer and engines shared a node, so `lora_sync_path` was
+  local NVMe with a warm page cache rather than the shared mount a real
+  non-colocated run needs. This config runs `normalize_moe_lora=false`, so every
+  module sits at `config_rank` and the rank-scale fold is a no-op in both paths
+  -- the fold is covered by its own unit tests, not by this job.
+- **Debugging.** The trainer logs `LoRA sync (memory): adapter ... exported in Xs, sent in
+  Ys, registered on vLLM in Zs` on rank 0. Worker-side failures (`no tensors are staged`,
+  `expected target modules ... but received`) surface through
+  `/skyrl/v1/load_lora_adapter` as 500s.
+
 ## Delta backend
 
 Unlike the push backends, delta sync does not send tensors to the receiver at all — it
@@ -209,10 +385,9 @@ checkpoint in place, so it is the only one that needs generation stopped.
 
 The engine owns its layerwise-reload lifecycle like every other one
 (`start_weight_update` → `initialize_layerwise_reload`, `finish_weight_update` →
-`finalize_layerwise_reload`), which is what runs `process_weights_after_loading`. Its
-drafter reload takes a **second** `iter_tensors` pass rather than the push backends'
-proxy: materializing a whole checkpoint into a list so the drafter can re-read it would
-put the entire model in memory at once.
+`finalize_layerwise_reload`), which is what runs `process_weights_after_loading`. Under
+speculative decoding the trainer re-applies the same published version in a draft session;
+the drafter's `load_weights` keeps the MTP names from the full checkpoint stream.
 
 `DeltaWeightSyncConfig.__post_init__` derives `local_checkpoint_dir` and `publish_staging_dir`
 from `sync_dir` when unset, so consuming classes never invent their own defaults.
@@ -236,7 +411,7 @@ change arrives for free):
 Three source flavors, chosen by `make_megatron_weight_source` / `make_fsdp_weight_source`:
 
 - `RdtFsdpWeightSource` — the shared FSDP source re-ordered **group-major**, so
-  `layerwise_groups` partitions `metadata()` exactly. The push backends do not care about
+  `layerwise_groups` partitions `metadata` exactly. The push backends do not care about
   order (any permutation transfers identically as long as the two channels agree), which
   is why only RDT pays for the reorder.
 - `MegatronStackedWeightSource` — PP-local and EP-local, gathering experts at stack
@@ -381,24 +556,31 @@ vLLM's native routes, driven by the trainer engine through `SkyrlWeightSyncClien
 `GPUWorker` opens `set_current_vllm_config` around steps 2-4 itself, which is why the
 receive path needs no SkyRL wrapper.
 
-### Spec-decode drafter reload
+### Spec-decode drafter: the draft session
 
-vLLM's engines call `self.model.load_weights(...)` directly and there is still no
-`load_weights` callback, so `weight_receivers.SkyrlDrafterReloadMixin` swaps `self.model` for
-a `_LoadWeightsProxy` for the duration of `receive_weights` — the drafter
-(`model_runner.drafter.model`, a separate module the main load never touches) is then
-reloaded from exactly the weights the main model just received. The proxy is only
-installed when this process actually *has* a drafter, so a non-MTP deployment runs vLLM's
-path verbatim.
+vLLM's MTP drafter is a separate model that the main model's load never touches, and
+colocated sleep at level 2 discards its weights. Every supported speculative method (MTP)
+drafts from the policy checkpoint, so under `speculative_config` each sync runs **two
+sessions**: the main model, then the drafter.
 
-Delta is the exception: it re-streams `iter_tensors` a second time instead, because the
-proxy has to materialize the weight list so the drafter can re-read it, and for a whole
-checkpoint that is the entire model resident at once.
+- `/start_draft_weight_update` retargets the worker's receive engine at the drafter
+  (`set_weight_update_target`) for one session; `/finish_weight_update` restores it. The
+  engine's own layerwise reload therefore runs on the drafter, so
+  `process_weights_after_loading` runs there too.
+- `SkyrlWeightSyncClient.draft_session()` routes `start_weight_update` to the draft route.
+  vLLM's trainer engines only ever call `start_weight_update`.
+- `nccl` / `ipc`: `SkyrlDraftSessionMixin.send_weights` replays vLLM's `send_weights` with
+  `self.source` swapped for `skyrl_draft_source`, over the same transport.
+- `delta`: the published checkpoint already carries the MTP head, so the trainer re-applies
+  the same version inside the pause.
+- `sharded_rdt`: unsupported. Its pull plan targets one model, so `build_trainer_engine`
+  and config validation refuse it.
 
-An engine has no route to its worker — it is constructed inside `Worker.load_model`, and
-the worker-extension class is appended to `Worker.__bases__` *after* `Worker` — so
-`patches/vllm/patch_model_runner_registry.py` wraps `GPUModelRunner.load_model` to record
-the runner in a process-global weakref.
+The draft source is `MegatronPolicyWorkerBase._build_draft_weight_source`: a
+`MegatronWeightSource` filtered to the MTP block plus the embedding and output layer. The
+drafter aliases those two and its layerwise reload covers them. FSDP has no MTP head, so
+config validation (`_validate_draft_weight_sync_cfg`) requires Megatron. It also rejects
+serialized FP8 and adapter-only LoRA.
 
 ## KV offload during non-colocated weight sync
 
@@ -409,7 +591,7 @@ Non-colocated normally keeps the engine fully awake and does `pause_generation �
 
 The fully-async path is driven entirely from SkyRL — no vLLM patch. It deliberately avoids the `/sleep`+`/wake_up` HTTP endpoints (which route through `EngineCore.sleep`, force-clearing the prefix cache and preempting every running request at level ≥ 1). Instead it drives the per-worker `CuMemAllocator` directly via two `NewInferenceWorkerWrap` methods invoked over `/collective_rpc`:
 
-- `skyrl_sleep_for_weight_sync(offload_kv)` — `allocator.sleep(offload_tags=("kv_cache",) if offload_kv else ())`: **discards** the weights pool (the broadcast overwrites every parameter on wake) and either offloads the KV cache to CPU or discards it. Model buffers live in the weights pool and are NOT covered by the parameter broadcast (e.g. non-persistent rotary `inv_freq`), so they are saved to CPU here and restored on wake — mirroring `GPUWorker.sleep(level=2)`. All GPU memory is freed regardless. The scheduler is untouched, so KEEP-paused requests stay frozen with valid block tables.
+- `skyrl_sleep_for_weight_sync(offload_kv)` — `allocator.sleep(offload_tags=("runtime", "cudagraph", "kv_cache") if offload_kv else ("runtime", "cudagraph"))`: **discards** the weights pool (the broadcast overwrites every parameter on wake) and either offloads the KV cache to CPU or discards it. The `runtime` (KV-init state) and `cudagraph` pools, new in vLLM 0.32.0, are always offloaded like upstream `CuMemBackend.suspend` does: any wake remaps them, so discarding them crashes the next forward with an illegal memory access. Model buffers live in the weights pool and are NOT covered by the parameter broadcast (e.g. non-persistent rotary `inv_freq`), so they are saved to CPU here and restored on wake — mirroring `GPUWorker.sleep(level=2)`. All GPU memory is freed regardless. The scheduler is untouched, so KEEP-paused requests stay frozen with valid block tables.
 - `skyrl_wake_for_weight_sync(tags)` — `torch.cuda.empty_cache()` (release the broadcast's transient buffers so cumem can remap the KV pool) then `allocator.wake_up(tags)`, which remaps to the **same virtual addresses** and copies CPU→GPU so block tables remain valid. On the `weights` wake it restores the saved buffers; on the `kv_cache` wake it re-inits fp8 KV scales. Does not resume the scheduler (the client does that via `/resume`).
 
 Validated in `validate_inference_engine_cfg`. vLLM-version coupled (mirrors `GPUWorker.sleep`/`wake_up` and the `CuMemAllocator` API) — re-verify on vLLM bumps via the GPU weight-sync test.
@@ -435,8 +617,10 @@ Tests for the second group carry `pytest.importorskip("vllm")` plus
 ## Tests
 
 ```bash
-# CPU — the control plane's per-server init rewrites, the delta publisher, and the
-# sharded_rdt pull plan / producer sidecar / grouped source contract
+# CPU — the control plane's per-server init rewrites, the delta publisher, the
+# sharded_rdt pull plan / producer sidecar / grouped source contract, and the LoRA
+# target (dedupe/aliases in test_lora_target.py, the receive-side branch and the
+# staging copy in test_lora_receive.py — both run without the vLLM wheel)
 uv run --extra dev --extra fsdp pytest tests/backends/skyrl_train/weight_sync/ -v
 
 # GPU — end-to-end weight sync: all four backends through build_trainer_engine
@@ -446,6 +630,10 @@ uv run --isolated --extra dev --extra fsdp \
 # GPU — the Megatron source's two channels must agree (what _checked_iter enforces at runtime)
 uv run --isolated --extra dev --extra megatron \
   pytest tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_weight_source.py -v
+
+# GPU — LoRA weight sync incl. the adapter-only rows: disk and in-memory, colocated and not
+uv run --isolated --extra dev --extra megatron \
+  pytest tests/backends/skyrl_train/gpu/gpu_ci/test_lora.py -k "megatron_adapter" -v
 
 # GPU — end-to-end delta sync (sparse perturbation, fsdp and megatron)
 uv run --isolated --extra dev --extra fsdp \
@@ -465,13 +653,16 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | `control_plane.py`, especially the init rewrites | `test_control_plane.py` (CPU) **and** GPU `test_weight_sync.py` |
 | `weight_senders.py` / a trainer engine | `test_weight_senders.py` (CPU) **and** GPU `test_weight_sync.py` |
 | `register.py` (either factory) | `test_registration.py` (CPU) — it *resolves* each entry, not just membership |
-| `weight_receivers.py` (receive side) | GPU `test_weight_sync.py` only — it runs inside the vLLM worker |
+| `weight_receivers.py` (receive side) | GPU `test_weight_sync.py` — it runs inside the vLLM worker. The LoRA staging branch is also covered on CPU by `test_lora_receive.py` against a stand-in engine |
+| Draft session (`draft_session`, `SkyrlDraftSessionMixin`, `_build_draft_weight_source`) | `test_draft_session.py` (CPU) **and** GPU `megatron/test_mtp_weight_sync.py` |
+| The LoRA target (`lora_target.py`, the LoRA source, `patch_lora_in_memory.py`) | `test_lora_target.py` + `test_lora_receive.py` + `test_sources.py::TestLoraAdapterWeightSource` (CPU), then GPU `test_lora.py -k megatron_adapter` (disk and memory, colocated and not; the memory rows assert nothing was written to `lora_sync_path`) |
 | `NewInferenceWorkerWrap` | GPU `test_weight_sync.py` (CPU tests will not catch regressions) |
 | Delta publish / manifest / payload format | `test_delta_checkpoint.py` **and** GPU `test_delta_weight_sync_e2e.py` |
 | `LocalCheckpointStore` (fetch, replay, apply, cache keys) | `test_delta_checkpoint.py` |
 | `DeltaWeightTransferEngine` (receive side) | GPU `test_delta_weight_sync_e2e.py` only — it runs inside the vLLM worker |
 | Who pauses / resets the prefix cache | `test_prefix_cache_reset.py` **and** `distributed/test_worker_dispatch.py` |
 | `DeltaWeightSyncConfig` defaults or validation | `tests/train/test_config.py` |
+| Serialized FP8 (`fp8/` specs, exclusions, wire formats) | `tests/backends/skyrl_train/weight_sync/fp8/` (CPU; `test_fp8_exclusions_vllm.py` runs SkyRL's exclude list through vLLM's matching and needs the vllm extra) **and** GPU `megatron/test_megatron_models.py -m b200 -k mxfp8` (or `-m h100 -k full_fp8` on Hopper) |
 
 ## vLLM version coupling
 
@@ -504,7 +695,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 - `set_weight_update_target` / `reset_weight_update_target` on `WeightTransferEngine` —
   the draft-session hook. SkyRL's proxy swap composes with it by restoring the exact
   object it found.
-- `GPUModelRunner.load_model` — wrapped by `patch_model_runner_registry`.
+- `/start_draft_weight_update` → `GPUWorker.start_draft_weight_update` — the draft session.
 - `CuMemAllocator` via `vllm.device_allocator.get_mem_allocator_instance` — the KV-offload
   path drives it directly because `EngineCore.sleep` hardcodes
   `clear_prefix_cache = level >= 1` and `CuMemBackend.suspend` cannot express "discard

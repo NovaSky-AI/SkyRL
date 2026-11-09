@@ -147,6 +147,24 @@ class TestTopLevelOverrides:
         skyrl_cfg_on = build_skyrl_config_for_sft(cfg_on)
         assert skyrl_cfg_on.trainer.remove_microbatch_padding is True
 
+    def test_language_model_only_bridges_to_policy(self):
+        skyrl_cfg = build_skyrl_config_for_sft(_sft_cfg_from_overrides([]))
+        assert skyrl_cfg.trainer.policy.language_model_only is False
+
+        cfg = _sft_cfg_from_overrides(["language_model_only=true"])
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.policy.language_model_only is True
+
+    def test_fused_lm_head_logprob_bridges_to_trainer(self):
+        skyrl_cfg = build_skyrl_config_for_sft(_sft_cfg_from_overrides([]))
+        assert skyrl_cfg.trainer.fused_lm_head_logprob is False
+        assert skyrl_cfg.trainer.logprobs_chunk_size == 1024
+
+        cfg = _sft_cfg_from_overrides(["fused_lm_head_logprob=true", "logprobs_chunk_size=2048"])
+        skyrl_cfg = build_skyrl_config_for_sft(cfg)
+        assert skyrl_cfg.trainer.fused_lm_head_logprob is True
+        assert skyrl_cfg.trainer.logprobs_chunk_size == 2048
+
 
 class TestMegatronConfigOverrides:
     """Megatron parallelism config overrides propagate correctly."""
@@ -484,3 +502,17 @@ class TestMultiDatasetValidation:
         cfg = _sft_cfg_from_overrides(["eval_interval=5"])
         with pytest.raises(ValueError, match="requires eval_datasets"):
             validate_sft_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        (["strategy=fsdp"], "requires strategy='megatron'"),
+        (["ckpt_path=s3://bucket/ckpts"], "local ckpt_path"),
+    ],
+)
+def test_optimizer_offload_to_disk_rejects_settings_it_cannot_honor(overrides, match):
+    cfg = _sft_cfg_from_overrides(["megatron_config.optimizer_offload_to_disk.dir=/tmp/state", *overrides])
+
+    with pytest.raises(ValueError, match=match):
+        validate_sft_cfg(cfg)

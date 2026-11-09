@@ -4,16 +4,46 @@ uv run --isolated --extra dev pytest tests/train/utils/test_rate_limiter.py -v
 
 import asyncio
 import time
+from types import SimpleNamespace
 
 import pytest
 from omegaconf import OmegaConf
 
+from skyrl.train.utils import rate_limiter
 from skyrl.train.utils.rate_limiter import (
     AsyncRateLimiter,
     NoOpRateLimiter,
     RateLimiterConfig,
     create_rate_limiter,
 )
+
+
+class _TokenClock:
+    """Control token refill time and release sleeping callers explicitly."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleepers = asyncio.Queue()
+
+    def monotonic(self):
+        return self.now
+
+    async def sleep(self, delay):
+        wakeup = asyncio.get_running_loop().create_future()
+        self.sleepers.put_nowait((delay, wakeup))
+        await wakeup
+
+
+@pytest.fixture
+def token_clock(monkeypatch):
+    clock = _TokenClock()
+    monkeypatch.setattr(rate_limiter, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(
+        rate_limiter,
+        "asyncio",
+        SimpleNamespace(Lock=asyncio.Lock, Semaphore=asyncio.Semaphore, sleep=clock.sleep),
+    )
+    return clock
 
 
 class TestNoOpRateLimiter:
@@ -287,6 +317,147 @@ class TestAsyncRateLimiterCombined:
 
         expected_wait = 1.0 / rate
         assert elapsed >= expected_wait * 0.8
+
+
+class TestAsyncRateLimiterFIFO:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("max_concurrency", [None, 1, 2])
+    async def test_later_arrival_cannot_take_sleeping_callers_token(self, token_clock, max_concurrency):
+        """A caller arriving at refill time waits behind an earlier caller."""
+        limiter = AsyncRateLimiter(rate=1, max_concurrency=max_concurrency)
+        async with limiter:
+            pass
+        admitted = []
+
+        async def enter(index):
+            async with limiter:
+                admitted.append(index)
+
+        tasks = [asyncio.create_task(enter(0))]
+        try:
+            _, first_wakeup = await asyncio.wait_for(token_clock.sleepers.get(), timeout=1)
+            token_clock.now = 1
+            tasks.append(asyncio.create_task(enter(1)))
+            await asyncio.sleep(0)
+            assert admitted == []
+
+            first_wakeup.set_result(None)
+            await asyncio.wait_for(tasks[0], timeout=1)
+            delay, second_wakeup = await asyncio.wait_for(token_clock.sleepers.get(), timeout=1)
+            token_clock.now += delay
+            second_wakeup.set_result(None)
+            await asyncio.wait_for(tasks[1], timeout=1)
+            assert admitted == [0, 1]
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("max_concurrency", [None, 16])
+    async def test_prompt_groups_are_admitted_in_order(self, max_concurrency):
+        """The first16 admissions retain two complete groups of eight samples."""
+        limiter = AsyncRateLimiter(rate=8, max_concurrency=max_concurrency)
+        admitted = []
+        filled = asyncio.Event()
+        hold = asyncio.Event()
+
+        async def enter(group, sample):
+            async with limiter:
+                admitted.append((group, sample))
+                if len(admitted) == 16:
+                    filled.set()
+                await hold.wait()
+
+        tasks = [asyncio.create_task(enter(group, sample)) for group in range(16) for sample in range(8)]
+        try:
+            await asyncio.wait_for(filled.wait(), timeout=5)
+            assert admitted[:16] == [(group, sample) for group in range(2) for sample in range(8)]
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cancel_index", [0, 1])
+    async def test_cancelled_rate_waiter_allows_remaining_callers_to_proceed(self, token_clock, cancel_index):
+        """Cancelling the sleeping or queued caller preserves the remaining order."""
+        limiter = AsyncRateLimiter(rate=1, max_concurrency=1)
+        async with limiter:
+            pass
+        admitted = []
+
+        async def enter(index):
+            async with limiter:
+                admitted.append(index)
+
+        tasks = [asyncio.create_task(enter(index)) for index in range(3)]
+        try:
+            _, first_wakeup = await asyncio.wait_for(token_clock.sleepers.get(), timeout=1)
+            await asyncio.sleep(0)
+            token_clock.now = 1
+            tasks[cancel_index].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tasks[cancel_index]
+
+            if not first_wakeup.done():
+                first_wakeup.set_result(None)
+            remaining = [task for index, task in enumerate(tasks) if index != cancel_index]
+            await asyncio.wait_for(remaining[0], timeout=1)
+            delay, wakeup = await asyncio.wait_for(token_clock.sleepers.get(), timeout=1)
+            token_clock.now += delay
+            wakeup.set_result(None)
+            await asyncio.wait_for(remaining[1], timeout=1)
+            assert admitted == [index for index in range(3) if index != cancel_index]
+
+            token_clock.now += 1
+            await asyncio.wait_for(limiter.acquire(), timeout=1)
+            limiter.release()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("rate", [None, 100])
+    @pytest.mark.parametrize("cancel_index", [0, 1])
+    async def test_cancelled_concurrency_waiter_preserves_capacity_and_order(self, rate, cancel_index):
+        """Cancelling a semaphore waiter leaves the slot available to its successors."""
+        limiter = AsyncRateLimiter(rate=rate, max_concurrency=1)
+        await limiter.acquire()
+        admitted = []
+        active = 0
+
+        async def enter(index):
+            nonlocal active
+            async with limiter:
+                active += 1
+                assert active == 1
+                admitted.append(index)
+                try:
+                    await asyncio.sleep(0)
+                finally:
+                    active -= 1
+
+        tasks = [asyncio.create_task(enter(index)) for index in range(3)]
+        try:
+            try:
+                await asyncio.sleep(0)
+                tasks[cancel_index].cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await tasks[cancel_index]
+            finally:
+                limiter.release()
+            await asyncio.wait_for(
+                asyncio.gather(*(task for index, task in enumerate(tasks) if index != cancel_index)), timeout=1
+            )
+            assert admitted == [index for index in range(3) if index != cancel_index]
+            await asyncio.wait_for(limiter.acquire(), timeout=1)
+            limiter.release()
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class TestRateLimiterConfig:

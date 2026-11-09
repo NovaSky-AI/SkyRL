@@ -143,6 +143,7 @@ def prepare_model_pass_batch(
     all_advantages = []
     all_values = []
     all_returns = []
+    all_rollout_logprobs = []
     all_loss_fns = []
     all_loss_fn_configs = []
     request_batch_slices = []
@@ -162,6 +163,7 @@ def prepare_model_pass_batch(
             all_advantages.append(loss_fn_inputs.advantages.data)
             all_values.append(loss_fn_inputs.values.data)
             all_returns.append(loss_fn_inputs.returns.data)
+            all_rollout_logprobs.append(loss_fn_inputs.rollout_logprobs.data)
             all_model_ids.append(model_id)
             all_loss_fns.append(request_data.loss_fn)
             all_loss_fn_configs.append(request_data.loss_fn_config)
@@ -176,6 +178,7 @@ def prepare_model_pass_batch(
         all_advantages=all_advantages,
         all_values=all_values,
         all_returns=all_returns,
+        all_rollout_logprobs=all_rollout_logprobs,
         all_model_ids=all_model_ids,
         all_loss_fns=all_loss_fns,
         all_loss_fn_configs=all_loss_fn_configs,
@@ -356,11 +359,19 @@ class TinkerEngine:
         self.db_engine = create_engine(config.database_url, echo=False)
         enable_sqlite_wal(self.db_engine)
 
+        if config.backend == "jax" and config.runtime_role != "combined":
+            raise ValueError("Single-role runtimes require the fsdp or megatron backend")
+
         # Initialize the backend (handles model state, computation, and adapter management)
         use_ray = config.backend_config.get("use_ray", False)
         backend_class, backend_config_class = get_backend_classes(config.backend, use_ray=use_ray)
-        backend_config = backend_config_class(**config.backend_config)
-        self.backend = backend_class(config.base_model, backend_config)
+        backend_overrides = dict(config.backend_config)
+        if config.backend in ("fsdp", "megatron"):
+            backend_overrides["runtime_role"] = config.runtime_role
+            if config.base_model_checkpoint_path is not None:
+                backend_overrides["generator.inference_engine.served_model_name"] = config.base_model
+        backend_config = backend_config_class(**backend_overrides)
+        self.backend = backend_class(config.base_model_checkpoint_path or config.base_model, backend_config)
 
         # Backends that support async sample routing notify us when their
         # inference endpoint changes; we persist it to EngineStateDB so the

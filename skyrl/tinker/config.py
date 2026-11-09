@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+from typing import Literal
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,6 +16,14 @@ class EngineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     base_model: str = Field(..., description="Base model name (e.g., Qwen/Qwen3-0.6B)")
+    base_model_checkpoint_path: str | None = Field(
+        default=None,
+        description="Compatible base-weight directory to load instead of base_model",
+        json_schema_extra={"argparse_type": str},
+    )
+    runtime_role: Literal["trainer", "inference", "combined"] = Field(
+        default="combined", description="GPU runtime role", json_schema_extra={"argparse_type": str}
+    )
     backend: str = Field(default="megatron", description="Backend to use for training and inference")
     backend_config: dict = Field(
         default_factory=dict,
@@ -59,17 +68,34 @@ class EngineConfig(BaseModel):
         json_schema_extra={"argparse_type": lambda v: None if v == "None" else int(v)},
     )
     forwarding_inference_timeout_sec: float = Field(
-        default=300.0,
+        default=2048.0,
         gt=0,
         description=(
             "Read timeout in seconds for API-side requests forwarded to the "
             "SkyRL-Train-managed inference engine. This must cover time spent "
-            "queued behind other requests as well as generation time."
+            "queued behind other requests as well as generation time: with the "
+            "default unlimited connection count a large rollout burst waits inside "
+            "vLLM's queue, and 128x128 bursts routinely exceed 300s there."
         ),
         json_schema_extra={
             "argparse_type": float,
             "env_var": "SKYRL_FORWARDING_INFERENCE_TIMEOUT_SEC",
         },
+    )
+    external_future_retrieved_ttl_sec: float = Field(
+        default=300.0,
+        gt=0,
+        description=(
+            "How long a forwarded sample result stays in memory after it was delivered, so an "
+            "SDK retry after a lost HTTP response still finds it. Must outlast the SDK's worst-case "
+            "re-poll gap (45s poll timeout + up to 30s backoff, twice). Memory for long-output "
+            "rollouts is roughly completion rate x result size x this window."
+        ),
+    )
+    external_future_completed_ttl_sec: float = Field(
+        default=600.0,
+        gt=0,
+        description="How long a completed but never-delivered forwarded sample result stays in memory.",
     )
     session_cleanup_interval_sec: int = Field(
         default=60,

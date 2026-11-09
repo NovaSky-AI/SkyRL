@@ -16,9 +16,11 @@ from skyrl.utils.log import logger
 class ExternalFuture:
     request_id: int
     model_id: str | None
-    request_data: dict
     status: RequestStatus = RequestStatus.PENDING
+    # Exactly one of these is set on completion: forwarded sample results are
+    # stored as SampleResponse proto wire bytes, errors as JSON text.
     result_data: str | None = None
+    result_proto: bytes | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     completed_at: datetime | None = None
     retrieved_at: datetime | None = None
@@ -44,15 +46,21 @@ class ExternalFutureStore:
     # retry following a lost HTTP response still finds it. Measured from
     # delivery (mark_retrieved), never from the in-store read: a large result
     # can spend minutes being serialized and sent, and starting the clock at
-    # read would evict it mid-delivery.
-    _RETRIEVED_TTL_SECONDS = 120.0
+    # read would evict it mid-delivery. The SDK re-polls after a 45s client
+    # timeout plus up to 30s of backoff, so two consecutive misses span 150s;
+    # the grace has to outlast that.
+    _RETRIEVED_TTL_SECONDS = 300.0
     # Completed but not yet delivered — governs the read/serialize/send window
     # and clients that never come back.
     _COMPLETED_TTL_SECONDS = 600.0
     # Pending entries whose forwarding task died without completing them.
     _PENDING_TTL_SECONDS = 3600.0
 
-    def __init__(self):
+    def __init__(self, *, retrieved_ttl_sec: float | None = None, completed_ttl_sec: float | None = None):
+        if retrieved_ttl_sec is not None:
+            self._RETRIEVED_TTL_SECONDS = retrieved_ttl_sec
+        if completed_ttl_sec is not None:
+            self._COMPLETED_TTL_SECONDS = completed_ttl_sec
         self._entries: dict[int, ExternalFuture] = {}
         # Boot-epoch id space: each server process starts below every id an
         # earlier process could plausibly have handed out (2^20 ids per
@@ -68,12 +76,19 @@ class ExternalFutureStore:
     def create(self, model_id: str | None, request_data: BaseModel) -> int:
         request_id = self._next_request_id
         self._next_request_id -= 1
-        self._entries[request_id] = ExternalFuture(
-            request_id=request_id,
-            model_id=model_id,
-            request_data=request_data.model_dump(mode="json"),
-        )
+        self._entries[request_id] = ExternalFuture(request_id=request_id, model_id=model_id)
         return request_id
+
+    def proto_result(self, request_id: int) -> bytes | None:
+        """Proto wire bytes for a completed result, if it has them."""
+        entry = self._entries.get(request_id)
+        return entry.result_proto if entry is not None else None
+
+    def cache_proto(self, request_id: int, proto: bytes) -> None:
+        """Keep a proto encoding produced at retrieval so retries skip re-encoding."""
+        entry = self._entries.get(request_id)
+        if entry is not None:
+            entry.result_proto = proto
 
     async def wait(self, request_id: int, timeout: float) -> tuple[RequestStatus, types.RequestType, str | None] | None:
         entry = self._entries.get(request_id)
@@ -97,13 +112,21 @@ class ExternalFutureStore:
         if entry is not None:
             entry.retrieved_at = datetime.now(timezone.utc)
 
-    async def complete(self, request_id: int, result_data: BaseModel, status: RequestStatus) -> None:
+    async def complete(self, request_id: int, result_data: BaseModel | bytes, status: RequestStatus) -> None:
+        """Resolve a future with either proto wire bytes or a pydantic result.
+
+        Forwarded samples arrive as ``SampleResponse`` bytes and are served
+        as-is by ``retrieve_future``; anything else is stored as JSON text.
+        """
         entry = self._entries.get(request_id)
         if entry is None:
             # Swept as abandoned before the forwarding task finished.
             logger.warning("External future %s was evicted before its result arrived — dropping", request_id)
             return
-        entry.result_data = result_data.model_dump_json()
+        if isinstance(result_data, bytes):
+            entry.result_proto = result_data
+        else:
+            entry.result_data = result_data.model_dump_json()
         entry.status = status
         entry.completed_at = datetime.now(timezone.utc)
         entry.event.set()

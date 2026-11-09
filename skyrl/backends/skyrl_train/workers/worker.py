@@ -43,15 +43,25 @@ from skyrl.backends.skyrl_train.training_batch import (
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
+    PolicyLossType,
     compute_approx_kl,
     ppo_critic_loss,
+    score_centering_weight,
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
+from skyrl.backends.skyrl_train.utils.sample_support import (
+    SAMPLE_SUPPORT_FIELD,
+    SCORE_CENTERING_SCORES_KEY,
+)
+from skyrl.backends.skyrl_train.utils.sample_support_replay import (
+    score_centering_loss_inputs,
+    score_centering_metrics,
+)
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
     BatchIterator,
+    TokenBasedBatchIterator,
     all_reduce_metrics,
     compute_minibatch_rollout_logprob_diff_metrics,
     get_microbatch_iterator,
@@ -63,6 +73,7 @@ from skyrl.env_vars import (
 )
 from skyrl.train.config import TorchProfilerConfig, TrainerConfig
 from skyrl.train.dataset.replay_buffer import Experience
+from skyrl.train.utils import deadline
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
     configure_ray_worker_logging,
@@ -71,6 +82,11 @@ from skyrl.train.utils.utils import (
 )
 
 _SET_AFFINITY = False
+
+# Allocation/free events kept in the ``record_memory`` history ring buffer. Live
+# blocks in a snapshot keep their allocation stacks regardless of this cap; it
+# bounds only the event trace, which otherwise grows without limit over a run.
+MEMORY_HISTORY_MAX_ENTRIES = 100_000
 
 if TYPE_CHECKING:
     from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
@@ -106,7 +122,7 @@ class DistributedTorchRayActor:
 
         self.record_memory = record_memory
         if record_memory:
-            torch.cuda.memory._record_memory_history()
+            torch.cuda.memory._record_memory_history(max_entries=MEMORY_HISTORY_MAX_ENTRIES)
 
         # Redirect worker output to log file (infra logs shouldn't pollute driver stdout)
         from skyrl.train.utils.ray_logging import redirect_actor_output_to_file
@@ -410,6 +426,10 @@ class Worker(DistributedTorchRayActor):
         """Return this rank's last-window kernel summary, or None."""
         return self.profiler.get_kernel_summary() if self.profiler is not None else None
 
+    def get_device_name(self) -> str:
+        """Returns this worker's CUDA device name, e.g. ``"NVIDIA B200"``, or ``""`` without a GPU."""
+        return torch.cuda.get_device_name() if torch.cuda.is_available() else ""
+
     def _get_module_for_offload(self):
         """Return the model module(s) to be offloaded/backloaded. Megatron offloads `self.actor_module`. FSDP workers use `self.model` directly."""
         return self.model
@@ -538,6 +558,7 @@ class Worker(DistributedTorchRayActor):
             rank=torch.distributed.get_rank(),
             inference_world_size=inference_world_size,
             source_factory=self._build_weight_source,
+            draft_source_factory=self._build_draft_weight_source,
             server_urls=list(inference_engine_client.server_urls),
             data_parallel_size=int(inference_engine_client.data_parallel_size),
             base_model_path=self.cfg.policy.model.path,
@@ -561,6 +582,13 @@ class Worker(DistributedTorchRayActor):
         source and sharded RDT's ownership-aware subclass.
         """
         raise NotImplementedError()
+
+    def _build_draft_weight_source(self, dtype: "torch.dtype") -> Any:
+        """Build the ``WeightSource`` for vLLM's MTP drafter, synced in its own session.
+
+        Only backends whose model carries the MTP head implement it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot sync the spec-decode drafter's weights.")
 
     def _weight_sync_thread(self, fn, *args, **kwargs):
         """Run ``fn`` off the event loop with **this rank's** CUDA device selected.
@@ -677,6 +705,12 @@ class Worker(DistributedTorchRayActor):
         finalize = getattr(self.strategy, "finalize_pending_saves", None)
         if finalize is not None:
             finalize()
+
+    def release_optimizer_state_files(self):
+        """Delete optimizer state kept in files (Megatron ``optimizer_offload_to_disk``) at the end of training."""
+        release = getattr(self.strategy, "release_optimizer_state_files", None)
+        if release is not None and getattr(self, "optimizer", None) is not None:
+            release(self.optimizer)
 
     def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
         _, states = self.strategy.load_checkpoint(
@@ -921,7 +955,7 @@ class PPORayActorGroup:
         ]
         if nonblocking:
             return refs
-        return ray.get(refs)
+        return deadline.ray_get(refs, "offload_to_cpu")
 
     def backload_to_gpu(self, nonblocking: bool = False, backload_optimizer: bool = True, backload_model: bool = True):
         """Backload worker state to GPU
@@ -938,7 +972,7 @@ class PPORayActorGroup:
         ]
         if nonblocking:
             return refs
-        return ray.get(refs)
+        return deadline.ray_get(refs, "backload_to_gpu")
 
     def async_run_ray_method(self, dispatch_type: str, method_name: str, *args: Any, **kwargs: Any) -> List[ObjectRef]:
         """Run a method on all actors using specified dispatch type asynchronously.
@@ -968,7 +1002,6 @@ class PolicyWorkerBase(Worker):
         self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
-        self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.policy_loss_fn: Callable = PolicyLossRegistry.get(self.cfg.algorithm.policy_loss_type)
 
@@ -1005,7 +1038,7 @@ class PolicyWorkerBase(Worker):
             max_tokens_per_microbatch=self.cfg.max_tokens_per_microbatch,
         )
         all_metrics = defaultdict(list)
-        all_loss_fn_outputs = []  # Handle separately from scalar metrics
+        loss_fn_output_batches = []  # per-microbatch; restored to input order below
 
         for microbatch in microbatch_iterator:
             experience = BaseBatchIterator.batch_to_experience(microbatch)
@@ -1019,11 +1052,20 @@ class PolicyWorkerBase(Worker):
             )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
 
             for k, v in metrics.items():
                 all_metrics[k].append(v)
+
+        # Token-based batching packs samples into microbatches out of input order and
+        # appends padding microbatches, so per-sample outputs must be mapped back to
+        # their input positions (and padding entries dropped) before returning.
+        if not any(loss_fn_output_batches):
+            all_loss_fn_outputs = []
+        elif isinstance(microbatch_iterator, TokenBasedBatchIterator):
+            all_loss_fn_outputs = microbatch_iterator.reorder_and_combine_items(loss_fn_output_batches)
+        else:
+            all_loss_fn_outputs = [item for batch in loss_fn_output_batches for item in batch]
 
         # Reduce across microbatches and all-reduce metrics across DP ranks.
         # Loss metrics are pre-scaled sums, so keep the same sum-reduction
@@ -1103,6 +1145,13 @@ class PolicyWorkerBase(Worker):
             new_loss_config = OmegaConf.merge(OmegaConf.create(asdict(loss_config)), OmegaConf.create(loss_fn_config))
             # NOTE: users can provide a custom loss config class, so we need to use the same class after applying overrides
             loss_config = type(loss_config).from_dict_config(new_loss_config)
+        centering_weight = (
+            score_centering_weight(resolved_loss_name, loss_config)
+            if self.cfg.algorithm.enable_score_centering
+            else None
+        )
+        # The FSDP forward returns logit positions, so action t is scored one column earlier.
+        action_positions = slice(-num_actions - 1, -1)
 
         # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -1120,20 +1169,30 @@ class PolicyWorkerBase(Worker):
                 sample_support=experience.rollout_sample_support if sample_support_replay else None,
                 loss_mask=loss_mask if sample_support_replay else None,
                 enable_sample_support_replay=sample_support_replay,
+                centering_weight=centering_weight,
             )
             # loss function
             # TODO: recompute advantages
+            centering_inputs = None
+            loss_rollout_logprobs, score_centering_kwargs = rollout_action_logprobs, {}
+            if centering_weight is not None:
+                centering_inputs = score_centering_loss_inputs(
+                    output[SCORE_CENTERING_SCORES_KEY], action_positions, rollout_action_logprobs, advantages
+                )
+                loss_rollout_logprobs = centering_inputs.sampler_logprobs
+                score_centering_kwargs = centering_inputs.loss_kwargs()
             policy_loss, loss_metrics = current_loss_fn(
                 action_log_probs,
                 old_action_log_probs,
                 advantages,
                 config=loss_config,
                 loss_mask=loss_mask,
-                rollout_logprobs=rollout_action_logprobs,
+                rollout_logprobs=loss_rollout_logprobs,
+                **score_centering_kwargs,
             )
 
-        # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
-        if resolved_loss_name == "cross_entropy":
+        # SFT objectives contain their complete loss and need no RL KL/entropy terms.
+        if resolved_loss_name == PolicyLossType.CROSS_ENTROPY:
             # Policy loss masks are pre-scaled to achieve the correct reduction
             # when summing across the entire minibatch (see `DefaultCollator`).
             # FSDP averages loss value over DP ranks by default,
@@ -1257,6 +1316,12 @@ class PolicyWorkerBase(Worker):
             }
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v
+            if centering_inputs is not None:
+                status.update(
+                    score_centering_metrics(
+                        output[SCORE_CENTERING_SCORES_KEY], centering_inputs, action_positions, loss_mask
+                    )
+                )
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
             status.update(
@@ -1547,7 +1612,6 @@ class CriticWorkerBase(Worker):
         self.scheduler: LRScheduler = None
         self.optimizer: Optimizer = None
         self.strategy: DistributedStrategy = None
-        self.record_memory: bool = False
         self.mesh_rank: MeshRank = None
         self.critic_loss_fn: Callable = ppo_critic_loss
         self._micro_batches_accumulated = 0

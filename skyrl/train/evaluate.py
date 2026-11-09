@@ -1,7 +1,8 @@
 import time
-from collections import Counter, defaultdict
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from skyrl.train.utils.tracking import Tracking
@@ -17,6 +18,7 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
 )
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.generators.base import (
+    GeneratorInput,
     GeneratorInterface,
     GeneratorOutput,
 )
@@ -37,6 +39,115 @@ if TYPE_CHECKING:
     from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
 
 
+@dataclass
+class _EvalRows:
+    """Per-row bookkeeping, aligned index-for-index with the rows of the concatenated ``GeneratorOutput``.
+
+    Not step-wise: one row per input prompt. Step-wise: one row per step of each trajectory.
+    """
+
+    env_classes: List[str] = field(default_factory=list)
+    env_extras: List[Dict[str, Any]] = field(default_factory=list)
+    uids: List[str] = field(default_factory=list)
+    prompts: List[Any] = field(default_factory=list)
+
+    @property
+    def data_sources(self) -> List[Optional[str]]:
+        return [env_extra.get("data_source") for env_extra in self.env_extras]
+
+    def extend(self, other: "_EvalRows") -> None:
+        self.env_classes.extend(other.env_classes)
+        self.env_extras.extend(other.env_extras)
+        self.uids.extend(other.uids)
+        self.prompts.extend(other.prompts)
+
+    def select(self, indices: List[int]) -> "_EvalRows":
+        return _EvalRows(
+            env_classes=[self.env_classes[i] for i in indices],
+            env_extras=[self.env_extras[i] for i in indices],
+            uids=[self.uids[i] for i in indices],
+            prompts=[self.prompts[i] for i in indices],
+        )
+
+
+def _rows_for_output(
+    generator_input: GeneratorInput,
+    uids: List[str],
+    generator_output: GeneratorOutput,
+    step_wise: bool,
+) -> _EvalRows:
+    """Map each output row back to the input prompt that produced it.
+
+    Not step-wise, the generator returns one row per input prompt in input order, so the input
+    columns are the rows. Step-wise, each trajectory expands to one row per step, so rows are
+    resolved through ``generator_output["trajectory_ids"]``.
+    """
+    env_extras = generator_input["env_extras"]
+    if env_extras is None:
+        env_extras = [{} for _ in range(len(generator_input["prompts"]))]
+    if not step_wise:
+        return _EvalRows(
+            env_classes=list(generator_input["env_classes"]),
+            env_extras=list(env_extras),
+            uids=list(uids),
+            prompts=list(generator_input["prompts"]),
+        )
+    by_instance = {
+        traj_id.instance_id: (env_class, env_extra, prompt)
+        for traj_id, env_class, env_extra, prompt in zip(
+            generator_input["trajectory_ids"],
+            generator_input["env_classes"],
+            env_extras,
+            generator_input["prompts"],
+        )
+    }
+    rows = _EvalRows()
+    for traj_id in generator_output["trajectory_ids"]:
+        assert traj_id.instance_id in by_instance, f"Trajectory ID {traj_id.instance_id} not found in input"
+        env_class, env_extra, prompt = by_instance[traj_id.instance_id]
+        rows.env_classes.append(env_class)
+        rows.env_extras.append(env_extra)
+        rows.uids.append(traj_id.instance_id)
+        rows.prompts.append(prompt)
+    return rows
+
+
+def _scored_view(
+    concat_generator_outputs: GeneratorOutput,
+    rows: _EvalRows,
+    step_wise: bool,
+) -> Tuple[Dict[str, list], _EvalRows, Optional[List[int]]]:
+    """Select the rows that metrics are computed over: one per trajectory.
+
+    Not step-wise, every row is a trajectory. Step-wise, only the last step of each trajectory
+    carries the trajectory's reward, so the view keeps ``is_last_step`` rows only.
+
+    Returns the output view, the matching rows, and the per-trajectory step counts to report as
+    ``num_turns`` to the trajectory logger (``None`` lets the logger derive turns from loss masks).
+    """
+    if not step_wise:
+        return concat_generator_outputs, rows, None
+
+    is_last_step = concat_generator_outputs["is_last_step"]
+    keep = [i for i, last in enumerate(is_last_step) if last]
+    view: Dict[str, list] = {}
+    for key, value in concat_generator_outputs.items():
+        if isinstance(value, list):
+            assert len(value) == len(
+                is_last_step
+            ), f"Length mismatch: {len(value)} != {len(is_last_step)} for key {key}"
+            view[key] = [value[i] for i in keep]
+
+    # Steps per trajectory, keyed on the full TrajectoryID (instance + repetition): with
+    # `eval_n_samples_per_prompt > 1` the repetitions of one prompt share `rows.uids` (the prompt
+    # id, which is what pass@n groups by) but are separate trajectories with their own step counts.
+    # Counted over every row, BEFORE the last-step filter; looked up per surviving last-step row.
+    trajectory_keys = [traj_id.to_string() for traj_id in concat_generator_outputs["trajectory_ids"]]
+    step_counts = Counter(trajectory_keys)
+    scored_rows = rows.select(keep)
+    return view, scored_rows, [step_counts[trajectory_keys[i]] for i in keep]
+
+
 @torch.no_grad()
 async def evaluate(
     eval_dataloader: StatefulDataLoader,
@@ -50,6 +161,10 @@ async def evaluate(
 ) -> Dict[str, float]:
     """Runs generation and evaluation of trajectories.
 
+    Handles both plain and step-wise generation (``cfg.generator.step_wise_trajectories``). Step-wise
+    output has one row per step; metrics are computed from the last step of each trajectory, which
+    is where the reward is assigned, while the dump keeps every step.
+
     Args:
         eval_dataloader (StatefulDataLoader): dataloader of the eval dataset
         generator (GeneratorInterface): generator to use
@@ -64,13 +179,11 @@ async def evaluate(
     Returns:
         Dict[str, float]: evaluation metrics
     """
+    step_wise = cfg.generator.step_wise_trajectories
 
     # 1. Get all generator outputs
     generator_outputs: List[GeneratorOutput] = []
-    concat_all_envs: List[str] = []
-    concat_env_extras: List[Dict[str, Any]] = []
-    concat_uids: List[str] = []
-    concat_prompts: List[str] = []
+    rows = _EvalRows()
     sampling_params = cfg.generator.eval_sampling_params
     eval_generate_time = 0.0
     pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
@@ -91,16 +204,10 @@ async def evaluate(
         if vllm_metrics_scraper is not None:
             vllm_metrics_scraper.pause()
         eval_generate_time += time.monotonic() - gen_start
-        validate_generator_output(len(generator_input["prompts"]), generator_output)
+        validate_generator_output(len(generator_input["prompts"]), generator_output, step_wise=step_wise)
         generator_outputs.append(generator_output)
-        concat_all_envs.extend(generator_input["env_classes"])
-        concat_env_extras.extend(generator_input["env_extras"])
-        concat_uids.extend(uids)
-        concat_prompts.extend(generator_input["prompts"])
-    concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
-
-    # Extract data_sources from env_extras
-    concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
+        rows.extend(_rows_for_output(generator_input, uids, generator_output, step_wise))
+    concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs, step_wise=step_wise)
 
     if cfg.trainer.print_example_interval > 0:
         vis = tokenizer.decode(generator_output["response_ids"][0])
@@ -111,26 +218,31 @@ async def evaluate(
             reward=generator_output["rewards"][0],
         )
 
+    # Metrics score one row per trajectory: every row when not step-wise, the last step of each
+    # trajectory when step-wise.
+    scored_outputs, scored_rows, num_turns_list = _scored_view(concat_generator_outputs, rows, step_wise)
+
     # Optionally upload up to `num_logger_eval_samples` samples to tracker (wandb)
     if trajectory_logger is not None:
         with Timer("log_eval_results"):
             trajectory_logger.log(
                 tracker=tracker,
                 num_samples=cfg.trainer.num_logger_eval_samples,
-                prompts=concat_prompts,
-                generator_output=concat_generator_outputs,
+                prompts=scored_rows.prompts,
+                generator_output=scored_outputs,
                 tokenizer=tokenizer,
                 global_step=global_step,
+                num_turns_list=num_turns_list,
                 wandb_key="trajectories/eval",
             )
 
     # 2. Group data by data source and calculate per-dataset metrics
     eval_metrics = calculate_per_dataset_metrics(
-        concat_generator_outputs, concat_uids, concat_data_sources, cfg.generator.eval_n_samples_per_prompt
+        scored_outputs, scored_rows.uids, scored_rows.data_sources, cfg.generator.eval_n_samples_per_prompt
     )
 
     # 3. Calculate overall metrics across all datasets
-    overall_metrics = get_metrics_from_generator_output(concat_generator_outputs, concat_uids)
+    overall_metrics = get_metrics_from_generator_output(scored_outputs, scored_rows.uids)
     eval_metrics.update(
         {
             "eval/all/avg_score": overall_metrics["avg_score"],
@@ -142,7 +254,7 @@ async def evaluate(
     for key, value in concat_generator_outputs["rollout_metrics"].items():
         eval_metrics[f"eval/all/{key}"] = value
 
-    # 4. Prepare dumping data
+    # 4. Prepare dumping data. The dump keeps every row (every step when step-wise).
     # TODO[Ben] update this to be cloud-compatible
     if cfg.trainer.dump_eval_results:
         with Timer("dump_eval_results"):
@@ -156,167 +268,9 @@ async def evaluate(
                 data_save_dir,
                 tokenizer,
                 concat_generator_outputs,
-                concat_data_sources,
-                concat_all_envs,
-                concat_env_extras,
-                eval_metrics,
-            )
-
-    eval_metrics["timing/eval_generate"] = eval_generate_time
-    return eval_metrics
-
-
-@torch.no_grad()
-async def evaluate_step_wise(
-    eval_dataloader: StatefulDataLoader,
-    generator: GeneratorInterface,
-    cfg: SkyRLTrainConfig,
-    global_step: int | None,
-    tokenizer: AutoTokenizer,
-    trajectory_logger: Optional[TrajectoryLogger] = None,
-    tracker: Optional["Tracking"] = None,
-    vllm_metrics_scraper: Optional["VLLMMetricsScraper"] = None,
-) -> Dict[str, float]:
-    """Runs generation and evaluation of trajectories for step-wise training.
-
-    Currently assumes that the rewards are assigned to the last step of each trajectory.
-
-    Args:
-        eval_dataloader (StatefulDataLoader): dataloader of the eval dataset
-        generator (GeneratorInterface): generator to use
-        cfg (SkyRLTrainConfig): config
-        global_step (int | None): current global step, or
-            `None` to indicate a non-training context (e.g., eval-only)
-        tokenizer (AutoTokenizer): tokenizer to use
-        vllm_metrics_scraper: when set, the open ``vllm/eval`` window is resumed
-            around each generation and paused after, so only generation time
-            counts toward eval throughput.
-
-    Returns:
-        Dict[str, float]: evaluation metrics
-    """
-
-    # 1. Get all generator outputs
-    generator_outputs: List[GeneratorOutput] = []
-    concat_all_envs: List[str] = []
-    concat_env_extras: List[Dict[str, Any]] = []
-    concat_uids: List[str] = []
-    concat_prompts: List[str] = []
-    sampling_params = cfg.generator.eval_sampling_params
-    eval_generate_time = 0.0
-    pbar = tqdm(total=len(eval_dataloader), initial=0, desc="Evaluation Progress")
-    for _, prompts in enumerate(eval_dataloader):
-        pbar.update(1)
-        generator_input, uids = prepare_generator_input(
-            prompts,
-            cfg.generator.eval_n_samples_per_prompt,
-            get_sampling_params_for_backend(cfg.generator.inference_engine.backend, sampling_params),
-            cfg.environment.env_class,
-            "eval",
-            global_step,
-        )
-        gen_start = time.monotonic()
-        if vllm_metrics_scraper is not None:
-            vllm_metrics_scraper.resume()
-        generator_output: GeneratorOutput = await generator.generate(generator_input)
-        if vllm_metrics_scraper is not None:
-            vllm_metrics_scraper.pause()
-        eval_generate_time += time.monotonic() - gen_start
-        traj_id_to_input = {
-            traj_id.instance_id: {
-                "env_class": env_class,
-                "env_extras": env_extra,
-                "prompt": prompt,
-            }
-            for traj_id, env_class, env_extra, prompt in zip(
-                generator_input["trajectory_ids"],
-                generator_input["env_classes"],
-                generator_input["env_extras"],
-                generator_input["prompts"],
-            )
-        }
-        for traj_id in generator_output["trajectory_ids"]:
-            assert traj_id.instance_id in traj_id_to_input, f"Trajectory ID {traj_id.instance_id} not found in input"
-            concat_all_envs.append(traj_id_to_input[traj_id.instance_id]["env_class"])
-            concat_env_extras.append(traj_id_to_input[traj_id.instance_id]["env_extras"])
-            concat_uids.append(traj_id.instance_id)
-            concat_prompts.append(traj_id_to_input[traj_id.instance_id]["prompt"])
-        validate_generator_output(generator_input, generator_output, step_wise=True)
-        generator_outputs.append(generator_output)
-    concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs)
-
-    # Extract data_sources from env_extras
-    concat_data_sources = [env_extra.get("data_source") for env_extra in concat_env_extras]
-
-    if cfg.trainer.print_example_interval > 0:
-        vis = tokenizer.decode(generator_output["response_ids"][0])
-        logger.info(f"Eval output example: {vis}")
-
-    # Only use the final step metrics
-    generator_output_last_step = defaultdict(list)
-    is_last_step_mask = concat_generator_outputs["is_last_step"]
-    for key in concat_generator_outputs:
-        if isinstance(concat_generator_outputs[key], list):
-            assert len(concat_generator_outputs[key]) == len(
-                is_last_step_mask
-            ), f"Length mismatch: {len(concat_generator_outputs[key])} != {len(is_last_step_mask)} for key {key}"
-            generator_output_last_step[key] = [
-                val for val, is_last_step in zip(concat_generator_outputs[key], is_last_step_mask) if is_last_step
-            ]
-    uids_last_step = [uid for uid, is_last_step in zip(concat_uids, is_last_step_mask) if is_last_step]
-    data_sources_last_step = [
-        data_source for data_source, is_last_step in zip(concat_data_sources, is_last_step_mask) if is_last_step
-    ]
-    prompts_last_step = [prompt for prompt, is_last_step in zip(concat_prompts, is_last_step_mask) if is_last_step]
-
-    # Optionally upload up to `num_logger_eval_samples` samples to wandb.
-    # For step-wise we override the logger's default loss-mask-based
-    # num_turns with the total step count per trajectory (counted *before*
-    # the last-step filter).
-    if trajectory_logger is not None:
-        trajectory_step_counts = Counter(concat_uids)
-        trajectory_logger.log(
-            tracker=tracker,
-            num_samples=cfg.trainer.num_logger_eval_samples,
-            prompts=prompts_last_step,
-            generator_output=generator_output_last_step,
-            tokenizer=tokenizer,
-            global_step=global_step,
-            num_turns_list=[trajectory_step_counts[uid] for uid in uids_last_step],
-            wandb_key="trajectories/eval",
-        )
-
-    # 2. Group data by data source and calculate per-dataset metrics
-    eval_metrics = calculate_per_dataset_metrics(
-        generator_output_last_step, uids_last_step, data_sources_last_step, cfg.generator.eval_n_samples_per_prompt
-    )
-    # 3. Calculate overall metrics across all datasets
-    overall_metrics = get_metrics_from_generator_output(generator_output_last_step, uids_last_step)
-    eval_metrics.update(
-        {
-            "eval/all/avg_score": overall_metrics["avg_score"],
-            f"eval/all/pass_at_{cfg.generator.eval_n_samples_per_prompt}": overall_metrics["pass_at_n"],
-            "eval/all/mean_positive_reward": overall_metrics["mean_positive_reward"],
-        }
-    )
-
-    # 4. Prepare dumping data
-    # TODO[Ben] update this to be cloud-compatible
-    if cfg.trainer.dump_eval_results:
-        with Timer("dump_eval_results"):
-            data_save_dir = (
-                Path(cfg.trainer.export_path)
-                / "dumped_evals"
-                / ("eval_only" if global_step is None else f"global_step_{global_step}_evals")
-            )
-            data_save_dir.mkdir(parents=True, exist_ok=True)
-            dump_per_dataset_eval_results(
-                data_save_dir,
-                tokenizer,
-                concat_generator_outputs,
-                concat_data_sources,
-                concat_all_envs,
-                concat_env_extras,
+                rows.data_sources,
+                rows.env_classes,
+                rows.env_extras,
                 eval_metrics,
             )
 

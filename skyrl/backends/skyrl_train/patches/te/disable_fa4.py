@@ -17,10 +17,10 @@ Two uses:
 * A/B-ing FA2 against FA4 on identical environments, where re-resolving the venv
   between arms would confound the comparison.
 * An escape hatch if an FA4 kernel misbehaves on shapes or an architecture SkyRL
-  exercises -- e.g. TE 2.16's arch gate only excludes ``< sm80``, so the sm8x
-  parts that are not sm80 proper (sm86/sm87/sm89: A10, L4, L40S, RTX 4090) pass
-  it and then fail in the CuTe JIT with
-  ``cudaErrorInvalidValue ... Target SM ARCH: unknown (unspecified)``.
+  exercises. TE 2.19's own arch gate excludes ``< sm90``, which covers the sm8x
+  parts that used to pass TE 2.16's ``< sm80`` gate and then fail in the CuTe JIT
+  with ``cudaErrorInvalidValue ... Target SM ARCH: unknown (unspecified)``
+  (sm86/sm87/sm89: A10, L4, L40S, RTX 4090), so this is now about sm90+.
 """
 
 import torch
