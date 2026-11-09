@@ -30,6 +30,45 @@ Harbor's `TrialConfig`, with defaults from `../harbor/harbor_trial_config/defaul
 the idle TTL, the renderer pool size, which paths train and how agents inside
 remote sandboxes reach skycap ([below](#agents-inside-remote-sandboxes)).
 
+### Eval
+
+With `data.val_data` set and `trainer.eval_interval > 0`, SkyRL's eval runs its
+trials through the same generator. Three things differ from training:
+
+- **Each trial is scored on its own.** In training, one trial that timed out or
+  failed masks every trial of its task, so GRPO never computes a baseline from a
+  group with holes in it. In eval it scores 0 alone, and the counts reach W&B as
+  `eval/all/generate/skycap/num_timeout_trajectories` and `..._num_error_trajectories`.
+- **Eval samples with `generator.sampling_params`.** skycap applies them to every
+  call, so the trainer's logprobs match what was sampled. The entrypoint raises at
+  startup when `generator.eval_sampling_params` differ in temperature, top_p, top_k
+  or min_p.
+- **Trials go to `<trials_dir>/<phase>/global_step_<N>/`**, so a step's held-out
+  trajectories can be read apart from its training ones.
+
+Eval metrics are grouped by the directories in `data.val_data`
+(`eval/<directory name>/avg_score`, `pass_at_<n>`).
+
+### CodeContests: `run_codecontests.sh`
+
+The recipe trains on CodeContests with checkpoints, exports and a held-out
+eval on by default:
+
+```bash
+RUN_NAME=codecontests-1 NUM_TASKS=256 NUM_PROMPTS=8 GROUP_SIZE=8 STRATEGY=megatron \
+  bash examples/train_integrations/harbor_skycap/run_codecontests.sh
+```
+
+It shuffles all task names once with `SPLIT_SEED`, holds out the first
+`EVAL_TASKS` (32) and trains on the next `NUM_TASKS`, evaluating 2 samples per
+held-out task before the first step, every `EVAL_INTERVAL` (10) steps and after
+the last. It checkpoints every 5 steps (the last 5 kept) and writes a merged
+Hugging Face model to `exports/global_step_<N>/policy` at every epoch end.
+Everything lands in `$OUTPUT_ROOT/$RUN_NAME`, on `/mnt/cluster_storage` when
+the node has it. Launching again with the same `RUN_NAME` resumes from the
+latest checkpoint on the same split; the run needs the parallelism it saved
+with. See the header of the script for every knob.
+
 ## Which paths train
 
 `skycap.train_paths` picks the rows of each rollout:
