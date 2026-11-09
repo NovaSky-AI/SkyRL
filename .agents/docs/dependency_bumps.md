@@ -20,8 +20,8 @@ Every CUDA extension wheel is built for one torch version, so these move togethe
   `NovaSky-AI/skyrl-wheels` release
 - `mamba-ssm`, `causal-conv1d` and the three Transformer Engine packages from Astral's index. TE's three
   packages all come from Astral: its `transformer-engine-torch` pins Astral's TE core.
-- `fast-hadamard-transform` and `flash-mla`, self-built (see the `build-torch-ext-wheels` skill), plus
-  the `torch` pin in `fast-hadamard-transform`'s build dependencies
+- `fast-hadamard-transform` and `flash-mla`, plus the `torch` pin in 
+ `fast-hadamard-transform`'s build dependencies
 
 The new TE-torch build means a torch bump needs the full Transformer Engine test matrix below,
 including the B200 MXFP8 rows.
