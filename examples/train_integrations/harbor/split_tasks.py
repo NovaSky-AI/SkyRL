@@ -1,4 +1,4 @@
-"""A run's training and held-out task sets, from one directory of prepared Harbor tasks.
+r"""A run's training and held-out task sets, from one directory of prepared Harbor tasks.
 
 All task names are sorted and shuffled once with ``--seed``. The first ``--eval`` of that order are the
 held-out tasks and the next ``--train`` are the training tasks, so the held-out set doesn't depend on how many
@@ -8,7 +8,11 @@ tasks a run trains on, and the same seed rebuilds the same split on every launch
 Writes, under ``--run-dir``: ``tasks/`` and ``eval_tasks/`` (a symlink per task, rebuilt on every launch) and
 ``train_tasks.txt`` and ``eval_tasks.txt`` (one name per line).
 
-    python3 split_tasks.py --tasks-dir /tmp/harbor/data/CodeContests --run-dir <run> --eval 32 --train 256 --seed 0
+    python3 examples/train_integrations/harbor/split_tasks.py --tasks-dir /tmp/harbor/data/CodeContests \
+        --run-dir <run> --eval 32 --train 256 --seed 0
+
+Prepared datasets that ship without a held-out split (``open-thoughts/CodeContests`` has a single one) need
+this; ``harbor_skycap/run_codecontests.sh`` runs it on every launch.
 """
 
 import argparse
@@ -73,9 +77,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     names = [entry.name for entry in args.tasks_dir.iterdir() if entry.is_dir()]
     train_names = [name for name in args.tasks.split(",") if name] or None
-    train, held_out = split(
-        names, num_eval=args.eval, num_train=args.train, seed=args.seed, train_names=train_names
-    )
+    train, held_out = split(names, num_eval=args.eval, num_train=args.train, seed=args.seed, train_names=train_names)
     link(args.tasks_dir, train, args.run_dir / "tasks")
     link(args.tasks_dir, held_out, args.run_dir / "eval_tasks")
     (args.run_dir / "train_tasks.txt").write_text("".join(f"{name}\n" for name in train))

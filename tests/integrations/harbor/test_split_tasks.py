@@ -1,8 +1,8 @@
-"""The CodeContests recipe's split into training and held-out tasks."""
+"""Splitting prepared Harbor tasks into training and held-out sets."""
 
 import pytest
 
-from examples.train_integrations.harbor_skycap.split_tasks import main, split
+from examples.train_integrations.harbor.split_tasks import main, split
 
 pytestmark = pytest.mark.integrations
 
