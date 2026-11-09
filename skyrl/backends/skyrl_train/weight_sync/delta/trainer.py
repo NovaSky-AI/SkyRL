@@ -142,7 +142,7 @@ class DeltaTrainerWeightTransferEngine(SkyrlTrainerCapabilities, TrainerWeightTr
                 publish_num_workers=self._init_info.publish_num_workers,
             )
 
-        local_result = self._publisher.create_delta_files(self.source)
+        local_result = self._publisher.create_delta_files(self.source.iter_full())
         if not isinstance(local_result, DeltaPublishResult):
             raise TypeError(f"Expected DeltaPublishResult from the publisher, got {type(local_result)}")
 
