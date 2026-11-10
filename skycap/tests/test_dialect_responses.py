@@ -605,6 +605,36 @@ def test_empty_fields_get_no_item_but_an_empty_turn_gets_one_empty_message(messa
         assert items[0]["content"][0]["text"] == ""
 
 
+@pytest.mark.parametrize(
+    "arguments, patch, replays_as_parsed",
+    [
+        ('{"input":"*** Begin Patch\\n*** End Patch"}', "*** Begin Patch\n*** End Patch", True),
+        ("*** Begin Patch", "*** Begin Patch", False),
+        ('{"patch":"x"}', '{"patch":"x"}', False),
+        ('{"input":3}', '{"input":3}', False),
+    ],
+    ids=["an input string", "bare text", "another object", "a non-string input"],
+)
+def test_a_call_to_a_custom_tool_is_a_custom_item_of_its_input(
+    arguments: str, patch: str, replays_as_parsed: bool
+) -> None:
+    call = parse("q", tools=[{"type": "function", "name": "search"}, {"type": "custom", "name": "apply_patch"}])
+    message = {"role": "assistant", "tool_calls": [tool_call("c1", "apply_patch", arguments), tool_call("c2")]}
+
+    assert RESPONSES.reply(call, sampled(message))["output"] == [
+        {"type": "custom_tool_call", "id": "ctc_k1_0", "call_id": "c1", "name": "apply_patch", "input": patch},
+        {
+            "type": "function_call",
+            "id": "fc_k1_1",
+            "call_id": "c2",
+            "name": "search",
+            "arguments": "{}",
+            "status": "completed",
+        },
+    ]
+    assert (RESPONSES.replayed(call, sampled(message)) == message) is replays_as_parsed
+
+
 def test_a_call_with_empty_arguments_still_has_an_arguments_string() -> None:
     call = {"id": "c", "type": "function", "function": {"name": "f", "arguments": None}}
 
@@ -700,7 +730,7 @@ def _codex_replay(item: dict) -> dict:
 @pytest.mark.parametrize("strip", [False, True], ids=["verbatim", "ids and statuses dropped"])
 def test_a_replayed_reply_regroups_into_the_stored_turn(message: dict, strip: bool) -> None:
     turn = sampled(message)
-    stored = RESPONSES.replayed(turn)
+    stored = RESPONSES.replayed(parse("q"), turn)
     items = RESPONSES.reply(parse("q"), turn)["output"]
     if strip:
         items = [_codex_replay(item) for item in items]
@@ -714,7 +744,7 @@ def test_a_replayed_reply_regroups_into_the_stored_turn(message: dict, strip: bo
 def test_replayed_differs_from_the_parsed_turn_exactly_where_the_wire_cant_say_it() -> None:
     """``content: ""`` beside calls has no message item, so the replay has no ``content`` and hashes apart."""
     message = SHAPES["reasoning and two calls, empty content"]
-    stored = RESPONSES.replayed(sampled(message))
+    stored = RESPONSES.replayed(parse("q"), sampled(message))
 
     assert "content" not in stored
     assert KEY(stored) != KEY(message)
@@ -723,7 +753,7 @@ def test_replayed_differs_from_the_parsed_turn_exactly_where_the_wire_cant_say_i
 
 def test_replayed_does_not_change_the_sampled_turn() -> None:
     message = copy.deepcopy(SHAPES["reasoning and two calls, empty content"])
-    RESPONSES.replayed(sampled(message))
+    RESPONSES.replayed(parse("q"), sampled(message))
 
     assert message == SHAPES["reasoning and two calls, empty content"]
 
@@ -733,13 +763,13 @@ def test_a_client_that_drops_the_reasoning_item_sends_a_different_turn() -> None
     turn = sampled(SHAPES["reasoning and text"])
     items = [item for item in RESPONSES.reply(parse("q"), turn)["output"] if item["type"] != "reasoning"]
 
-    assert KEY(turns([user("q"), *items])[1]) != KEY(RESPONSES.replayed(turn))
+    assert KEY(turns([user("q"), *items])[1]) != KEY(RESPONSES.replayed(parse("q"), turn))
 
 
 def test_chat_replays_the_parsed_turn_itself() -> None:
     message = SHAPES["reasoning and two calls, empty content"]
 
-    assert ChatDialect().replayed(sampled(message)) is message
+    assert ChatDialect().replayed(parse("q"), sampled(message)) is message
 
 
 # -- the stream -----------------------------------------------------------------------------------------

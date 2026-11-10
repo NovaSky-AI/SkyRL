@@ -31,7 +31,8 @@ Reasoning goes in the turn's ``reasoning_content``, the name skycap's renderers
 parse it into (vLLM's own turns call it ``reasoning``).
 
 **Reply.** One turn becomes up to N items, in the order a chat template renders
-them: ``reasoning``, ``message``, then one ``function_call`` per call. Ids derive
+them: ``reasoning``, ``message``, then one ``function_call`` per call, or a
+``custom_tool_call`` for a call to a custom tool's function. Ids derive
 from the sampled tokens, so a replayed reply is byte-identical. The stream is
 built from the finished reply.
 
@@ -176,7 +177,7 @@ class ResponsesDialect(Dialect):
             "created_at": int(time.time()),
             "status": "incomplete" if cut_off else "completed",
             "model": turn.model,
-            "output": output_items(turn),
+            "output": output_items(turn, _custom_names(call)),
             "usage": {
                 "input_tokens": turn.prompt_tokens,
                 "input_tokens_details": {"cached_tokens": 0},
@@ -221,8 +222,8 @@ class ResponsesDialect(Dialect):
             yield events("response.output_item.done", output_index=index, item=item)
         yield events(f"response.{reply['status']}", response=reply)
 
-    def replayed(self, turn: Turn) -> dict[str, Any]:
-        turns = items_to_turns(output_items(turn), "output")
+    def replayed(self, call: CallRequest, turn: Turn) -> dict[str, Any]:
+        turns = items_to_turns(output_items(turn, _custom_names(call)), "output")
         if len(turns) != 1 or turns[0].get("role") != "assistant":
             raise ValueError(f"a reply's items regrouped into {len(turns)} turns, not one assistant turn")
         return turns[0]
@@ -498,10 +499,11 @@ def _custom_function(tool: dict[str, Any], where: str) -> dict[str, Any]:
     return function
 
 
-def output_items(turn: Turn) -> list[dict[str, Any]]:
+def output_items(turn: Turn, custom: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     """A sampled turn as output items: reasoning, message, then one per call. Ids derive from ``turn.key``.
 
-    A turn with nothing at all still gets one empty message, so the client's history holds the turn.
+    A call to one of ``custom``, the request's custom tools, is a ``custom_tool_call`` (``_custom_input``). A turn
+    with nothing at all still gets one empty message, so the client's history holds the turn.
     """
     message = turn.message
     items: list[dict[str, Any]] = []
@@ -530,17 +532,47 @@ def output_items(turn: Turn) -> list[dict[str, Any]]:
         )
     for index, call in enumerate(calls):
         function = call.get("function") or {}
+        name, arguments = function.get("name"), function.get("arguments") or ""
+        if name in custom:
+            items.append(
+                {
+                    "type": "custom_tool_call",
+                    "id": f"ctc_{turn.key}_{index}",
+                    "call_id": call.get("id"),
+                    "name": name,
+                    "input": _custom_input(arguments),
+                }
+            )
+            continue
         items.append(
             {
                 "type": "function_call",
                 "id": f"fc_{turn.key}_{index}",
                 "call_id": call.get("id"),
-                "name": function.get("name"),
-                "arguments": function.get("arguments") or "",
+                "name": name,
+                "arguments": arguments,
                 "status": "completed",
             }
         )
     return items
+
+
+def _custom_names(call: CallRequest) -> frozenset[str]:
+    """The names of the request's custom tools, read from the body ``parse_request`` checked."""
+    return frozenset(tool["name"] for tool in call.body.get("tools") or () if tool.get("type") == "custom")
+
+
+def _custom_input(arguments: str) -> str:
+    """The ``input`` of a sampled call to a custom tool's function, as vLLM decodes it
+    (``decode_custom_tool_input``): the string under ``input``, else the arguments as they are."""
+    # Malformed arguments are passed through, not refused: the client answers the call with its own error, which
+    # the model can learn from. Refusing would fail a call whose turn was already sampled and committed.
+    try:
+        parsed = json.loads(arguments)
+    except ValueError:
+        return arguments
+    payload = parsed.get(CUSTOM_INPUT) if isinstance(parsed, dict) else None
+    return payload if isinstance(payload, str) else arguments
 
 
 def _opened(item: dict[str, Any]) -> dict[str, Any]:

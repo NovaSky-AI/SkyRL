@@ -86,6 +86,51 @@ async def test_a_tool_loop_over_responses_bridges_every_call_after_the_first(str
     assert len(finished["samples"]) == 1
 
 
+CUSTOM_TOOLS = [
+    {
+        "type": "custom",
+        "name": "apply_patch",
+        "description": "Edit files.",
+        "format": {"type": "grammar", "syntax": "lark", "definition": "start: patch"},
+    }
+]
+
+
+def patching(arguments: str) -> Any:
+    """A completion that calls `apply_patch` with ``arguments`` when asked to PATCH, else answers."""
+
+    def completion(prompt: list[int], sampling: dict) -> list[int]:
+        if "PATCH" in decode(prompt[-40:]):
+            return [*encode(f"CALL:apply_patch:{arguments}"), END]
+        return [*encode(f"re{len(prompt)}"), END]
+
+    return completion
+
+
+@pytest.mark.parametrize(
+    "arguments, patch",
+    [
+        ('{"input":"*** Begin Patch\\n*** End Patch"}', "*** Begin Patch\n*** End Patch"),
+        ("*** Begin Patch", "*** Begin Patch"),
+        ('{"patch":"x"}', '{"patch":"x"}'),
+    ],
+    ids=["an input string", "bare text", "another object"],
+)
+async def test_a_custom_tool_call_goes_back_as_one_and_its_replay_bridges(arguments: str, patch: str) -> None:
+    async with token_stack(completion=patching(arguments)) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        history: list[dict] = [user("use a PATCH")]
+        first = await llm.responses.create(model="policy", input=history, tools=CUSTOM_TOOLS)
+        history += items_of(first)
+        history.append({"type": "custom_tool_call_output", "call_id": first.output[0].call_id, "output": "Success."})
+        await llm.responses.create(model="policy", input=history, tools=CUSTOM_TOOLS)
+        finished = await stack.finish(created["id"])
+
+    assert [(item.type, item.name, item.input) for item in first.output] == [("custom_tool_call", "apply_patch", patch)]
+    assert finished["unbridged_calls"] == 0 and len(finished["samples"]) == 1
+
+
 async def test_reasoning_and_a_call_with_empty_content_are_matched_on_replay() -> None:
     """The case ``replayed`` exists for: the parsed ``content: ""`` has no item, so the replay has no
     ``content``. The node is stored as the replay, under its hash, and the next call bridges from it."""
