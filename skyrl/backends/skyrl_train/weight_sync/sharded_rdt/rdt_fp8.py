@@ -55,11 +55,11 @@ class SerializedMxfp8GroupedSource(GroupedWeightSource):
         return self._inner
 
     def _quantizes(self, name: str, shape: tuple) -> bool:
+        if name.removesuffix(".weight") in self._config.user_provided_exclude_list:
+            return False
         if self._spec.stacked_experts(name) is not None:
             # Stacked expert tensors need the receiver's fused-MoE loader, which the RDT bake does not drive.
             raise NotImplementedError(f"sharded_rdt MXFP8 cannot serialize stacked MoE expert tensors ({name!r})")
-        if name.removesuffix(".weight") in self._config.user_provided_exclude_list:
-            return False
         return len(shape) == 2 and self._spec.should_quantize(name, shape, MXFP8)
 
     @cached_property
