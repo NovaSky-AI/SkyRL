@@ -84,9 +84,12 @@ class GeneratedOutputGroup:
     prompts: Optional[List[Any]] = None
 
 
-def _trajectory_ids(groups: List[GeneratedOutputGroup]) -> List[Any]:
-    """The trajectory of each row of the groups' outputs, in order."""
-    return [trajectory_id for group in groups for trajectory_id in group.generator_output["trajectory_ids"]]
+def _trajectory_ids(groups: List[GeneratedOutputGroup]) -> Optional[List[Any]]:
+    """The trajectory of each row of the groups' outputs, in order; None if a generator left them out."""
+    ids = [group.generator_output.get("trajectory_ids") for group in groups]
+    if any(group_ids is None for group_ids in ids):
+        return None
+    return [trajectory_id for group_ids in ids for trajectory_id in group_ids]
 
 
 @dataclass
