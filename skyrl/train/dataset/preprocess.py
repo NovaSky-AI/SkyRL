@@ -404,7 +404,7 @@ class RowCollation:
     max_seq_len: Optional[int]
     # Off-policy correction is on: every row must carry its rollout logprobs.
     require_rollout_logprobs: bool
-    # Router replay is on: every row must carry its routes.
+    # Router replay is on: rows with a loss token must carry their routes.
     routes_expected: bool = False
 
 
@@ -430,7 +430,8 @@ def rows_to_training_input(
         image_grid_thw = TensorList(image_grid_thw)
 
     rollout_expert_indices = rows.get("rollout_expert_indices")
-    if collation.routes_expected and rollout_expert_indices is None:
+    # Rows with nothing to train (every rollout failed) have nothing to replay, as validate_generator_output allows.
+    if collation.routes_expected and rollout_expert_indices is None and any(any(m) for m in rows["loss_masks"]):
         raise ValueError("router replay is on, but the rows carry no rollout_expert_indices")
     (
         sequences,

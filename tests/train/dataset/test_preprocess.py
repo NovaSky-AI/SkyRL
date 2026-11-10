@@ -792,3 +792,7 @@ def test_rows_collated_to_a_padded_shape_match_the_same_rows_collated_with_other
         rows_to_training_input(rows, collation, padded_shape=(2, 1))
     with pytest.raises(ValueError, match="carry no rollout_expert_indices"):
         rows_to_training_input(rows, dataclasses.replace(collation, routes_expected=True))
+    # Every rollout failed: nothing to train, so nothing to replay.
+    untrained = {**rows, "loss_masks": [[0], [0, 0]]}
+    batch = rows_to_training_input(untrained, dataclasses.replace(collation, routes_expected=True))
+    assert batch["rollout_expert_indices"] is None
