@@ -117,6 +117,18 @@ class SkyrlWeightSyncClient:
     def update_weights(self, update_info: Dict[str, Any]) -> None:
         self._fanout_uniform(UPDATE_WEIGHTS_ENDPOINT, {"update_info": _json_safe(update_info)})
 
+    def update_weights_per_server(self, per_server: Sequence[Any]) -> None:
+        """One ``update_info`` per server, in server order. Each may be a dict, or a list
+        indexed by global worker rank (``GPUWorker.update_weights`` routes it), so every
+        worker can receive its own payload (the colocated local-shard send)."""
+        if len(per_server) != len(self._urls):
+            raise ValueError(f"{len(per_server)} update payloads for {len(self._urls)} servers")
+        calls = []
+        for url, info in zip(self._urls, per_server):
+            body = [_json_safe(i) if i else i for i in info] if isinstance(info, list) else _json_safe(info)
+            calls.append((url, UPDATE_WEIGHTS_ENDPOINT, {"update_info": body}))
+        self._fanout(calls)
+
     def finish_weight_update(self, weight_version: Optional[str] = None) -> None:
         # Omit the key entirely when unset so the route's default applies.
         body = {"weight_version": weight_version} if weight_version is not None else None
@@ -155,6 +167,17 @@ class SkyrlWeightSyncClient:
         if uri is not None:
             body["uri"] = uri
         self._fanout_uniform(FETCH_WEIGHTS_ENDPOINT, body)
+
+    def collective_rpc_per_server(self, method: str, kwargs: Optional[Dict[str, Any]] = None) -> List[List[Any]]:
+        """``/collective_rpc`` a worker-extension method on every server; the per-worker results of each."""
+        body = {"method": method, "kwargs": kwargs or {}}
+        out: List[List[Any]] = []
+        for response in self._fanout_uniform("/collective_rpc", body):
+            try:
+                out.append(list(response.json().get("results") or []))
+            except ValueError:
+                out.append([])
+        return out
 
     def reset_prefix_cache(self, reset_running_requests: bool = True) -> None:
         """Reset every server's cache; raise if any server does not confirm it."""

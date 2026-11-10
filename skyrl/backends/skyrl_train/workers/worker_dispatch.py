@@ -806,6 +806,16 @@ class WorkerDispatch:
         if not is_sleeping:
             await self._inference_engine_client.sleep()
 
+        if self._sync_from_offloaded_params():
+            # The export reads each param from its CPU copy (export_from_offloaded_params), so
+            # the trainer's params never share the GPUs with the engines' woken weights. The
+            # offload refreshes that copy from the just-updated GPU params.
+            for model, state in self._gpu_state.items():
+                if state.model_on_gpu or state.optimizer_on_gpu:
+                    self._offload(model, offload_optimizer=True, offload_model=True)
+            self.empty_cache("policy")
+            return
+
         offload_optimizer = self.cfg.trainer.policy.optimizer_config.offload_after_step
         self._ensure_on_gpu(
             "policy",
@@ -824,12 +834,21 @@ class WorkerDispatch:
 
     def _finish_weight_sync(self, adapter_only_sync: bool = False) -> None:
         """Offload policy weights and conditionally offload optimizer state."""
-        if not self.colocate_all or adapter_only_sync:
+        if not self.colocate_all or adapter_only_sync or self._sync_from_offloaded_params():
             return
         self._offload(
             "policy",
             offload_optimizer=self.cfg.trainer.policy.optimizer_config.offload_after_step,
             offload_model=True,
+        )
+
+    def _sync_from_offloaded_params(self) -> bool:
+        """True when a colocated full-weight sync exports from the offloaded Megatron params
+        (``megatron_config.weight_sync_from_offloaded_params``)."""
+        return (
+            self.colocate_all
+            and self.cfg.trainer.strategy == "megatron"
+            and self.cfg.trainer.policy.megatron_config.weight_sync_from_offloaded_params
         )
 
     def _is_lora_no_merge(self) -> bool:

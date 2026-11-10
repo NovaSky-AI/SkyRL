@@ -20,6 +20,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import logging
 import math
 import os
@@ -535,6 +536,53 @@ def offload_megatron_model_to_cpu(models, is_lora: bool = False):
         else:
             for _, param in model_chunk.named_parameters():
                 param.data = param.data.to("cpu", non_blocking=True)
+
+
+@contextlib.contextmanager
+def export_from_offloaded_params(models) -> Iterator[None]:
+    """Let a Megatron-Bridge export read offloaded DDP params from their pinned CPU copies.
+
+    ``offload_megatron_model_to_cpu`` frees each DDP buffer's GPU storage and keeps the data in
+    ``buffer.param_data_cpu``; the params stay views of the empty storage. Inside this context the
+    bridge's per-task read of a param (``_gather_gtp_weight``) returns a GPU copy of the param's
+    slice of that CPU buffer instead, so an export needs one param's worth of GPU memory at a time
+    rather than the reloaded model. Colocated full-weight sync uses it when the trainer's params
+    and the inference engine's weights do not fit on the GPUs together
+    (``megatron_config.weight_sync_from_offloaded_params``). A no-op while the params are on GPU.
+    """
+    cpu_views: Dict[nn.Parameter, torch.Tensor] = {}
+    for chunk in models if isinstance(models, (list, tuple)) else [models]:
+        if not isinstance(chunk, DDP):
+            continue
+        for buffer in chunk.buffers + chunk.expert_parallel_buffers:
+            if (
+                buffer.param_data is None
+                or getattr(buffer, "param_data_cpu", None) is None
+                or buffer.param_data.untyped_storage().size() != 0
+            ):
+                continue
+            for param, (start, end, _) in buffer.param_index_map.items():
+                cpu_views[param] = buffer.param_data_cpu[start:end].view(param.shape)
+    if not cpu_views:
+        yield
+        return
+
+    from megatron.bridge.models.conversion import model_bridge
+
+    original = model_bridge._gather_gtp_weight
+
+    def gather(param):
+        cpu = cpu_views.get(param)
+        if cpu is None or param.untyped_storage().size() != 0:
+            return original(param)
+        # The param is still a view of the (empty) GPU buffer, so it names the device.
+        return cpu.to(param.device)
+
+    model_bridge._gather_gtp_weight = gather
+    try:
+        yield
+    finally:
+        model_bridge._gather_gtp_weight = original
 
 
 @torch.no_grad()

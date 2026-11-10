@@ -961,9 +961,13 @@ async def test_logprobs_matching_roundtrip(
     fp8_mode,
     max_generate_length,
     tmp_path,
+    weight_sync_overrides: dict | None = None,
 ):
     """
     Check that logprob diff matches acrosss vllm and megatron.
+
+    ``weight_sync_overrides`` (dotted config keys) select an opt-in weight-sync path for the
+    syncs; see test_colocated_weight_sync_options_roundtrip.
     """
     # See the comparison branch at the end of the test.
     compare_common_prefix = (
@@ -1047,10 +1051,23 @@ async def test_logprobs_matching_roundtrip(
             # row's 4 x TP=1) stacks every engine's worker on GPU 0 and OOMs.
             cfg.generator.inference_engine.distributed_executor_backend = "mp"
 
+        for key, value in (weight_sync_overrides or {}).items():
+            target = cfg
+            *parents, leaf = key.split(".")
+            for name in parents:
+                target = getattr(target, name)
+            setattr(target, leaf, value)
+        # The test drives the sync itself (not through WorkerDispatch), so it does the dispatch's
+        # part of the offloaded-params path: keep the model offloaded while the engines wake.
+        sync_from_offloaded = cfg.trainer.policy.megatron_config.weight_sync_from_offloaded_params
+
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         tokenizer.pad_token = tokenizer.eos_token
 
         engine_overrides = _engine_overrides_for_model(model_name, fp8_mode)
+        if cfg.generator.inference_engine.weight_sync_local_shard:
+            # Local shards need vLLM expert parallelism to have anything to filter.
+            engine_overrides["engine_init_kwargs"]["enable_expert_parallel"] = True
         async with InferenceEngineState.create(
             cfg=cfg,
             model=model_name,
@@ -1102,7 +1119,7 @@ async def test_logprobs_matching_roundtrip(
                         "pass_through", "init_weight_sync_state", client, cfg.generator.inference_engine
                     )
                 )
-                policy.offload_to_cpu(offload_optimizer=True, offload_model=False)
+                policy.offload_to_cpu(offload_optimizer=True, offload_model=sync_from_offloaded)
                 await client.wake_up(tags=["weights"])
                 with Timer("initial_sync_weights"):
                     ray.get(
@@ -1163,7 +1180,7 @@ async def test_logprobs_matching_roundtrip(
             ), f"Logprob diff should be less than {megatron_threshold}, but is {logprobs_diff.mean().item():.6f}"
 
             # sync weights
-            policy.offload_to_cpu(offload_optimizer=True, offload_model=False)
+            policy.offload_to_cpu(offload_optimizer=True, offload_model=sync_from_offloaded)
             await client.wake_up(tags=["weights"])
             with Timer("sync_weights"):
                 ray.get(
@@ -1242,3 +1259,34 @@ async def test_logprobs_matching_roundtrip(
             assert (
                 logprobs_diff.mean().item() < vllm_threshold
             ), f"Logprob diff should be less than {vllm_threshold}, but is {logprobs_diff.mean().item():.6f}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.megatron_models
+async def test_colocated_weight_sync_options_roundtrip(tmp_path):
+    """The round trip above with every bounded-memory colocated sync option on
+    (docs/design/colocated_weight_sync.md): export from the offloaded params, a 2-slot ring of
+    small slots (several chunks), layer-aligned chunks, and local shards over vLLM EP2. The
+    post-sync logprobs must match the pre-sync ones, so a dropped or misrouted tensor fails."""
+    await test_logprobs_matching_roundtrip(
+        2,
+        1,
+        1,
+        2,
+        1,
+        2,
+        4,
+        "eatang/qwen3-moe-tiny-random",
+        1e-1,
+        2e-1,
+        None,
+        None,
+        tmp_path,
+        weight_sync_overrides={
+            "trainer.policy.megatron_config.weight_sync_from_offloaded_params": True,
+            "generator.inference_engine.weight_sync_num_ipc_buffers": 2,
+            "generator.inference_engine.weight_transfer_threshold_cuda_ipc_GB": 0.01,
+            "generator.inference_engine.weight_sync_layer_aligned_chunks": True,
+            "generator.inference_engine.weight_sync_local_shard": True,
+        },
+    )
