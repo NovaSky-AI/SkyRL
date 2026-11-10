@@ -2,11 +2,11 @@ set -x
 
 # Fully async, multi-turn LoRA RL for DeepSeek-V4.1-Flash (text only) with Megatron + vLLM on separate GPUs.
 #   - trainer: NUM_TRAIN_NODES x 8 GPUs, Megatron TP1 / EP (= all trainer GPUs), LoRA without merge;
-#   - sampler: NUM_ENGINES vLLM engines of TP8 (one per 8-GPU node) serving the released FP8 / MXFP4 weights
+#   - sampler: NUM_ENGINES vLLM engines (ENGINES_PER_NODE per 8-GPU node) serving the released FP8 / MXFP4 weights
 #     (FP4 routed experts), the adapter synced in memory after every step;
 #   - R3 (rollout routing replay), off-policy correction as masked IS (rollout_is + geometric sequence mask) and
 #     score centering (needs the sampler's recorded support), multi-turn episodes with per-trajectory prefix caching.
-# Defaults are 1 trainer node + 2 sampler nodes (8 + 16 GPUs). On 2 nodes: NUM_ENGINES=1.
+# Defaults are 1 trainer node + 2 sampler nodes (8 + 16 GPUs). On 2 nodes: NUM_ENGINES=$ENGINES_PER_NODE.
 #
 # MODEL_PATH: the release in its own format, text only. Build it (all layers, minutes; or a layer slice) with
 #   python examples/train/deepseek_v4_flash/make_text_only_checkpoint.py <release dir> <release dir>  (in place)
@@ -22,7 +22,8 @@ set -x
 : "${DATA_DIR:=$HOME/data/gsm8k_multi_turn}"
 : "${ENV_CLASS:=gsm8k_multi_turn}"
 : "${NUM_TRAIN_NODES:=1}"
-: "${NUM_ENGINES:=2}"
+: "${ENGINES_PER_NODE:=1}"
+: "${NUM_ENGINES:=$(( 2 * ENGINES_PER_NODE ))}"  # engines in total (sampler nodes x ENGINES_PER_NODE)
 : "${MAX_TURNS:=4}"
 : "${MAX_PROMPT_LENGTH:=2048}"
 : "${MAX_GENERATE_LENGTH:=4096}"
@@ -47,9 +48,13 @@ set -x
 # SKYRL_VLLM_MOE_LORA_* EP patches below, runs only decode steps in CUDA graphs (FULL_DECODE_ONLY), and pauses in
 # "wait" mode for weight syncs (RemoteInferenceClient.pause_generation). 8x B200, active rank-32 adapter on attention
 # + experts, 640 sessions, 69-turn rollouts: ~1,420 gen tok/s/GPU at 20k-108k context. VLLM_DP=1 for TP8.
-: "${VLLM_DP:=8}"
-VLLM_TP=$(( 8 / VLLM_DP ))
-: "${VLLM_EP:=$( [ "$VLLM_DP" -gt 1 ] && echo 8 || echo 1 )}"  # VLLM_EP=1 with VLLM_DP>1: DP attention + TP MoE
+# ENGINES_PER_NODE=2 serves two engines of 4 GPUs (DP4 x EP4) per node instead: a long prefill stalls only the 4
+# DP ranks of its engine instead of all 8 (DP ranks step in lockstep). Same 640-session workload per node, simulated
+# trainer: ~1,630 gen tok/s/GPU at 20k-108k vs ~1,380-1,450 with one DP8 engine.
+GPUS_PER_ENGINE=$(( 8 / ENGINES_PER_NODE ))
+: "${VLLM_DP:=$GPUS_PER_ENGINE}"
+VLLM_TP=$(( GPUS_PER_ENGINE / VLLM_DP ))
+: "${VLLM_EP:=$( [ "$VLLM_DP" -gt 1 ] && echo $GPUS_PER_ENGINE || echo 1 )}"  # VLLM_EP=1 with VLLM_DP>1: DP attention + TP MoE
 CUDAGRAPH_MODE_KWARG=""; [ "$VLLM_DP" -gt 1 ] && CUDAGRAPH_MODE_KWARG=', "cudagraph_mode": "FULL_DECODE_ONLY"'
 
 LORA_RANK=32
