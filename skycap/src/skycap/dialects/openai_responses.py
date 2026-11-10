@@ -478,6 +478,8 @@ def _custom_function(tool: dict[str, Any], where: str) -> dict[str, Any]:
     """A custom tool as vLLM v0.33.0 shows it (``custom_tool_as_function_dict``): a function of one string,
     ``input``, with any grammar appended to the description."""
     description = tool.get("description") or ""
+    if not isinstance(description, str):
+        raise RequestError(f"`{where}.description` must be a string")
     form = tool.get("format") or {"type": "text"}
     if not isinstance(form, dict):
         raise RequestError(f'`{where}.format` must be an object, such as {{"type": "text"}}')

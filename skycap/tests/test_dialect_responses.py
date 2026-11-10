@@ -241,6 +241,10 @@ def test_a_custom_tool_is_a_function_of_one_string_with_its_grammar_in_the_descr
         (["search"], "tool type None"),
         ([{"type": "custom", "name": "p", "format": {"type": "regexp"}}], r"`tools\[0\].format` of type 'regexp'"),
         ([{"type": "custom", "name": "p", "format": "text"}], r"`tools\[0\].format` must be an object"),
+        (
+            [{"type": "custom", "name": "p", "description": ["Edit files."]}],
+            r"`tools\[0\].description` must be a string",
+        ),
         ([{"type": "custom", "name": "p", "format": {"type": "grammar", "syntax": "lark"}}], "`definition` as strings"),
         (
             [{"type": "function", "name": "p"}, {"type": "custom", "name": "p"}],
