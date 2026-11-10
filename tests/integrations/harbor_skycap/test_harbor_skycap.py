@@ -717,10 +717,8 @@ async def test_thinking_survives_litellm_so_the_replayed_history_stays_one_path(
 
 def test_remote_sandboxes_are_refused_without_a_concurrency_cap() -> None:
     daytona = {"environment": {"type": "daytona"}}
-    labelled = {
-        "environment": {"import_path": "examples.train_integrations.harbor_skycap.daytona:LabelledDaytonaEnvironment"}
-    }
-    for template in (daytona, labelled):
+    custom = {"environment": {"import_path": "my_pkg.environments:MyEnvironment"}}
+    for template in (daytona, custom):
         for rate_limit in (None, RateLimiterConfig(), RateLimiterConfig(enabled=True, trajectories_per_second=5)):
             with pytest.raises(ValueError, match="max_concurrency"):
                 HarborSkycapGenerator(generator_cfg(rate_limit=rate_limit), deepcopy(template), ["http://x"])
@@ -778,26 +776,3 @@ def test_images_fail_the_step_unless_the_trainer_can_take_them() -> None:
         compose([outcome(gemma)], overlong_filtering=False, include_images=True)
     with pytest.raises(ValueError, match="no processor output"):
         compose([outcome(replace(image, data=None))], overlong_filtering=False, include_images=True)
-
-
-def test_the_labelled_environment_tags_every_sandbox_and_bounds_its_life(monkeypatch) -> None:
-    from daytona import CreateSandboxFromImageParams
-
-    from examples.train_integrations.harbor_skycap import daytona
-
-    created = []
-
-    async def create(self, params, daytona=None):
-        created.append(params)
-
-    monkeypatch.setattr(daytona.DaytonaEnvironment, "_create_sandbox", create)
-    environment = object.__new__(daytona.LabelledDaytonaEnvironment)
-    environment._labels, environment._ttl_minutes = {"owner": "me", "run": "r1"}, 90
-
-    asyncio.run(environment._create_sandbox(CreateSandboxFromImageParams(image="x", labels={"kept": "1"})))
-
-    (params,) = created
-    assert params.labels == {"kept": "1", "owner": "me", "run": "r1"} and params.ttl_minutes == 90
-    with pytest.raises(ValueError, match="needs labels"):
-        daytona.LabelledDaytonaEnvironment(labels={})
-    assert daytona.command_is_unscoped({"owner": "me"}) and not daytona.command_is_unscoped({"owner": "me", "run": "r"})
