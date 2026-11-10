@@ -239,6 +239,14 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_moe_lora_ep_global_meta impor
 
 apply_moe_lora_ep_global_meta_patch()
 
+# Opt-in (SKYRL_VLLM_LORA_DUMMY_RESIDENT_ADAPTER=1): under DP, idle ranks' per-step dummy batches use the resident
+# adapter instead of building (and then removing) all-zero warmup adapters every step.
+from skyrl.backends.skyrl_train.patches.vllm.patch_lora_dummy_run_resident_adapter import (  # noqa: E402
+    apply_lora_dummy_run_resident_adapter_patch,
+)
+
+apply_lora_dummy_run_resident_adapter_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 

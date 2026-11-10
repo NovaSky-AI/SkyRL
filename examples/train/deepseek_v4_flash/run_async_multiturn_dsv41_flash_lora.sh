@@ -2,11 +2,11 @@ set -x
 
 # Fully async, multi-turn LoRA RL for DeepSeek-V4.1-Flash (text only) with Megatron + vLLM on separate GPUs.
 #   - trainer: NUM_TRAIN_NODES x 8 GPUs, Megatron TP1 / EP (= all trainer GPUs), LoRA without merge;
-#   - sampler: NUM_ENGINES vLLM engines of TP8 (one per 8-GPU node) serving the released FP8 / MXFP4 weights
+#   - sampler: NUM_ENGINES vLLM engines (ENGINES_PER_NODE per 8-GPU node, TP8 by default) serving the released FP8 / MXFP4 weights
 #     (FP4 routed experts), the adapter synced in memory after every step;
 #   - R3 (rollout routing replay), off-policy correction as masked IS (rollout_is + geometric sequence mask) and
 #     score centering (needs the sampler's recorded support), multi-turn episodes with per-trajectory prefix caching.
-# Defaults are 1 trainer node + 2 sampler nodes (8 + 16 GPUs). On 2 nodes: NUM_ENGINES=1.
+# Defaults are 1 trainer node + 2 sampler nodes (8 + 16 GPUs). On 2 nodes: NUM_ENGINES=$ENGINES_PER_NODE.
 #
 # MODEL_PATH: the release in its own format, text only. Build it (all layers, minutes; or a layer slice) with
 #   python examples/train/deepseek_v4_flash/make_text_only_checkpoint.py <release dir> <release dir>  (in place)
@@ -22,7 +22,8 @@ set -x
 : "${DATA_DIR:=$HOME/data/gsm8k_multi_turn}"
 : "${ENV_CLASS:=gsm8k_multi_turn}"
 : "${NUM_TRAIN_NODES:=1}"
-: "${NUM_ENGINES:=2}"
+: "${ENGINES_PER_NODE:=1}"
+: "${NUM_ENGINES:=$(( 2 * ENGINES_PER_NODE ))}"  # engines in total (sampler nodes x ENGINES_PER_NODE)
 : "${MAX_TURNS:=4}"
 : "${MAX_PROMPT_LENGTH:=2048}"
 : "${MAX_GENERATE_LENGTH:=4096}"
@@ -47,9 +48,17 @@ set -x
 # SKYRL_VLLM_MOE_LORA_* EP patches below and runs only decode steps in CUDA graphs: under DP the piecewise
 # (mixed prefill + decode) graphs hit an illegal memory access in vLLM 0.32 even without LoRA, so those steps run
 # eagerly. 8x B200, active rank-32 adapter, 640 sessions, depth up to 200k: 99 gen tok/s/GPU at DP8.
+# ENGINES_PER_NODE=2 splits each node into two engines of 4 GPUs (DP4 x EP4 with VLLM_DP=4): a long prefill stalls
+# only the 4 lockstepped DP ranks of its engine instead of all 8. Depthfirst-shaped sim (640 sessions per node,
+# 69 x (1,065 + ~1,870) tokens, simulated trainer, 1x8 B200): ~1,635 gen tok/s/GPU at 20k-108k vs ~1,400 at DP8.
 : "${VLLM_DP:=1}"
-VLLM_TP=$(( 8 / VLLM_DP ))
-: "${VLLM_EP:=$( [ "$VLLM_DP" -gt 1 ] && echo 8 || echo 1 )}"  # VLLM_EP=1 with VLLM_DP>1: DP attention + TP MoE
+GPUS_PER_ENGINE=$(( 8 / ENGINES_PER_NODE ))
+if [ "$VLLM_DP" -gt "$GPUS_PER_ENGINE" ]; then
+  echo "VLLM_DP=$VLLM_DP exceeds the $GPUS_PER_ENGINE GPUs of an engine (ENGINES_PER_NODE=$ENGINES_PER_NODE)" >&2
+  exit 1
+fi
+VLLM_TP=$(( GPUS_PER_ENGINE / VLLM_DP ))
+: "${VLLM_EP:=$( [ "$VLLM_DP" -gt 1 ] && echo $GPUS_PER_ENGINE || echo 1 )}"  # VLLM_EP=1 with VLLM_DP>1: DP attention + TP MoE
 # DP: decode steps run FULL CUDA graphs; mixed prefill + decode steps run eagerly. Under DP every rank pads to the
 # largest rank's token count in graph mode (one rank's 8k prefill chunk makes all 8 ranks run 8k tokens), while eager
 # steps run each rank's own tokens, so PIECEWISE graphs measured slower with desynced turns (depthfirst sim, staggered
@@ -110,6 +119,11 @@ export SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE="${SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE:-1}"
 export SKYRL_VLLM_MOE_LORA_TWO_KERNEL="${SKYRL_VLLM_MOE_LORA_TWO_KERNEL:-1}"
 export SKYRL_VLLM_MOE_LORA_INT64_OFFSETS="${SKYRL_VLLM_MOE_LORA_INT64_OFFSETS:-1}"
 export SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META="${SKYRL_VLLM_MOE_LORA_EP_GLOBAL_META:-1}"
+# Under DP an idle rank runs a dummy batch every lockstep step; vLLM builds (and then removes) all-zero warmup LoRAs
+# for each one, seconds per step at V4.1's per-expert LoRA: rollout tails and wait-mode pause drains crawl at ~1-3
+# tok/s (a weight-sync /pause can then time out), and the idle rank's experts add no adapter delta to other ranks'
+# tokens. This makes those dummy steps use the resident adapter.
+export SKYRL_VLLM_LORA_DUMMY_RESIDENT_ADAPTER="${SKYRL_VLLM_LORA_DUMMY_RESIDENT_ADAPTER:-1}"
 export VLLM_TUNED_CONFIG_FOLDER="${VLLM_TUNED_CONFIG_FOLDER:-examples/train/deepseek_v4_flash/vllm_tuned_configs}"
 CUDAGRAPH_CAPTURE_SIZES="$(python3 -c 'print([1, 2, 4] + list(range(8, 256, 8)) + list(range(256, 1025, 16)) + [1152, 1280, 1536, 1792, 2048, 2560, 3072, 3584, 4096, 5120, 6144, 7168, 8192])')"
 ENGINE_INIT_KWARGS='{"max_model_len": '"$MAX_MODEL_LEN"', "async_scheduling": '"$ASYNC_SCHEDULING"', "swa_bounded_replay": false, "lora_target_modules": '"$VLLM_LORA_TARGET_MODULES"', "max_num_batched_tokens": '"$MAX_NUM_BATCHED_TOKENS"', "prefill_schedule_interval": '"$PREFILL_SCHEDULE_INTERVAL"', "compilation_config": {"cudagraph_capture_sizes": '"$CUDAGRAPH_CAPTURE_SIZES""$CUDAGRAPH_MODE_KWARG"'}}'
