@@ -29,6 +29,27 @@ from skyrl.train.fully_async_trainer import (
 )
 
 
+class _PartialRolloutAdmissionController(_AsyncStalenessManager):
+    """Admit a group while fewer than ``max_concurrent_generation_groups`` groups are not yet trained on.
+
+    A group holds its slot from submission until the step that trains on it. A finished group that
+    waits in the buffer still holds its slot, and so does a cut group that waits to resume. So each
+    step admits ``mini_batch_size`` new groups, and a resumed group is never blocked.
+
+    This rule replaces the staleness capacity rule of ``_AsyncStalenessManager``. The cut bounds the
+    staleness, so ``max_staleness_steps`` is not used."""
+
+    def __init__(self, max_concurrent_generation_groups: int, mini_batch_size: int):
+        # The override of `_compute_capacity_unlocked` does not read `max_staleness_steps`.
+        super().__init__(max_concurrent_generation_groups, mini_batch_size, max_staleness_steps=0)
+
+    def _compute_capacity_unlocked(self) -> int:
+        # The steps before `_current_global_step` trained on `mini_batch_size` groups each.
+        trained = (self._current_global_step - 1) * self.mini_batch_size
+        not_yet_trained = self._stat.accepted + self._stat.running - trained
+        return self.max_concurrent_generation_groups - not_yet_trained
+
+
 class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
     """The colocated partial-rollout trainer. See the module docstring."""
 
@@ -46,11 +67,9 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
         return self.num_parallel_generation_workers
 
     def _build_admission_controller(self) -> _AsyncStalenessManager:
-        # No staleness term: the cut bounds the staleness, and a resumed group already holds its slot.
-        return _AsyncStalenessManager(
+        return _PartialRolloutAdmissionController(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
-            max_staleness_steps=None,
         )
 
     def _validate_placement_and_capacity(self) -> None:

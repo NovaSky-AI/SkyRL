@@ -1,7 +1,8 @@
 """CPU tests for colocated partial rollout.
 
-The tests cover the staleness manager without a staleness term, the hold-and-resume of aborted requests in the client, and
-the order of engine sleep, training, checkpoint and weight sync in one step."""
+The tests cover the admission controller of the partial-rollout trainer, the hold-and-resume of
+aborted requests in the client, and the order of engine sleep, training, checkpoint and weight sync
+in one step."""
 
 import asyncio
 from types import SimpleNamespace
@@ -14,8 +15,10 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
     RemoteGenerateResult,
     RemoteInferenceClient,
 )
-from skyrl.train.fully_async_trainer import _AsyncStalenessManager
-from skyrl.train.partial_rollout_trainer import PartialRolloutRayPPOTrainer
+from skyrl.train.partial_rollout_trainer import (
+    PartialRolloutRayPPOTrainer,
+    _PartialRolloutAdmissionController,
+)
 from tests.train.test_rl_callbacks import (
     _FAKE_CKPT_PATH,
     DummyDataset,
@@ -25,7 +28,7 @@ from tests.train.test_rl_callbacks import (
 )
 
 # ---------------------------------------------------------------------------
-# _AsyncStalenessManager without a staleness term
+# _PartialRolloutAdmissionController
 # ---------------------------------------------------------------------------
 
 
@@ -36,7 +39,7 @@ async def test_admission_without_staleness_holds_slot_until_trained():
     A finished group that waits in the buffer still holds its slot. So running + buffered never exceeds
     the in-flight bound, which is also the buffer size, and the cut fraction is
     1 - mini_batch / in_flight. There is no staleness term."""
-    ctrl = _AsyncStalenessManager(max_concurrent_generation_groups=3, mini_batch_size=2, max_staleness_steps=None)
+    ctrl = _PartialRolloutAdmissionController(max_concurrent_generation_groups=3, mini_batch_size=2)
     for _ in range(3):
         await ctrl.acquire_submission_slot()
     fourth = asyncio.create_task(ctrl.acquire_submission_slot())
