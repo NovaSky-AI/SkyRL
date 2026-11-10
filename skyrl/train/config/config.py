@@ -617,6 +617,13 @@ class MegatronConfig(BaseConfig):
         default_factory=MegatronOptimizerOffloadToDiskConfig
     )
     """Hold the optimizer state on node-local disk; off unless ``optimizer_offload_to_disk.dir`` is set."""
+    weight_sync_from_offloaded_params: bool = False
+    """Colocated full-weight sync (``placement.colocate_all=true``, full fine-tuning) without
+    reloading the policy onto the GPUs: the params are offloaded before the engines wake their
+    weights, and the export reads each param from its pinned CPU copy, one at a time. For models
+    whose trainer params and inference weights do not fit on the GPUs together (e.g. a ~600B MoE
+    at EP32 next to TP8 engines). Costs a host-to-device copy of every param per sync. See
+    docs/design/colocated_weight_sync.md."""
     fp8: Optional[str] = None
     """TransformerEngine FP8 compute format for linear-layer GEMMs, e.g. ``"e4m3"`` or
     ``"hybrid"``. ``None`` (default) trains without FP8. Folded into
@@ -1440,6 +1447,17 @@ class InferenceEngineConfig(BaseConfig):
     Applies to both push backends -- ``nccl`` and colocated ``ipc``. Raised to fit the
     model's largest single parameter when that exceeds it, since a tensor too large for
     the buffer cannot be packed at all."""
+    weight_sync_num_ipc_buffers: int = 1
+    """Colocated CUDA-IPC only. Number of packed IPC buffers in the send ring. ``2`` pipelines
+    the sync: rank 0 ships chunk k on a helper thread while every rank gathers and packs chunk
+    k+1 into the next buffer. Each buffer is ``weight_transfer_threshold_cuda_ipc_GB``."""
+    weight_sync_layer_aligned_chunks: bool = False
+    """Colocated CUDA-IPC only. Cut packed chunks at decoder-layer boundaries (a chunk never
+    spans two ``model.layers.<N>.`` prefixes, and a layer larger than the buffer is split), so
+    one round trip carries about one layer."""
+    weight_sync_local_shard: bool = False
+    """Colocated CUDA-IPC only. Each trainer rank packs only the expert weights the vLLM worker
+    on its own GPU serves (vLLM expert parallelism), sent as per-worker payloads."""
     delta_weight_sync: Optional[DeltaWeightSyncConfig] = None
     """Required when ``weight_sync_backend="delta"``."""
     tensor_parallel_size: int = 1
