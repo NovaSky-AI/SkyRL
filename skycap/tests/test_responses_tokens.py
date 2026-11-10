@@ -176,18 +176,28 @@ async def test_the_same_conversation_over_chat_and_responses_sends_the_same_prom
 
 
 # -- the stream ------------------------------------------------------------------------------------------
-async def test_the_sdks_stream_helper_rebuilds_the_same_response_as_the_json_reply() -> None:
-    async with token_stack(completion=thinking_then_tool) as stack:
+@pytest.mark.parametrize(
+    "completion, ask, tools, items",
+    [
+        (thinking_then_tool, "use a TOOL", TOOLS, 2),
+        (patching('{"input":"*** Begin Patch"}'), "use a PATCH", CUSTOM_TOOLS, 1),
+    ],
+    ids=["function call", "custom call"],
+)
+async def test_the_sdks_stream_helper_rebuilds_the_same_response_as_the_json_reply(
+    completion: Any, ask: str, tools: list, items: int
+) -> None:
+    async with token_stack(completion=completion) as stack:
         created = await stack.create()
         llm = client(created["base_url"])
-        whole = await llm.responses.create(model="policy", input=[user("use a TOOL")], tools=TOOLS)
-        async with llm.responses.stream(model="policy", input=[user("use a TOOL")], tools=TOOLS) as stream:
+        whole = await llm.responses.create(model="policy", input=[user(ask)], tools=tools)
+        async with llm.responses.stream(model="policy", input=[user(ask)], tools=tools) as stream:
             kinds = [event.type async for event in stream]
             streamed = await stream.get_final_response()
 
     assert items_of(streamed) == items_of(whole)
     assert streamed.status == whole.status == "completed"
-    assert kinds.count("response.output_item.done") == 2 and kinds[-1] == "response.completed"
+    assert kinds.count("response.output_item.done") == items and kinds[-1] == "response.completed"
 
 
 # -- a length cut-off -----------------------------------------------------------------------------------------

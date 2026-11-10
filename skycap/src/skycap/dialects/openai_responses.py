@@ -75,7 +75,7 @@ INPUT_TEXT_PARTS = ("input_text", "text", "output_text")
 #: Statuses of an item vLLM would continue rather than answer after.
 PARTIAL_STATUSES = ("in_progress", "incomplete")
 #: Output item types a reply's turn is rebuilt from.
-TURN_ITEM_TYPES = ("reasoning", "message", "function_call")
+TURN_ITEM_TYPES = ("reasoning", "message", "function_call", "custom_tool_call")
 #: Response events that end a streamed reply.
 TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed")
 #: The one parameter of the function a custom tool is shown as, named as vLLM names it (``CUSTOM_TOOL_INPUT_KEY``).
@@ -219,6 +219,10 @@ class ResponsesDialect(Dialect):
                 yield events(
                     "response.function_call_arguments.done", **at, name=item["name"], arguments=item["arguments"]
                 )
+            elif item["type"] == "custom_tool_call":
+                if item["input"]:
+                    yield events("response.custom_tool_call_input.delta", **at, delta=item["input"])
+                yield events("response.custom_tool_call_input.done", **at, input=item["input"])
             yield events("response.output_item.done", output_index=index, item=item)
         yield events(f"response.{reply['status']}", response=reply)
 
@@ -583,6 +587,8 @@ def _opened(item: dict[str, Any]) -> dict[str, Any]:
         return {**item, "content": []}
     if item["type"] == "function_call":
         return {**item, "status": "in_progress", "arguments": ""}
+    if item["type"] == "custom_tool_call":
+        return {**item, "input": ""}
     return item
 
 

@@ -843,6 +843,22 @@ def test_empty_text_and_arguments_send_no_delta() -> None:
     assert "response.output_text.done" in kinds and "response.function_call_arguments.done" in kinds
 
 
+@pytest.mark.parametrize("patch, kinds", [("p", ["delta", "done"]), ("", ["done"])], ids=["input", "empty input"])
+def test_a_custom_call_is_announced_empty_and_streams_its_input(patch: str, kinds: list) -> None:
+    call = parse("q", stream=True, tools=[{"type": "custom", "name": "apply_patch"}])
+    message = {"role": "assistant", "tool_calls": [tool_call("c1", "apply_patch", f'{{"input":"{patch}"}}')]}
+    reply = RESPONSES.reply(call, sampled(message))
+    events = frames(b"".join(RESPONSES.stream(reply)))[2:-1]
+
+    assert [kind for kind, _ in events] == [
+        "response.output_item.added",
+        *[f"response.custom_tool_call_input.{kind}" for kind in kinds],
+        "response.output_item.done",
+    ]
+    assert events[0][1]["item"] == {**reply["output"][0], "input": ""}
+    assert events[-2][1]["input"] == patch and events[-1][1]["item"] == reply["output"][0]
+
+
 def test_a_cut_off_stream_ends_incomplete() -> None:
     events = stream_of(user_reply(), reason="length")
 
@@ -902,8 +918,15 @@ def test_a_completed_reply_is_one_turn_with_chat_usage() -> None:
     assert reply.usage == {"prompt_tokens": 11, "completion_tokens": 4}
 
 
-def test_a_reply_with_calls_finishes_with_tool_calls() -> None:
-    assert RESPONSES.parse_reply(response_object([called("c1")])).finish_reason == "tool_calls"
+@pytest.mark.parametrize(
+    "item, call",
+    [(called("c1"), tool_call("c1")), (patched("c1", "p"), tool_call("c1", "apply_patch", '{"input":"p"}'))],
+    ids=["function", "custom"],
+)
+def test_a_reply_with_calls_is_recorded_with_them_and_finishes_with_tool_calls(item: dict, call: dict) -> None:
+    reply = RESPONSES.parse_reply(response_object([item]))
+
+    assert reply.message["tool_calls"] == [call] and reply.finish_reason == "tool_calls"
 
 
 def test_a_max_output_tokens_cut_off_is_length() -> None:
