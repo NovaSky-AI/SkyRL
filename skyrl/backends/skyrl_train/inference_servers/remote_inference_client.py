@@ -167,15 +167,37 @@ class InferenceServerTimeoutError(RuntimeError):
         )
 
 
+# Control-plane endpoints that are safe to send again: repeating them leaves the server in the same state.
+IDEMPOTENT_CONTROL_ENDPOINTS = frozenset({"/pause", "/resume", "/sleep", "/wake_up", "/get_world_size", "/is_sleeping"})
+CONTROL_PLANE_DISCONNECT_RETRIES = 2
+
+
 @contextlib.asynccontextmanager
 async def _control_plane_request(
-    session: aiohttp.ClientSession, method: str, url: str, **kwargs: Any
+    session: aiohttp.ClientSession, method: str, url: str, *, retry_on_disconnect: bool = False, **kwargs: Any
 ) -> AsyncIterator[aiohttp.ClientResponse]:
-    """``session.request`` bounded by ``SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S``."""
+    """``session.request`` bounded by ``SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S``.
+
+    With ``retry_on_disconnect``, a request whose connection drops before any response arrives
+    (``ServerDisconnectedError`` / ``ClientOSError``) is sent again, up to ``CONTROL_PLANE_DISCONNECT_RETRIES``
+    times. The usual cause is a pooled keep-alive connection the server closed while it sat idle, e.g. across a
+    long weight sync on a client whose event loop is busy; the request never reached the server. Only for
+    idempotent endpoints: an error after the response starts is never retried.
+    """
     timeout_s = SKYRL_INFERENCE_CONTROL_PLANE_TIMEOUT_S
     timeout = aiohttp.ClientTimeout(total=timeout_s if timeout_s > 0 else None)
+    attempts = 1 + (CONTROL_PLANE_DISCONNECT_RETRIES if retry_on_disconnect else 0)
     try:
-        async with session.request(method, url, timeout=timeout, **kwargs) as resp:
+        for attempt in range(attempts):
+            try:
+                resp = await session.request(method, url, timeout=timeout, **kwargs)
+            except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError) as e:
+                if attempt + 1 >= attempts:
+                    raise
+                logger.warning(f"{method} {url}: {e!r} before a response; retrying ({attempt + 1}/{attempts - 1})")
+                continue
+            break
+        async with resp:
             yield resp
     except asyncio.TimeoutError:
         raise InferenceServerTimeoutError(method, url, timeout_s) from None
@@ -1208,7 +1230,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
         """
         session = await self._get_session()
         url = f"{server_url}{endpoint}"
-        async with _control_plane_request(session, method, url, json=json, params=params) as resp:
+        async with _control_plane_request(
+            session, method, url, json=json, params=params, retry_on_disconnect=endpoint in IDEMPOTENT_CONTROL_ENDPOINTS
+        ) as resp:
             raw_body = await resp.read()
             body = await _read_json_body(resp) if raw_body else None
             raise_for_status(resp, body)
