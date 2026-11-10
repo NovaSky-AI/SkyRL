@@ -244,7 +244,7 @@ miniswe = [
     "litellm",
 ]
 harbor = [
-    "harbor[daytona,modal]",
+    "harbor[daytona,modal]==0.14.0",
 ]
 # skycap, capturing each rollout's exact tokens in token mode (examples/train_integrations/harbor_skycap).
 skycap = [
@@ -570,7 +570,6 @@ torchvision = [
     { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
-harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
 # NVRx 0.6 wheels require glibc 2.39; its supported source build also works on Ubuntu 22.04.
 nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext", rev = "6c5f2a13c7688d92a7ac7ee6e464721eb8b7345d", marker = "sys_platform == 'linux'" }
 # Megatron-Bridge upstream snapshot, with the matching Core revision below.

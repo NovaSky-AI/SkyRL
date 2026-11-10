@@ -388,7 +388,7 @@ def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
     # As Harbor picks the agent (AgentFactory.create_agent_from_config): a known name wins over an import path.
     name, import_path = agent.get("name"), agent.get("import_path")
     if name is not None and name in AgentName.values():
-        cls = AgentFactory._AGENT_MAP.get(AgentName(name))
+        cls = AgentFactory.get_agent_class(AgentName(name))
     elif import_path:
         module, _, attribute = import_path.partition(":")
         cls = getattr(importlib.import_module(module), attribute)
