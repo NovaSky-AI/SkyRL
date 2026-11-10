@@ -179,7 +179,7 @@ async def test_an_overflow_is_a_failed_response_when_streamed_and_a_400_otherwis
         ({"truncation": "auto"}, "truncation"),
         ({"context_management": [{"type": "compaction"}]}, "context_management"),
         ({"previous_response_id": "resp_1"}, "previous_response_id"),
-        ({"tools": [{"type": "custom", "name": "apply_patch"}]}, "tool type 'custom'"),
+        ({"tools": [{"type": "web_search"}]}, "tool type 'web_search'"),
         ({"input": [{"type": "item_reference", "id": "x"}]}, "Unsupported input item type"),
     ],
 )

@@ -12,11 +12,16 @@ else starts one. Items with a role are turns of that role, and ``instructions``
 is a leading ``system`` turn. (Note that later on in the renderer, ``developer``
 role items may be converted to ``system`` role items.)
 
+A ``custom`` tool, whose input is one raw string, is shown to the model as vLLM
+shows it: a function of one string parameter, ``input``. A grammar on it is
+appended to the description: nothing enforces it while sampling, and vLLM,
+which refuses grammar tools, has no rule to follow.
+
 skycap is stricter than vLLM where vLLM would drop part of the input and so
-change what the model sees: a non-function tool, a second content part in a
-reasoning item or assistant message, a trailing partial assistant item (vLLM
-continues it), and server-held state (``previous_response_id``). Those are
-refused, never dropped. Fields whose chat counterpart the chat dialect ignores
+change what the model sees: a tool that is neither a function nor a custom
+tool, a second content part in a reasoning item or assistant message, a
+trailing partial assistant item (vLLM continues it), and server-held state
+(``previous_response_id``). Those are refused, never dropped. Fields whose chat counterpart the chat dialect ignores
 (``tool_choice``, ``parallel_tool_calls``, ``text``, ``reasoning``, ``include``)
 are ignored here too, and forwarded in text mode.
 
@@ -69,6 +74,8 @@ PARTIAL_STATUSES = ("in_progress", "incomplete")
 TURN_ITEM_TYPES = ("reasoning", "message", "function_call")
 #: Response events that end a streamed reply.
 TERMINAL_EVENTS = ("response.completed", "response.incomplete", "response.failed")
+#: The one parameter of the function a custom tool is shown as, named as vLLM names it (``CUSTOM_TOOL_INPUT_KEY``).
+CUSTOM_INPUT = "input"
 
 
 class ResponsesDialect(Dialect):
@@ -424,7 +431,8 @@ def _refuse_trailing_partial(items: list[Any]) -> None:
 
 
 def _tools(tools: Any) -> list[dict[str, Any]] | None:
-    """Function tools in the chat spelling: every field but ``type`` under ``function``, as vLLM does."""
+    """Tools in the chat spelling, as vLLM converts them: a function's fields but ``type`` under ``function``,
+    and a custom tool as a function of one string (``_custom_function``)."""
     if tools is None or tools == []:
         return None
     if not isinstance(tools, list):
@@ -432,13 +440,53 @@ def _tools(tools: Any) -> list[dict[str, Any]] | None:
     converted = []
     for index, tool in enumerate(tools):
         kind = tool.get("type") if isinstance(tool, dict) else None
-        if kind != "function":
-            raise RequestError(f"tool type {kind!r} (`tools[{index}]`) is not supported: skycap serves function tools")
+        if kind not in ("function", "custom"):
+            raise RequestError(
+                f"tool type {kind!r} (`tools[{index}]`) is not supported: skycap serves function and custom tools"
+            )
         if not isinstance(tool.get("name"), str):
             raise RequestError(f"`tools[{index}].name` must be a string")
-        function = {key: value for key, value in tool.items() if key != "type" and value is not None}
+        # Chat templates render only function tools, and a model emits calls only in its own tool-call format, so a
+        # custom tool is shown as a function. Its calls are mapped back to custom items in the reply.
+        if kind == "custom":
+            function = _custom_function(tool, f"tools[{index}]")
+        else:
+            function = {key: value for key, value in tool.items() if key != "type" and value is not None}
         converted.append({"type": "function", "function": function})
+    names = [tool["function"]["name"] for tool in converted]
+    for tool in tools:
+        if tool["type"] == "custom" and names.count(tool["name"]) > 1:
+            raise RequestError(f"two tools are named {tool['name']!r}: a custom tool's name must be unique")
     return converted
+
+
+def _custom_function(tool: dict[str, Any], where: str) -> dict[str, Any]:
+    """A custom tool as vLLM v0.33.0 shows it (``custom_tool_as_function_dict``): a function of one string,
+    ``input``, with any grammar appended to the description."""
+    description = tool.get("description") or ""
+    form = tool.get("format") or {"type": "text"}
+    kind = form.get("type") if isinstance(form, dict) else None
+    # Nothing enforces a grammar while sampling, and a client's prompt may never spell the format out, so the
+    # description is the only place the model can learn it. Dropping the grammar would change what the model
+    # sees without saying so; vLLM, which this dialect otherwise follows, refuses grammar tools instead.
+    if kind == "grammar":
+        syntax, definition = form.get("syntax"), form.get("definition")
+        if not isinstance(syntax, str) or not isinstance(definition, str):
+            raise RequestError(f"`{where}.format` must give the grammar's `syntax` and `definition` as strings")
+        grammar = f"The input follows this {syntax} grammar:\n{definition}"
+        description = f"{description}\n\n{grammar}" if description else grammar
+    elif kind != "text":
+        raise RequestError(f"`{where}.format` of type {kind!r} is not supported: send `text` or `grammar`")
+    function: dict[str, Any] = {"name": tool["name"]}
+    if description:
+        function["description"] = description
+    function["parameters"] = {
+        "type": "object",
+        "properties": {CUSTOM_INPUT: {"type": "string", "description": "The freeform text payload for this tool."}},
+        "required": [CUSTOM_INPUT],
+        "additionalProperties": False,
+    }
+    return function
 
 
 def output_items(turn: Turn) -> list[dict[str, Any]]:

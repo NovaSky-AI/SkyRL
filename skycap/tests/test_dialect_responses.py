@@ -177,11 +177,51 @@ def test_no_tools_is_none() -> None:
     assert parse("hi", tools=None).tools is None
 
 
-@pytest.mark.parametrize("kind", ["custom", "web_search", "namespace", "local_shell", "file_search", "mcp", None])
-def test_a_non_function_tool_is_refused_by_type_and_position(kind: str | None) -> None:
+@pytest.mark.parametrize("kind", ["web_search", "namespace", "local_shell", "file_search", "mcp", None])
+def test_a_tool_neither_function_nor_custom_is_refused_by_type_and_position(kind: str | None) -> None:
     tools = [{"type": "function", "name": "ok"}, {"type": kind, "name": "apply_patch"}]
 
     refused(rf"tool type {kind!r} \(`tools\[1\]`\) is not supported", "hi", tools=tools)
+
+
+@pytest.mark.parametrize(
+    "fields, description",
+    [
+        ({"description": "Edit files."}, "Edit files."),
+        ({"description": "Edit files.", "format": {"type": "text"}}, "Edit files."),
+        (
+            {"description": "Edit files.", "format": {"type": "grammar", "syntax": "lark", "definition": "start: x"}},
+            "Edit files.\n\nThe input follows this lark grammar:\nstart: x",
+        ),
+        (
+            {"format": {"type": "grammar", "syntax": "regex", "definition": "x+"}},
+            "The input follows this regex grammar:\nx+",
+        ),
+    ],
+    ids=["no format", "text", "grammar", "grammar, no description"],
+)
+def test_a_custom_tool_is_a_function_of_one_string_with_its_grammar_in_the_description(
+    fields: dict, description: str
+) -> None:
+    tools = [{"type": "custom", "name": "apply_patch", **fields}]
+
+    assert parse("hi", tools=tools).tools == [
+        {
+            "type": "function",
+            "function": {
+                "name": "apply_patch",
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string", "description": "The freeform text payload for this tool."}
+                    },
+                    "required": ["input"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -189,7 +229,14 @@ def test_a_non_function_tool_is_refused_by_type_and_position(kind: str | None) -
     [
         ({"type": "function"}, "`tools` must be a list"),
         ([{"type": "function"}], r"`tools\[0\].name` must be a string"),
+        ([{"type": "custom"}], r"`tools\[0\].name` must be a string"),
         (["search"], "tool type None"),
+        ([{"type": "custom", "name": "p", "format": {"type": "regexp"}}], r"`tools\[0\].format` of type 'regexp'"),
+        ([{"type": "custom", "name": "p", "format": {"type": "grammar", "syntax": "lark"}}], "`definition` as strings"),
+        (
+            [{"type": "function", "name": "p"}, {"type": "custom", "name": "p"}],
+            "two tools are named 'p': a custom tool's name must be unique",
+        ),
     ],
 )
 def test_malformed_tools_are_refused(tools: Any, match: str) -> None:
