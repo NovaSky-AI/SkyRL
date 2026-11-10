@@ -316,10 +316,14 @@ class RemoteGenerateClient:
     ) -> Any:
         """POST JSON with retries, optionally splicing packed arrays before parsing."""
         session = await self._get_session()
+        # Encode once, with orjson: a long-context request is ~100k+ token ids, which stdlib json (aiohttp's
+        # json=) encodes ~6x slower (~7 ms vs ~1.2 ms at 155k tokens), all on the client's single event loop.
+        data = orjson.dumps(json, option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_NUMPY)
+        headers = {"Content-Type": "application/json", **(headers or {})}
         last_exc: Optional[Exception] = None
         for attempt in range(_DATA_PLANE_RETRIES):
             try:
-                async with session.post(url, json=json, headers=headers) as resp:
+                async with session.post(url, data=data, headers=headers) as resp:
                     try:
                         raw = await resp.read()
                         body = load_packed_body(raw) if packed_side_channels else orjson.loads(raw)
