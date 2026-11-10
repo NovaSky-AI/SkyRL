@@ -47,6 +47,17 @@ def test_an_oversized_scatter_gets_its_own_run():
     assert [[sc.i for sc in run] for run in runs] == [[0], [1], [2]]
 
 
+@pytest.mark.parametrize("nbytes", [2 << 30, 2_562_893_824])
+def test_a_single_scatter_in_the_hanging_range_raises(nbytes):
+    with pytest.raises(ValueError, match="2-4 GiB"):
+        split_scatters_by_bytes([_sc(0, 10), _sc(1, nbytes)], 1 << 30)
+
+
+def test_a_single_scatter_outside_the_hanging_range_is_kept():
+    runs = split_scatters_by_bytes([_sc(0, 4_960_581_632)], 1 << 30)
+    assert [[sc.i for sc in run] for run in runs] == [[0]]
+
+
 def test_a_chunk_that_hung_is_cut_below_2gib():
     # A 2,562,893,824-byte pull (one MoE layer on the MXFP8 wire at TP4) hung before the cap.
     scatters = [_sc(i, 2_562_893_824 // 1557) for i in range(1557)]

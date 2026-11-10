@@ -1585,11 +1585,17 @@ def _max_pull_bytes() -> int:
 
 def split_scatters_by_bytes(scatters: "list[_Scatter]", max_bytes: int) -> "list[list[_Scatter]]":
     """Cut one chunk's scatters, in order, into runs of at most ``max_bytes`` packed bytes
-    (16-byte alignment included). A scatter larger than the cap gets a run of its own."""
+    (16-byte alignment included). A scatter larger than the cap gets a run of its own; one whose
+    size falls in a hanging range (length mod 4 GiB >= 2 GiB) raises."""
     runs: "list[list[_Scatter]]" = []
     cur: "list[_Scatter]" = []
     size = 0
     for sc in scatters:
+        if sc.nbytes % (4 << 30) >= (2 << 30):
+            raise ValueError(
+                f"a single sharded_rdt scatter of {sc.nbytes} bytes would be one NIXL read in the 2-4 GiB range, "
+                "which hangs; use a larger tensor-parallel size for the inference engines"
+            )
         need = ((size + 15) & ~15) + sc.nbytes
         if cur and need > max_bytes:
             runs.append(cur)

@@ -95,7 +95,7 @@ class _Sized:
 def test_an_oom_reserving_a_ring_names_the_cause(monkeypatch):
     import gc
 
-    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda *a, **kw: 0, raising=False)
+    monkeypatch.setattr("torch.accelerator.current_device_index", lambda *a, **kw: 0, raising=False)
     monkeypatch.setattr(gc, "freeze", lambda: None)
     server = _RDTProducerServer(num_rdt_buffers=4, buffer_presize_gb=0.0, gather_lookahead=1)
     made: list[int] = []

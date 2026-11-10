@@ -168,3 +168,17 @@ def test_holding_everything_stays_none():
 def test_only_the_mxfp8_wire_is_accepted():
     with pytest.raises(ValueError, match="only the MXFP8"):
         SerializedMxfp8GroupedSource(_DictSource(_tensors()), _glm5_config("blockwise"))
+
+
+def test_excluded_stacked_experts_pass_through_and_others_raise():
+    import dataclasses
+
+    name = "model.layers.0.mlp.experts.gate_up_proj"
+    src = SerializedMxfp8GroupedSource(
+        _DictSource(_tensors()),
+        dataclasses.replace(_glm5_config(), user_provided_exclude_list=frozenset({name})),
+    )
+    src._spec = SimpleNamespace(stacked_experts=lambda n: object(), should_quantize=lambda *a: True)
+    assert src._quantizes(name + ".weight", (8, H)) is False
+    with pytest.raises(NotImplementedError, match="stacked MoE"):
+        src._quantizes("model.layers.1.mlp.experts.gate_up_proj.weight", (8, H))
