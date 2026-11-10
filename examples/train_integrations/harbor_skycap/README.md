@@ -113,6 +113,20 @@ name before an import path:
 (`CODEX_VERSION`); `harbor_trial_config.agent.kwargs.version` names another.
 Codex's config keys aren't a stable API, so check a new release before bumping it.
 
+Codex has no metadata for open-weight models, and without it Codex leaves out
+its `apply_patch` tool while its instructions still tell the model to use it.
+`SkycapCodex` gives each trial's Codex a model catalog entry for the served
+model: Codex's fallback metadata with `apply_patch` on, carrying the release's
+own instructions (`prompt.md`). The driver fetches them from
+`raw.githubusercontent.com` once per process; when that fails, the trial fails.
+With the version set to `null`, Harbor installs the latest Codex and the
+instructions come from Codex's `main` branch, with a warning.
+
+Codex leaves its `update_plan` tool off by default, and leaves that tool's
+guidance out of its own instructions, but it sends a catalog's instructions
+unedited. `SkycapCodex` therefore makes the same edit before writing the entry,
+so the model gets the instructions it gets without a catalog, plus `apply_patch`.
+
 ## Sharing a sandbox provider
 
 A remote sandbox counts against the provider account's quota, which other runs
