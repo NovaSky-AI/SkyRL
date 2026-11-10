@@ -1440,6 +1440,8 @@ class InferenceEngineConfig(BaseConfig):
     rollout quantize identically. It follows the *recipe*, not the architecture: an explicit
     ``fp8_recipe="blockwise"`` on Blackwell keeps a blockwise wire.
 
+    ``"blockwise"`` runs over the ``nccl``/``ipc`` backends; ``"mxfp8"`` also over ``sharded_rdt``.
+
     Requires ``trainer.strategy="megatron"`` and a model with a registered FP8 spec (see
     ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The vLLM engine settings
     this needs (``quantization``, ``load_format="dummy"``, and the matching
@@ -2261,7 +2263,9 @@ class SkyRLTrainConfig(BaseConfig):
             from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
             from skyrl.backends.skyrl_train.weight_sync.fp8 import (
                 AUTO_FP8,
+                FP8_WIRE_BACKENDS,
                 WIRE_FORMATS,
+                check_fp8_wire_backend,
             )
 
             # "auto" is still unresolved here -- validate_megatron_cfg turns it
@@ -2277,10 +2281,11 @@ class SkyRLTrainConfig(BaseConfig):
             if self.trainer.strategy != "megatron":
                 raise ValueError("Serialized FP8 weight sync currently requires trainer.strategy='megatron'.")
             backend = get_transfer_strategy(ie_cfg.weight_sync_backend, self.trainer.placement.colocate_all)
-            if backend not in {"nccl", "ipc"}:
-                raise ValueError(
-                    "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, " f"got {backend!r}."
-                )
+            if ie_cfg.fp8_weight_sync_mode != AUTO_FP8:
+                check_fp8_wire_backend(ie_cfg.fp8_weight_sync_mode, backend)
+            elif not any(backend in backends for backends in FP8_WIRE_BACKENDS.values()):
+                # The resolved wire is checked again once "auto" is resolved.
+                raise ValueError(f"FP8 weight sync is not supported with weight sync backend {backend!r}.")
         if _uses_lora_weight_sync(self) and ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
             import warnings
 

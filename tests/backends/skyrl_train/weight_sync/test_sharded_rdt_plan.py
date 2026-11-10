@@ -1571,3 +1571,25 @@ class TestComposedPostLoadTransform:
         gc.collect()
 
         assert mixer_ref() is None
+
+
+def test_update_runs_the_receive_side_fp8_hooks(monkeypatch):
+    """sharded_rdt runs the same before/after-reload hooks as the NCCL/IPC engines."""
+    from vllm.model_executor.model_loader import reload
+
+    from skyrl.backends.skyrl_train.weight_sync import weight_receivers
+
+    calls = []
+    monkeypatch.setattr(weight_receivers, "skyrl_before_weight_update", lambda: calls.append("before"))
+    monkeypatch.setattr(weight_receivers, "skyrl_after_weight_update", lambda: calls.append("after"))
+    monkeypatch.setattr(reload, "initialize_layerwise_reload", lambda model: calls.append("init"))
+    monkeypatch.setattr(reload, "finalize_layerwise_reload", lambda model, model_config: calls.append("finalize"))
+    eng = object.__new__(SkyRLShardedRDTWeightTransferEngine)
+    eng.device = torch.device("cpu")
+    eng.model = eng.model_config = None
+    eng.drain_pending = lambda: calls.append("drain")
+
+    eng.start_weight_update()
+    eng.finish_weight_update()
+
+    assert calls == ["before", "init", "drain", "finalize", "after"]

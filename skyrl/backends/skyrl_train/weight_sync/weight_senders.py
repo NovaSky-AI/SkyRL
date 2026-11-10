@@ -223,8 +223,11 @@ def build_trainer_engine(
     from skyrl.train.utils.utils import str_to_torch_dtype
 
     backend = get_transfer_strategy(ie_cfg.weight_sync_backend, colocate_all)
-    if getattr(ie_cfg, "fp8_weight_sync_mode", None) is not None and backend not in {"nccl", "ipc"}:
-        raise ValueError("Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, " f"got {backend!r}.")
+    fp8_mode = getattr(ie_cfg, "fp8_weight_sync_mode", None)
+    if fp8_mode is not None:
+        from skyrl.backends.skyrl_train.weight_sync.fp8 import check_fp8_wire_backend
+
+        check_fp8_wire_backend(fp8_mode, backend)
     dtype = str_to_torch_dtype(ie_cfg.model_dtype)
     source = source_factory(dtype, backend)
     draft_source = None
