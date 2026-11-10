@@ -122,6 +122,7 @@ from skyrl.backends.skyrl_train.weight_sync import (
     get_transfer_strategy,
 )
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
+    check_fp8_wire_backend,
     resolve_serialized_fp8_config,
 )
 from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
@@ -1721,11 +1722,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 inference_engine_cfg.weight_sync_backend,
                 self.cfg.placement.colocate_all,
             )
-            if resolved_backend not in {"nccl", "ipc"}:
-                raise ValueError(
-                    "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, "
-                    f"got {resolved_backend!r}."
-                )
+            check_fp8_wire_backend(mode, resolved_backend)
             self._serialized_fp8_config = resolve_serialized_fp8_config(
                 mode,
                 self.strategy.hf_config,
@@ -1751,7 +1748,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 make_megatron_weight_source,
             )
 
-            return make_megatron_weight_source(self.bridge, self.actor_module, dtype)
+            source = make_megatron_weight_source(self.bridge, self.actor_module, dtype)
+            if self._serialized_fp8_config is not None:
+                from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_fp8 import (
+                    SerializedMxfp8GroupedSource,
+                )
+
+                return SerializedMxfp8GroupedSource(source, self._serialized_fp8_config)
+            return source
 
         from skyrl.backends.skyrl_train.weight_sync.sources import MegatronWeightSource
 
