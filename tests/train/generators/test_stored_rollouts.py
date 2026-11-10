@@ -234,6 +234,17 @@ def test_rows_without_sample_support_summarize_none():
     assert sample_support_metrics([SupportCounts.of(None)]) == {}
 
 
+def test_a_summary_keeps_fractional_loss_token_counts():
+    output = {
+        "prompt_token_ids": [[1], [2]],
+        "response_ids": [[3, 4], [5, 6, 7]],
+        "rewards": [1.0, 0.0],
+        "loss_masks": [[0.25, 0.25], [0.5, 1.0, 0.25]],
+    }
+
+    assert StoredRolloutGroup.split_output(output)[0].summary.num_loss_tokens == [0.5, 1.75]
+
+
 def test_payloads_hold_typed_arrays_that_readers_map_read_only():
     rng = np.random.default_rng(0)
     response = rng.integers(0, 1 << 17, 40_000).tolist()

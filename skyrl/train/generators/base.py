@@ -128,8 +128,8 @@ class RolloutSummary:
 
     # Token-level rewards are summed.
     rewards: List[float]
-    # ``sum(loss_mask)``.
-    num_loss_tokens: List[int]
+    # ``sum(loss_mask)``; fractional when the mask weights tokens.
+    num_loss_tokens: List[float]
     # Each row's sample-support counts; None when the rows carry no sample support.
     sample_support: Optional[List[SupportCounts]] = None
 
@@ -138,7 +138,7 @@ class RolloutSummary:
         support = output.get(RolloutPayloadKey.ROLLOUT_SAMPLE_SUPPORT)
         return cls(
             rewards=[float(sum(r)) if isinstance(r, list) else float(r) for r in output["rewards"]],
-            num_loss_tokens=[int(sum(mask)) for mask in output["loss_masks"]],
+            num_loss_tokens=[float(sum(mask)) for mask in output["loss_masks"]],
             sample_support=None if support is None else [SupportCounts.of(rows) for rows in support],
         )
 
