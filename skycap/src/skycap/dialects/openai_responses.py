@@ -479,7 +479,9 @@ def _custom_function(tool: dict[str, Any], where: str) -> dict[str, Any]:
     ``input``, with any grammar appended to the description."""
     description = tool.get("description") or ""
     form = tool.get("format") or {"type": "text"}
-    kind = form.get("type") if isinstance(form, dict) else None
+    if not isinstance(form, dict):
+        raise RequestError(f'`{where}.format` must be an object, such as {{"type": "text"}}')
+    kind = form.get("type")
     # Nothing enforces a grammar while sampling, and a client's prompt may never spell the format out, so the
     # description is the only place the model can learn it. Dropping the grammar would change what the model
     # sees without saying so; vLLM, which this dialect otherwise follows, refuses grammar tools instead.
