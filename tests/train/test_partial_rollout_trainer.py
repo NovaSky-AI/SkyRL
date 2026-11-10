@@ -223,7 +223,7 @@ async def test_pause_and_wake_drive_the_gate():
 # ---------------------------------------------------------------------------
 
 
-def _partial_cfg(**fully_async):
+def _partial_cfg(**partial_rollout):
     cfg = _build_test_cfg()
     cfg.trainer.fully_async.enabled = True
     cfg.trainer.fully_async.num_parallel_generation_workers = 3
@@ -232,8 +232,8 @@ def _partial_cfg(**fully_async):
     cfg.generator.batched = False
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.ckpt_interval = 1
-    for k, v in fully_async.items():
-        setattr(cfg.trainer.fully_async, k, v)
+    for k, v in partial_rollout.items():
+        setattr(cfg.trainer.fully_async.partial_rollout, k, v)
     return cfg
 
 
@@ -381,7 +381,7 @@ async def test_abort_before_the_first_token_does_not_count_against_the_budget():
 
 def test_drop_policy_sets_the_client_budget_and_rejects_aborted_groups():
     client = MagicMock()
-    trainer = _partial_trainer(client, cfg=_partial_cfg(stale_group_policy="drop", max_staleness_steps=2))
+    trainer = _partial_trainer(client, cfg=_partial_cfg(stale_group_policy="drop", max_cuts_per_group=2))
     assert client.max_resumes_per_request == 2
     assert trainer._epoch_may_exhaust_early() is True
 
@@ -414,7 +414,7 @@ async def test_worker_drops_a_rejected_group_and_marks_its_prompt_filtered():
     """A rejected group never reaches the buffer. The worker frees its slot and marks the uid filtered,
     so the prompt is not drawn again and the epoch can end early."""
     client = MagicMock()
-    trainer = _partial_trainer(client, cfg=_partial_cfg(stale_group_policy="drop", max_staleness_steps=0))
+    trainer = _partial_trainer(client, cfg=_partial_cfg(stale_group_policy="drop", max_cuts_per_group=0))
     trainer.global_step = 1
     seen = []
 
@@ -461,10 +461,10 @@ async def test_worker_drops_a_rejected_group_and_marks_its_prompt_filtered():
 @pytest.mark.asyncio
 async def test_wait_policy_delays_the_sleep_until_threshold_groups_finish():
     """Under ``wait`` the engines do not sleep while a group that started at or before
-    ``global_step - max_staleness_steps`` is still in flight."""
+    ``global_step - max_cuts_per_group`` is still in flight."""
     client = MagicMock()
     client.sleep = AsyncMock()
-    trainer = _partial_trainer(client, cfg=_partial_cfg(stale_group_policy="wait", max_staleness_steps=2))
+    trainer = _partial_trainer(client, cfg=_partial_cfg(stale_group_policy="wait", max_cuts_per_group=2))
     trainer.global_step = 5
     trainer._generation_failure = BackgroundFailure()
     trainer._in_flight_start_steps = {"old": 3, "older": 2, "young": 4}
@@ -494,7 +494,7 @@ async def test_wait_policy_delays_the_sleep_until_threshold_groups_finish():
 async def test_wait_policy_raises_when_a_worker_fails_during_the_wait():
     client = MagicMock()
     client.sleep = AsyncMock()
-    trainer = _partial_trainer(client, cfg=_partial_cfg(stale_group_policy="wait", max_staleness_steps=0))
+    trainer = _partial_trainer(client, cfg=_partial_cfg(stale_group_policy="wait", max_cuts_per_group=0))
     trainer.global_step = 2
     failure = BackgroundFailure()
     trainer._generation_failure = failure

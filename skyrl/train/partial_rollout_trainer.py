@@ -20,8 +20,9 @@ the step does not wait for the longest trajectory. Tokens generated before a cut
 logprobs of the older policy. The loss must use rollout logprobs, and ``FullyAsyncRayPPOTrainer``
 asserts this.
 
-``trainer.fully_async.stale_group_policy`` selects what happens to a group that reaches
-``max_staleness_steps`` cuts. ``ignore`` trains on it and logs a warning. ``wait`` delays the next cut
+``trainer.fully_async.partial_rollout.stale_group_policy`` selects what happens to a group that reaches
+``trainer.fully_async.partial_rollout.max_cuts_per_group`` cuts. ``ignore`` sets no limit: the trainer
+cuts and resumes the group until it finishes. ``wait`` delays the next cut
 until every such group has finished. ``drop`` does not resume such a group: the client returns its
 request with stop reason ``abort``, and the trainer discards the group.
 
@@ -76,12 +77,14 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
         # The client holds each aborted request and resubmits it after the weight sync. The
         # generator receives one completion per trajectory, as if no cut happened.
         self.inference_engine_client.resume_aborted_requests = True
-        self._stale_group_policy = self.cfg.trainer.fully_async.stale_group_policy
+        partial_rollout_cfg = self.cfg.trainer.fully_async.partial_rollout
+        self._stale_group_policy = partial_rollout_cfg.stale_group_policy
+        self._max_cuts_per_group = partial_rollout_cfg.max_cuts_per_group
         self._stale_groups_dropped = 0
         if self._stale_group_policy == "drop":
-            # A request that survives more than max_staleness_steps cuts comes back with stop reason
+            # A request that survives more than max_cuts_per_group cuts comes back with stop reason
             # "abort", and `_accept_generated_group` drops its group.
-            self.inference_engine_client.max_resumes_per_request = self.max_staleness_steps
+            self.inference_engine_client.max_resumes_per_request = self._max_cuts_per_group
 
     def _generation_buffer_maxsize(self) -> int:
         # Every in-flight group can finish before the training loop drains the buffer.
@@ -103,20 +106,24 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
             "(equal means no partial rollout: every step waits for all its groups). Got: "
             f"{self.num_parallel_generation_workers=}, {self.mini_batch_size=}"
         )
-        policy = self.cfg.trainer.fully_async.stale_group_policy
-        assert (
-            policy in STALE_GROUP_POLICIES
-        ), f"trainer.fully_async.stale_group_policy must be one of {STALE_GROUP_POLICIES}. Got: {policy!r}"
+        # The base constructor calls this method before `__init__` of this class sets its attributes.
+        partial_rollout_cfg = self.cfg.trainer.fully_async.partial_rollout
+        policy = partial_rollout_cfg.stale_group_policy
+        max_cuts = partial_rollout_cfg.max_cuts_per_group
+        assert policy in STALE_GROUP_POLICIES, (
+            f"trainer.fully_async.partial_rollout.stale_group_policy must be one of {STALE_GROUP_POLICIES}. "
+            f"Got: {policy!r}"
+        )
         if policy != "ignore":
-            assert self.max_staleness_steps >= 0, (
-                f"trainer.fully_async.max_staleness_steps must be >= 0 under stale_group_policy={policy!r}. "
-                f"Got: {self.max_staleness_steps}"
+            assert max_cuts >= 0, (
+                "trainer.fully_async.partial_rollout.max_cuts_per_group must be >= 0 under "
+                f"stale_group_policy={policy!r}. Got: {max_cuts}"
             )
         cut_fraction = 1 - self.mini_batch_size / self.num_parallel_generation_workers
         logger.info(
             f"Partial rollout: {self.num_parallel_generation_workers} groups in flight, train on every "
             f"{self.mini_batch_size} finished groups, {cut_fraction:.0%} of in-flight groups cut per step, "
-            f"stale_group_policy={policy} at max_staleness_steps={self.max_staleness_steps}."
+            f"stale_group_policy={policy}" + ("." if policy == "ignore" else f" at max_cuts_per_group={max_cuts}.")
         )
         router_kwargs = self.cfg.generator.inference_engine.router_init_kwargs or {}
         if router_kwargs.get("policy") != "sticky_least_loaded":
@@ -129,7 +136,9 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
 
     def _epoch_may_exhaust_early(self) -> bool:
         # Dropped stale groups do not reach the buffer, so an epoch can run out of prompts mid mini-batch.
-        return super()._epoch_may_exhaust_early() or self.cfg.trainer.fully_async.stale_group_policy == "drop"
+        return super()._epoch_may_exhaust_early() or (
+            self.cfg.trainer.fully_async.partial_rollout.stale_group_policy == "drop"
+        )
 
     def _accept_generated_group(self, group: GeneratedOutputGroup) -> bool:
         if self._stale_group_policy != "drop":
@@ -137,18 +146,18 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
         stop_reasons = group.generator_output.get("stop_reasons") or []
         if "abort" not in stop_reasons:
             return True
-        # The client did not resume a request of this group: it reached max_staleness_steps cuts.
+        # The client did not resume a request of this group: it reached max_cuts_per_group cuts.
         self._stale_groups_dropped += 1
-        logger.info(f"Dropping group {group.uid}: it reached {self.max_staleness_steps} cuts.")
+        logger.info(f"Dropping group {group.uid}: it reached {self._max_cuts_per_group} cuts.")
         return False
 
-    async def _wait_for_groups_at_staleness_threshold(self) -> None:
-        """Delay the cut until every in-flight group at the staleness threshold has finished.
+    async def _wait_for_groups_at_cut_limit(self) -> None:
+        """Delay the cut until every in-flight group at the cut limit has finished.
 
-        A group that started at step ``s`` has staleness ``global_step - s`` when a step trains on it.
-        A group with ``s <= global_step - max_staleness_steps`` would exceed the threshold after one
-        more cut. The trainer lets it finish before the inference engines sleep."""
-        threshold = self.global_step - self.max_staleness_steps
+        A group that started at step ``s`` has survived ``global_step - s`` cuts. A group with
+        ``s <= global_step - max_cuts_per_group`` would exceed the limit after one more cut. The trainer lets it finish before the inference engines sleep.
+        """
+        threshold = self.global_step - self._max_cuts_per_group
         failure = self._generation_failure
         waited_groups = 0
         with self._phase_gauge.timed_phase("wait_for_stale_groups", self.all_timings):
@@ -164,7 +173,7 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
 
     async def _before_training_step(self) -> None:
         if self._stale_group_policy == "wait":
-            await self._wait_for_groups_at_staleness_threshold()
+            await self._wait_for_groups_at_cut_limit()
         # The sleep aborts the in-flight requests, which the client holds, and frees the GPUs for training.
         await self.inference_engine_client.sleep()
 

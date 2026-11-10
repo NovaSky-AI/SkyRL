@@ -1218,6 +1218,25 @@ class AlgorithmConfig(BaseConfig):
 
 
 @dataclass
+class PartialRolloutConfig(BaseConfig):
+    """Knobs for the colocated partial-rollout trainer. The fully-async trainer ignores them.
+    See https://docs.skyrl.ai/docs/tutorials/fully_async."""
+
+    stale_group_policy: str = "ignore"
+    """What the trainer does with a group that reaches ``max_cuts_per_group`` cuts. ``ignore`` sets no
+    limit: the trainer cuts and resumes the group until it finishes. ``wait`` delays the next cut
+    until every such group has finished. ``drop`` does not resume such a group: the client returns its
+    request with stop reason ``abort``, and the trainer discards the group and does not draw its
+    prompt again."""
+    max_cuts_per_group: int = 4
+    """The number of cuts one group can survive before ``stale_group_policy`` acts. Each cut adds one
+    step of staleness to the group. Not used under ``stale_group_policy="ignore"``. This field is
+    separate from ``trainer.fully_async.max_staleness_steps``, which bounds the admission of the
+    fully-async trainer. The partial-rollout trainer uses that field only for the warning on a
+    trained group whose ``async/staleness`` exceeds it."""
+
+
+@dataclass
 class FullyAsyncConfig(BaseConfig):
     """Knobs for fully async training.
     See https://docs.skyrl.ai/docs/tutorials/fully_async#step-2-config-knobs-to-tune-for-fully-async-training."""
@@ -1230,13 +1249,8 @@ class FullyAsyncConfig(BaseConfig):
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
-    stale_group_policy: str = "ignore"
-    """What the colocated partial-rollout trainer does with a group that reaches ``max_staleness_steps``
-    cuts. The staleness of a group is the number of cuts it survived, not the ``async/staleness`` metric,
-    which also counts the steps the group waited in the buffer. ``ignore`` trains on the group and
-    logs a warning. ``wait`` delays the next cut until every such group has finished. ``drop`` does not
-    resume such a group: the client returns its request with stop reason ``abort``, and the trainer
-    discards the group and does not draw its prompt again. The fully-async trainer ignores this field."""
+    partial_rollout: PartialRolloutConfig = field(default_factory=PartialRolloutConfig)
+    """Only used by the colocated partial-rollout trainer (``trainer.placement.colocate_all=true``)."""
     sample_full_batch: bool = False
     """Requires ``zero_variance_filter=True``. Drop zero-variance groups and keep pulling until the
     mini-batch is full of non-zero-variance groups (async-native DAPO ``dynamic_sampling="filter"``).

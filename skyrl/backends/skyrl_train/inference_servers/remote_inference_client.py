@@ -557,7 +557,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
     request that has generated at least one token is aborted once more than this, the client returns
     it with stop reason ``abort`` and the tokens generated so far. An abort before the first token
     does not count: the resubmission is the same as a new request. The colocated partial-rollout
-    trainer sets it to ``max_staleness_steps`` under ``stale_group_policy="drop"``. Only used with
+    trainer sets it to ``max_cuts_per_group`` under ``stale_group_policy="drop"``. Only used with
     ``resume_aborted_requests``."""
 
     # Private fields excluded from repr for cleaner output
