@@ -15,7 +15,9 @@ role items may be converted to ``system`` role items.)
 A ``custom`` tool, whose input is one raw string, is shown to the model as vLLM
 shows it: a function of one string parameter, ``input``. A grammar on it is
 appended to the description: nothing enforces it while sampling, and vLLM,
-which refuses grammar tools, has no rule to follow.
+which refuses grammar tools, has no rule to follow. A ``custom_tool_call``
+regroups like a ``function_call``, as the call of that function with its input
+under ``input``, and a ``custom_tool_call_output`` is a ``tool`` turn.
 
 skycap is stricter than vLLM where vLLM would drop part of the input and so
 change what the model sees: a tool that is neither a function nor a custom
@@ -43,6 +45,7 @@ that turn's hash, so the replay finds it whatever the round trip loses.
 from __future__ import annotations
 
 import itertools
+import json
 import secrets
 import time
 from collections.abc import Iterator, Sequence
@@ -316,8 +319,8 @@ def _from_item(item: dict[str, Any], previous: dict[str, Any] | None, where: str
     """A new turn for ``item``, or None when it went into ``previous``, the last turn so far."""
     assistant = previous if previous is not None and previous.get("role") == "assistant" else None
     kind = item.get("type")
-    if kind == "function_call":
-        call = _function_call(item, where)
+    if kind in ("function_call", "custom_tool_call"):
+        call = _tool_call(item, where)
         if assistant is not None:
             assistant.setdefault("tool_calls", []).append(call)
             return None
@@ -328,7 +331,7 @@ def _from_item(item: dict[str, Any], previous: dict[str, Any] | None, where: str
             assistant["reasoning_content"] = reasoning
             return None
         return {"role": "assistant", "reasoning_content": reasoning}
-    if kind == "function_call_output":
+    if kind in ("function_call_output", "custom_tool_call_output"):
         call_id = item.get("call_id")
         if not isinstance(call_id, str):
             raise RequestError(f"`{where}.call_id` must be a string")
@@ -348,17 +351,23 @@ def _from_item(item: dict[str, Any], previous: dict[str, Any] | None, where: str
     raise RequestError(f"Unsupported input item type: {kind}")
 
 
-def _function_call(item: dict[str, Any], where: str) -> dict[str, Any]:
+def _tool_call(item: dict[str, Any], where: str) -> dict[str, Any]:
+    """A ``function_call`` or ``custom_tool_call`` as a chat tool call. A custom call is the call of the function
+    its tool is shown as: its ``input`` under the one parameter (``_custom_arguments``)."""
     if item.get("namespace"):
-        raise RequestError(f"`{where}`: namespaced tool calls are not supported; send function tools only")
-    for name in ("call_id", "name", "arguments"):
+        raise RequestError(f"`{where}`: namespaced tool calls are not supported; send tools without a namespace")
+    payload = "input" if item["type"] == "custom_tool_call" else "arguments"
+    for name in ("call_id", "name", payload):
         if not isinstance(item.get(name), str):
             raise RequestError(f"`{where}.{name}` must be a string")
-    return {
-        "id": item["call_id"],
-        "type": "function",
-        "function": {"name": item["name"], "arguments": item["arguments"]},
-    }
+    arguments = _custom_arguments(item["input"]) if payload == "input" else item["arguments"]
+    return {"id": item["call_id"], "type": "function", "function": {"name": item["name"], "arguments": arguments}}
+
+
+def _custom_arguments(text: str) -> str:
+    """The arguments of a call to a custom tool's function, for its ``input``. vLLM's encoding
+    (``encode_custom_tool_input``) in ``renderer.parse``'s spelling of arguments."""
+    return json.dumps({CUSTOM_INPUT: text}, separators=(",", ":"), ensure_ascii=False)
 
 
 def _reasoning(item: dict[str, Any], where: str) -> str:

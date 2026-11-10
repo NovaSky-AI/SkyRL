@@ -64,6 +64,14 @@ def result(call_id: str, output: Any = "ok") -> dict:
     return {"type": "function_call_output", "call_id": call_id, "output": output}
 
 
+def patched(call_id: str, patch: str = "*** Begin Patch\n*** End Patch", **fields: Any) -> dict:
+    return {"type": "custom_tool_call", "call_id": call_id, "name": "apply_patch", "input": patch, **fields}
+
+
+def patch_result(call_id: str, output: Any = "ok") -> dict:
+    return {"type": "custom_tool_call_output", "call_id": call_id, "output": output, "id": "ctco_1"}
+
+
 def tool_call(call_id: str, name: str = "search", arguments: str = "{}") -> dict:
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
 
@@ -425,16 +433,39 @@ def test_a_refusal_part_is_refused() -> None:
 
 
 # -- function calls and their outputs --------------------------------------------------------
-@pytest.mark.parametrize("field", ["call_id", "name", "arguments"])
-def test_a_function_call_needs_string_fields(field: str) -> None:
-    item = called("c1")
-    item[field] = {"q": 1} if field == "arguments" else None
+@pytest.mark.parametrize(
+    "item, field",
+    [
+        *[(called("c1"), field) for field in ("call_id", "name", "arguments")],
+        *[(patched("c1"), field) for field in ("call_id", "name", "input")],
+    ],
+)
+def test_a_tool_call_needs_string_fields(item: dict, field: str) -> None:
+    item = {**item, field: {"q": 1} if field in ("arguments", "input") else None}
 
     refused(rf"`input\[1\].{field}` must be a string", [user("q"), item])
 
 
-def test_a_namespaced_call_is_refused() -> None:
-    refused("namespaced tool calls are not supported", [user("q"), called("c1", namespace="mcp__fs")])
+@pytest.mark.parametrize("item", [called("c1"), patched("c1")], ids=["function", "custom"])
+def test_a_namespaced_call_is_refused(item: dict) -> None:
+    refused("namespaced tool calls are not supported", [user("q"), {**item, "namespace": "mcp__fs"}])
+
+
+def test_a_custom_tool_call_is_a_call_of_its_function_and_its_output_a_tool_turn() -> None:
+    patch = '*** Begin Patch\n+print("é")\n*** End Patch'
+    items = [user("q"), said("patching"), patched("c1", patch, id="ctc_1"), patch_result("c1", "Success.")]
+
+    assert turns(items) == [
+        user("q"),
+        {
+            "role": "assistant",
+            "content": "patching",
+            "tool_calls": [
+                tool_call("c1", "apply_patch", '{"input":"*** Begin Patch\\n+print(\\"é\\")\\n*** End Patch"}')
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "Success."},
+    ]
 
 
 def test_tool_output_parts_are_joined_and_an_image_is_refused() -> None:
@@ -461,8 +492,6 @@ def test_a_tool_output_without_a_call_id_is_refused() -> None:
     "kind",
     [
         "item_reference",
-        "custom_tool_call",
-        "custom_tool_call_output",
         "local_shell_call",
         "web_search_call",
         "compaction",
