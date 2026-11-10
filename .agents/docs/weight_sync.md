@@ -34,6 +34,7 @@ skyrl/backends/skyrl_train/weight_sync/
 └── sharded_rdt/            # the sharded_rdt (NIXL pull) backend; __init__ is import-free
     ├── rdt_send.py             # its WeightSources + build_rdt_trainer_init_info
     ├── rdt_fp8.py              # SerializedMxfp8GroupedSource (the MXFP8 wire over sharded_rdt)
+    ├── rdt_nvfp4.py            # SerializedNvfp4GroupedSource (expert_nvfp4 over sharded_rdt)
     ├── sharded_rdt_base.py     # GroupedWeightSource + layerwise_groups (the two RDT-only channels)
     ├── rdt_libfabric_shim.py   # LIBFABRIC provider shim for NIXL
     ├── sharded_rdt_trainer.py  # vendored: trainer engine + the _RDTProducerServer sidecar
@@ -204,8 +205,10 @@ trainer rounds to. The engines' activation quantizer reads FlashInfer's NVFP4 en
 `prepare_runtime_environment` derives from `expert_nvfp4_block_scale` with every key explicit
 (`kernels/nvfp4_quant.flashinfer_nvfp4_env`: 4/6 MSE on FlashInfer's fast error path, E4M3 bound 448). Run vLLM's
 experts expert-parallel: under expert TP the down_proj input's per-token scale covers only a rank's slice (`w4a4`
-rejects that layout). Serialized NVFP4 is incompatible with `fp8_weight_sync_mode` and the delta / sharded-RDT
-backends, and works with vLLM sleep level 2. It requires SM100/SM103, full-parameter training, expert TP 1,
+rejects that layout). Serialized NVFP4 is incompatible with `fp8_weight_sync_mode` and the delta backend, and
+works with vLLM sleep level 2. Over `sharded_rdt`, `SerializedNvfp4GroupedSource` (`sharded_rdt/rdt_nvfp4.py`)
+wraps the RDT grouped source with the same serializer, so the bytes match; experts go out per expert there
+(the stacked layout is push-only), and an expert's gate and up must share a gather group and an owner. It requires SM100/SM103, full-parameter training, expert TP 1,
 and per-expert HF checkpoint names (Qwen3-MoE style); fused-expert checkpoints, LoRA and MTP are unsupported.
 Cost controls (all byte-identical on the wire): `metadata()` is shape-only (the serializer runs over the wrapped
 source's metadata with `Nvfp4ExpertSpecSerializer`, so it quantizes nothing); on NCCL non-sender ranks

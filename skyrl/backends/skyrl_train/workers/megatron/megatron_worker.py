@@ -1757,6 +1757,21 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             )
 
             source = make_megatron_weight_source(self.bridge, self.actor_module, dtype)
+            megatron_config = self.cfg.policy.megatron_config
+            if megatron_config.expert_nvfp4:
+                from skyrl.backends.skyrl_train.weight_sync.nvfp4 import (
+                    Nvfp4WeightQuantSettings,
+                    nvfp4_bf16_layers,
+                )
+                from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_nvfp4 import (
+                    SerializedNvfp4GroupedSource,
+                )
+
+                return SerializedNvfp4GroupedSource(
+                    source,
+                    Nvfp4WeightQuantSettings(megatron_config.expert_nvfp4_block_scale),
+                    bf16_layers=nvfp4_bf16_layers(self.strategy.hf_config.num_hidden_layers, megatron_config),
+                )
             if self._serialized_fp8_config is not None:
                 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_fp8 import (
                     SerializedMxfp8GroupedSource,
@@ -1780,7 +1795,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
             if backend not in {"nccl", "ipc"}:
                 raise ValueError(
-                    f"expert_nvfp4 weight sync requires the NCCL or CUDA-IPC push backend, got {backend!r}"
+                    f"expert_nvfp4 weight sync requires the nccl, ipc or sharded_rdt backend, got {backend!r}"
                 )
             stacked_num_experts, min_packed_bytes = None, 0
             if megatron_config.expert_nvfp4_stacked_sync:

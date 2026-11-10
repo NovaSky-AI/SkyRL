@@ -91,6 +91,19 @@ def _meta_copy_(dest: torch.Tensor, src: "FakeRDTTensor") -> torch.Tensor:
         return dest.copy_(meta_src)
 
 
+def _is_device_only_to(fake: "FakeRDTTensor", args: tuple, kwargs: dict) -> bool:
+    """Whether ``fake.to(*args, **kwargs)`` only names a device (no dtype, copy or memory format)."""
+    if set(kwargs) - {"device", "non_blocking"}:
+        return False
+    for a in args:
+        if isinstance(a, torch.dtype):
+            if a != fake.dtype:
+                return False
+        elif not isinstance(a, (torch.device, str, int, bool)):
+            return False
+    return True
+
+
 @dataclass
 class BakeSink:
     """``copy_`` sink for the dry-run bake: record how each slice would be fetched
@@ -227,6 +240,25 @@ class FakeRDTTensor(torch.Tensor):
             src = args[1] if len(args) > 1 else kwargs.get("src")
             if isinstance(src, cls) and src._sink is not None:
                 return src._sink.accept_copy(dest, src)
+
+        # ``dest[index] = fake`` (vLLM's fused-MoE loader sets per-expert scalar scales this way)
+        # records a copy into the indexed slot of the real destination.
+        if func is torch.Tensor.__setitem__ and len(args) >= 3:
+            dest, index, src = args[0], args[1], args[2]
+            if isinstance(src, cls) and src._sink is not None and not isinstance(dest, cls):
+                with torch._C.DisableTorchFunctionSubclass():
+                    region = dest[index]
+                src._sink.accept_copy(region, src)
+                return None
+
+        # A pure device move carries no data change; dtype or layout changes still raise below.
+        if (
+            func is torch.Tensor.to
+            and args
+            and isinstance(args[0], cls)
+            and _is_device_only_to(args[0], args[1:], kwargs)
+        ):
+            return args[0]
 
         # Allowlisted slice/view/shape ops: append to chain and return child.
         op_name = SUPPORTED_OPS.get(func)

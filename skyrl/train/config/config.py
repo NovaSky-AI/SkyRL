@@ -705,8 +705,8 @@ class MegatronConfig(BaseConfig):
     rollouts'. Everything else stays BF16, and so do the optimizer's master weights (straight-through).
     ``expert_nvfp4_mode`` picks what the trainer rounds; ``expert_nvfp4_block_scale`` the block scales of both
     sides. Requires ``moe_grouped_gemm``, expert TP 1 (``expert_tensor_parallel_size: 1``; set it explicitly with
-    ``tensor_model_parallel_size > 1``, Megatron defaults it to the TP size), the NCCL or CUDA-IPC weight sync and
-    SM100. The ref model mirrors the policy's setting.
+    ``tensor_model_parallel_size > 1``, Megatron defaults it to the TP size), the nccl, ipc or sharded_rdt weight
+    sync and SM100. The ref model mirrors the policy's setting.
 
     ``num_layers_at_start_in_bf16`` / ``num_layers_at_end_in_bf16`` keep the routed experts of the first / last
     N layers in BF16, in the trainer and on the sampler (the vLLM ignore list and the weight sync follow them)."""
@@ -737,7 +737,7 @@ class MegatronConfig(BaseConfig):
     ``process_weights_after_loading`` instead of buffering and replaying ~1.5k per-expert loader calls through
     its layerwise reload (~74k for a 48-layer, 128-expert model). Same quantization, same bytes; the receiver
     falls back to the per-expert path for any layer it cannot load directly (MoE TP > 1, redundant experts,
-    unexpected shapes). NCCL or CUDA-IPC backend only. The BF16 layers are unaffected. On by default (parity with
+    unexpected shapes). NCCL or CUDA-IPC backend only; ``sharded_rdt`` always sends per-expert tensors. The BF16 layers are unaffected. On by default (parity with
     the per-expert path is bitwise, see ``tests/backends/skyrl_train/gpu/gpu_ci/test_nvfp4_stacked_sync.py``); set
     ``false`` to use the per-expert path. Ignored without ``expert_nvfp4``."""
     model_config_kwargs: dict = field(default_factory=dict)

@@ -1906,13 +1906,20 @@ def test_expert_nvfp4_accepts_packed_push_backends(colocated, mode):
     _validate_expert_nvfp4_cfg(cfg)
 
 
+@pytest.mark.parametrize("mode", ["w4a16", "w4a4"])
+def test_expert_nvfp4_accepts_sharded_rdt(mode):
+    cfg = _expert_nvfp4_config(mode)
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.weight_sync_backend = "sharded_rdt"
+    _validate_expert_nvfp4_cfg(cfg)
+
+
 @pytest.mark.parametrize(
     "overrides, message",
     [
         ({"trainer.strategy": "fsdp"}, "trainer.strategy=megatron"),
         ({"trainer.policy.megatron_config.expert_nvfp4_mode": "bogus"}, "expert_nvfp4_mode must be one of"),
-        ({"generator.inference_engine.weight_sync_backend": "sharded_rdt"}, "NCCL or CUDA-IPC"),
-        ({"generator.inference_engine.weight_sync_backend": "delta"}, "NCCL or CUDA-IPC"),
+        ({"generator.inference_engine.weight_sync_backend": "delta"}, "nccl, ipc or sharded_rdt"),
         ({"generator.inference_engine.fp8_weight_sync_mode": "fp8"}, "mutually exclusive"),
         ({"trainer.policy.model.lora.rank": 8}, "full-parameter"),
         ({"trainer.policy.megatron_config.moe_grouped_gemm": False}, "moe_grouped_gemm"),

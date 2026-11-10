@@ -416,8 +416,8 @@ def _validate_expert_nvfp4_cfg(cfg: SkyRLTrainConfig):
     from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
 
     backend = get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all)
-    if backend not in {"nccl", "ipc"}:
-        raise ValueError(f"{name} weight sync needs the NCCL or CUDA-IPC backend, got {backend!r}")
+    if backend not in {"nccl", "ipc", "sharded_rdt"}:
+        raise ValueError(f"{name} weight sync needs the nccl, ipc or sharded_rdt backend, got {backend!r}")
     policy_cfg = cfg.trainer.policy
     if policy_cfg.model.lora.rank > 0 or policy_cfg.model.fake_int4_qat.enabled:
         raise ValueError(f"{name} requires full-parameter training without fake_int4_qat")
