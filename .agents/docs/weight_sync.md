@@ -506,7 +506,9 @@ Knobs are `SKYRL_RDT_*` env vars, forwarded to every Ray worker by
 `prepare_runtime_environment`: `SKYRL_RDT_LOOKAHEAD` (gather credit depth, default 1),
 `SKYRL_RDT_NUM_BUFFERS` (ring depth K, default 2), `SKYRL_RDT_STACKED_EXPERTS`,
 `SKYRL_RDT_EXPORT_RING`, `SKYRL_RDT_GC_FREEZE`, `SKYRL_RDT_SHARE_SLOTS`,
-`SKYRL_RDT_STALL_TIMEOUT_S`, `SKYRL_RDT_BUFFER_PRESIZE_GB`, and
+`SKYRL_RDT_STALL_TIMEOUT_S`, `SKYRL_RDT_BUFFER_PRESIZE_GB`,
+`SKYRL_RDT_MAX_PULL_GB` (largest packed pull, default 1, must be below 2: NIXL reads of
+2-4 GiB hang), and
 `SKYRL_RDT_VERIFY_STACKED=1` (a one-off numeric check of the stacked source's
 expert tensors against the bridge's per-expert export, on the first iteration).
 The
