@@ -1867,6 +1867,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
                 or getattr(self.bridge.hf_pretrained, "name_or_path", "")
             ),
+            # Colocated, the woken engine may leave too little GPU memory for the whole adapter.
+            stage_on_host=bool(self.cfg.placement.colocate_all),
         )
 
     async def _publish_lora_adapter_in_memory(
@@ -2076,7 +2078,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # so sample(model=<model_id>) routes correctly. Single-tenant
             # (model_id=None) keeps the legacy shared path + name.
             cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
-            torch.cuda.empty_cache()
+            if self.cfg.placement.colocate_all:
+                _release_gpu_garbage()
+            else:
+                torch.cuda.empty_cache()
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             if self._lora_sync_mode_is_memory():
                 await self._publish_lora_adapter_in_memory(lora_name, inference_engine_client)
@@ -2085,11 +2090,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if cache_reset_task is not None:
                 await cache_reset_task
             if self.cfg.placement.colocate_all:
-                torch.cuda.empty_cache()
+                _release_gpu_garbage()
             torch.distributed.barrier()
             return
 
+        if self.cfg.placement.colocate_all:
+            # Before the sync's gathers, next to the engine's woken weights, and again before the
+            # engine wakes its KV cache.
+            _release_gpu_garbage()
         await self._sync_weights_to_inference_engines(inference_engine_client, inference_engine_cfg)
+        if self.cfg.placement.colocate_all:
+            _release_gpu_garbage()
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method
@@ -2311,3 +2322,17 @@ class MegatronCriticWorkerBase(MegatronWorker, CriticWorkerBase):
 PolicyWorker = ray.remote(num_gpus=1)(MegatronPolicyWorkerBase)
 RefWorker = ray.remote(num_gpus=1)(MegatronRefWorkerBase)
 CriticWorker = ray.remote(num_gpus=1)(MegatronCriticWorkerBase)
+
+
+def _release_gpu_garbage() -> None:
+    """Return GPU memory a colocated trainer holds but no longer uses, before and after a weight sync.
+
+    A training step can leave activations in reference cycles (``empty_cache`` alone cannot
+    return those), cuBLAS workspaces, and cached allocator blocks. Next to the engine's woken
+    weights, and then its KV cache, that memory decides whether the wake fits.
+    """
+    import gc
+
+    gc.collect()
+    torch._C._cuda_clearCublasWorkspaces()
+    torch.cuda.empty_cache()

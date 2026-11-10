@@ -5,8 +5,8 @@
 > **Read first:** `.agents/docs/weight_sync.md`, `.agents/docs/backends/megatron.md`.
 > **Results:** [`colocated_weight_sync_results.md`](colocated_weight_sync_results.md).
 
-Every option described here defaults off. With all of them off, colocated weight sync runs
-exactly as before.
+Every option described here defaults off. Section 2.6 lists what runs on every colocated
+sync regardless.
 
 ## 1. Problem
 
@@ -160,6 +160,29 @@ vLLM's importer.
 The receive engine also counts chunks, bytes and tensors per transfer
 (`skyrl_receive_stats`), reset at `start_weight_update`.
 
+### 2.6 On every colocated sync
+
+These need no option. Each one freed memory a large-MoE colocated run needed next to the woken
+engine, and none changes what reaches vLLM, except the FP32 rule (which affects only LoRA-merged
+weights).
+
+- **GPU memory release** (`megatron_worker._release_gpu_garbage`): `gc.collect()`, cuBLAS
+  workspaces and `empty_cache()` before and after the sync, full weights and adapters alike. A
+  training step can leave activations in reference cycles that `empty_cache()` alone cannot
+  return (3-8 GiB per rank on a ~600B MoE), enough to fail the engine's KV-cache wake.
+- **LoRA adapter staged on the host** (`MegatronLoraAdapterSource(stage_on_host=True)`): the
+  deduplicated adapter is held in host memory between `prepare()` and the send, and `iter_full`
+  moves one tensor at a time to the GPU.
+- **Adapter buffer not floored at the checkpoint** (`LoraAdapterWeightSource.sends_checkpoint_tensors`):
+  the packed buffer of an adapter sync is the configured size, not the checkpoint's largest
+  tensor, which an adapter never sends (a whole layer's stacked experts on a large MoE).
+- **FP32 on the wire only for FP32-sourced tensors** (not colocated-specific;
+  `MegatronWeightSource._wire_dtype`). The bridge returns LoRA-merged weights in FP32; they now
+  go out in the inference dtype, as the BF16 params they were merged into, halving their bytes.
+  Params Megatron keeps in FP32 (router expert bias, attention sinks) still go out in FP32. The
+  FP32 set uses global names gathered from every rank, so PP / EP ranks agree on each tensor's
+  dtype. The stacked sharded-RDT source keeps `wire_dtype()`.
+
 ## 3. Configuration
 
 | Option | Default | Effect | Constraints |
@@ -217,7 +240,7 @@ Code: `skyrl/backends/skyrl_train/weight_sync/colocated/` (`slot_ring.py`,
 
 ## 4. Status
 
-**Built:** sections 2.1 to 2.5, the validation, the debug hooks, and the tests:
+**Built:** sections 2.1 to 2.6, the validation, the debug hooks, and the tests:
 
 - CPU: `tests/train/test_colocated_weight_sync_config.py` (validation),
   `tests/backends/skyrl_train/weight_sync/test_colocated_slot_ring.py` (chunk cuts, layer
@@ -237,9 +260,6 @@ Code: `skyrl/backends/skyrl_train/weight_sync/colocated/` (`slot_ring.py`,
   rewrites, discard only that at sleep, and map each layer just before it is written. Built as
   a prototype. It passed byte parity on Qwen3-30B-A3B but did not shorten the sync there
   (2.0-2.1 s without wake-on-write, 2.2 s with it) and was not used at full scale. Held back.
-- **Always-on colocated changes.** Release trainer garbage, cuBLAS workspaces and cached
-  blocks before and after a colocated sync; LoRA adapter host staging; an adapter-only buffer
-  floor; FP32 wire dtype only for FP32-sourced tensors.
 - **Model hooks.** A clone-free receive for models that load in place, and a local-expert hook
   for models that shard experts over TP themselves instead of using vLLM EP.
 - **Not built:** a per-GPU trainer budget that sizes the slots; slicing fused 3D expert tensors

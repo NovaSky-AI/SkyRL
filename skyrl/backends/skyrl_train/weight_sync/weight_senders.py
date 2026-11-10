@@ -287,6 +287,10 @@ def build_trainer_engine(
         server_urls=server_urls,
         data_parallel_size=data_parallel_size,
         base_model_path=base_model_path,
+        # An adapter source sends LoRA tensors, not the checkpoint's: flooring its buffer at the
+        # checkpoint's largest tensor (a whole layer's stacked experts on a large MoE) would
+        # allocate that much next to a woken colocated engine for nothing.
+        size_from_checkpoint=getattr(source, "sends_checkpoint_tensors", True),
     )
     client = SkyrlWeightSyncClient(
         server_urls,
@@ -359,6 +363,7 @@ def _build_sender_init_info(
     server_urls: list,
     data_parallel_size: int,
     base_model_path: Optional[str],
+    size_from_checkpoint: bool = True,
 ):
     """Return ``(init_info, init_payload_fn)`` for an already-resolved backend.
 
@@ -368,6 +373,7 @@ def _build_sender_init_info(
     from skyrl.backends.skyrl_train.weight_sync.register import register_trainer_engines
 
     register_trainer_engines()
+    floor_path = base_model_path if size_from_checkpoint else None
 
     if backend == "nccl":
         import ray
@@ -391,7 +397,7 @@ def _build_sender_init_info(
                 # the handshake, so the two sides cannot disagree.
                 packed=True,
                 packed_buffer_size_bytes=_packed_buffer_size_bytes(
-                    base_model_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype
+                    floor_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype
                 ),
                 rank=rank,
             ),
@@ -410,7 +416,7 @@ def _build_sender_init_info(
             ipc_init_info_cls(
                 packed=True,
                 packed_buffer_size_bytes=_packed_buffer_size_bytes(
-                    base_model_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype
+                    floor_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype
                 ),
                 rank=rank,
             ),

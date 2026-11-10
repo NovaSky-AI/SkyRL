@@ -195,6 +195,30 @@ class TestIpcInitInfo:
         assert _init_info("ipc")[0].backend == "skyrl_ipc"
 
 
+class TestAdapterBufferSize:
+    def test_an_adapter_source_is_not_floored_at_the_checkpoint(self, monkeypatch):
+        """A LoRA adapter stream never carries checkpoint tensors, so its buffer is not floored at
+        the checkpoint's largest tensor (a large MoE's stacked experts would allocate ~15 GiB next
+        to a woken colocated engine)."""
+        import skyrl.backends.skyrl_train.weight_sync.checkpoint_shapes as cs
+
+        monkeypatch.setattr(cs, "max_param_numel", lambda _p: 8 * 1024**3)
+        kwargs = dict(
+            backend="ipc",
+            ie_cfg=SimpleNamespace(weight_transfer_threshold_cuda_ipc_GB=1.0),
+            rank=0,
+            inference_world_size=4,
+            dtype=torch.bfloat16,
+            server_urls=["http://a"],
+            data_parallel_size=1,
+            base_model_path="/models/base",
+        )
+        floored, _ = _build_sender_init_info(**kwargs)
+        assert floored.packed_buffer_size_bytes == 8 * 1024**3 * 2
+        adapter, _ = _build_sender_init_info(**kwargs, size_from_checkpoint=False)
+        assert adapter.packed_buffer_size_bytes == _1GiB
+
+
 class TestShardedRdtInitInfo:
     def test_uses_the_replica_rank_rewrite(self):
         _, payload_fn = _init_info("sharded_rdt")

@@ -118,14 +118,16 @@ class TestFsdpWeightSource:
 class _FakeBridge:
     """Stands in for Megatron-Bridge. Records calls so laziness is observable."""
 
-    def __init__(self, tensors, *, expect_module=None):
+    def __init__(self, tensors, *, expect_module=None, sources=None):
         self._tensors = tensors
         self.export_calls = 0
         self.yielded = 0
         self.tasks_args = []
         self._expect_module = expect_module
+        # HF name -> the Megatron parameter names it is exported from.
+        self._sources = sources or {}
 
-    def export_hf_weights(self, module, show_progress=False, conversion_tasks=None):
+    def export_hf_weights(self, module, show_progress=False, conversion_tasks=None, with_megatron_names=False):
         assert self._expect_module is None or module is self._expect_module
         self.export_calls += 1
         self.tasks_args.append(conversion_tasks)
@@ -133,7 +135,10 @@ class _FakeBridge:
         def gen():
             for name, tensor in self._tensors:
                 self.yielded += 1
-                yield name, tensor
+                if with_megatron_names:
+                    yield name, tensor, self._sources.get(name, (name,))
+                else:
+                    yield name, tensor
 
         return gen()
 
@@ -184,6 +189,51 @@ class TestMegatronWeightSource:
         source = MegatronWeightSource(bridge, object(), torch.bfloat16)
         assert [n for n, _ in source.iter_full()] == [n for n, _ in source.iter_full()]
         assert bridge.export_calls == 2
+
+    def test_fp32_megatron_tensors_keep_fp32(self):
+        """FP32 Megatron tensors (a router's expert bias) go out in FP32; an FP32 export of BF16
+        Megatron parameters (the bridge's LoRA merge) goes out in the inference dtype."""
+        module = torch.nn.Module()
+        module.register_buffer("expert_bias", torch.zeros(4, dtype=torch.float32))
+        module.weight = torch.nn.Parameter(torch.zeros(2, 2, dtype=torch.bfloat16))
+        tensors = [
+            ("model.layers.0.mlp.gate.e_score_correction_bias", torch.ones(4, dtype=torch.float32)),
+            ("model.layers.0.self_attn.q_proj.weight", torch.ones(2, 2, dtype=torch.float32)),
+            ("model.layers.0.mlp.gate.tid2eid", torch.ones(4, dtype=torch.int64)),
+        ]
+        sources = {
+            "model.layers.0.mlp.gate.e_score_correction_bias": ("expert_bias",),
+            "model.layers.0.self_attn.q_proj.weight": ("weight",),
+        }
+        meta, pairs = _assert_channels_agree(
+            MegatronWeightSource(_FakeBridge(tensors, sources=sources), module, torch.bfloat16)
+        )
+        assert [m.dtype for m in meta] == [torch.float32, torch.bfloat16, torch.int64]
+        assert [t.dtype for _, t in pairs] == [torch.float32, torch.bfloat16, torch.int64]
+
+    def test_fp32_names_are_gathered_from_every_rank(self, monkeypatch):
+        """Under PP / EP a rank holds only some sources; the FP32 set is the union over ranks, so
+        every rank picks the same wire dtype for a tensor it does not hold."""
+        module = torch.nn.Module()
+        module.weight = torch.nn.Parameter(torch.zeros(2, 2, dtype=torch.bfloat16))
+        tensors = [
+            ("model.layers.9.mlp.gate.e_score_correction_bias", torch.ones(4, dtype=torch.float32)),
+            ("model.layers.9.self_attn.q_proj.weight", torch.ones(2, 2, dtype=torch.float32)),
+        ]
+        sources = {
+            "model.layers.9.mlp.gate.e_score_correction_bias": ("decoder.layers.9.mlp.router.expert_bias",),
+            "model.layers.9.self_attn.q_proj.weight": ("decoder.layers.9.self_attention.linear_qkv.weight",),
+        }
+
+        def all_gather_object(out, obj):
+            out[0], out[1] = obj, ["decoder.layers.9.mlp.router.expert_bias"]
+
+        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+        monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
+        source = MegatronWeightSource(_FakeBridge(tensors, sources=sources), module, torch.bfloat16)
+        meta, _ = _assert_channels_agree(source)
+        assert [m.dtype for m in meta] == [torch.float32, torch.bfloat16]
 
     def test_reads_the_module_it_was_given(self):
         module = object()

@@ -587,8 +587,12 @@ serialized FP8 and adapter-only LoRA.
 Design: `docs/design/colocated_weight_sync.md`. Results:
 `docs/design/colocated_weight_sync_results.md`. Code: `weight_sync/colocated/`
 (`slot_ring.py`, `instrumentation.py`) and `megatron_utils.export_from_offloaded_params`.
-Every option defaults off; with all off, colocated sync is unchanged. All are colocated
-CUDA-IPC only.
+Every option defaults off and is colocated CUDA-IPC only. Independent of them, every colocated
+Megatron sync releases trainer GPU garbage before and after (`_release_gpu_garbage`) and stages
+LoRA adapters on the host (`stage_on_host`), adapter buffers are not floored at the checkpoint's
+largest tensor (`sends_checkpoint_tensors`), and `MegatronWeightSource` sends FP32 only for
+FP32-sourced tensors (LoRA-merged weights go out in the inference dtype); see the design doc's
+section 2.6.
 
 | option | what it changes |
 |---|---|
