@@ -24,6 +24,7 @@ from megatron.bridge.models.conversion.param_mapping import (
 )
 from megatron.bridge.models.deepseek.deepseek_v4_bridge import (
     DeepSeekV4Bridge,
+    _dsv4_use_mxfp4_export,
     _HCAlphaMapping,
     _HCAlphaSecondaryMapping,
 )
@@ -175,8 +176,9 @@ class DeepSeekV41Bridge(DeepSeekV4Bridge):
         (``Unsupported FP8 scale geometry``), so a full-weight sync (not LoRA) of the released checkpoint
         fails. V4's key restoration still applies: running its hook with an export dtype set returns the
         restored keys before it re-quantizes. The re-quantization is NVIDIA-NeMo/Megatron-Bridge#6199's
-        ``DeepSeekV41Bridge.maybe_modify_converted_hf_weight`` (open): routed experts as MXFP4, every
-        other scaled weight as FP8 with 32-wide blocks. Remove with the switch to upstream's V4.1 bridge.
+        ``DeepSeekV41Bridge.maybe_modify_converted_hf_weight`` (open): routed experts with an MXFP4 scale
+        (V4's ``_dsv4_use_mxfp4_export``) as MXFP4, every other scaled weight as FP8 with 32-wide blocks.
+        Remove with the switch to upstream's V4.1 bridge.
         """
         if task.weight_dtype is not None:
             return super().maybe_modify_converted_hf_weight(task, converted_weights_dict, hf_state_dict)
@@ -196,7 +198,7 @@ class DeepSeekV41Bridge(DeepSeekV4Bridge):
                 result[hf_param] = weight
                 continue
             source_scale = hf_state_dict[scale_key]
-            if ".ffn.experts." in hf_param and ".shared_experts." not in hf_param:
+            if _dsv4_use_mxfp4_export(hf_param, weight, source_scale):
                 q_weight, q_scale = quantization_utils.quantize_mxfp4_e2m1_like_scale(
                     weight, source_scale, name=hf_param
                 )

@@ -55,6 +55,9 @@ def test_wire_dtype_keeps_fp32_and_integer_parameters():
     assert wire_dtype(torch.zeros(2, dtype=torch.float32), torch.bfloat16) == torch.float32
     # Integer tables (hash routing) are exact only in their own dtype.
     assert wire_dtype(torch.zeros(2, dtype=torch.int64), torch.bfloat16) == torch.int64
+    # FP8 exports (re-quantized checkpoint layout) keep their dtype; wider floats still widen.
+    assert wire_dtype(torch.zeros(2, dtype=torch.float8_e4m3fn), torch.bfloat16) == torch.float8_e4m3fn
+    assert wire_dtype(torch.zeros(2, dtype=torch.bfloat16), torch.float32) == torch.float32
 
 
 class TestFsdpWeightSource:

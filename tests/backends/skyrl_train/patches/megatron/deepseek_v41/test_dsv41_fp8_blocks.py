@@ -78,6 +78,13 @@ def test_v41_export_uses_32_wide_fp8_blocks_and_mxfp4_experts():
     assert (deq - expert).abs().max() / expert.abs().max() < 0.15  # FP4 E2M1
     assert torch.equal(out["layers.0.attn_norm.weight"], torch.ones(8))
 
+    # A routed expert whose checkpoint scale is FP8 32x32 blocks (not MXFP4 geometry) exports as FP8.
+    fp8_expert = {"layers.0.ffn.experts.1.w1.weight": expert}
+    fp8_scales = {"layers.0.ffn.experts.1.w1.scale": torch.ones(8, 32).to(E8M0)}
+    out = bridge.maybe_modify_converted_hf_weight(Task(), fp8_expert, fp8_scales)
+    assert out["layers.0.ffn.experts.1.w1.weight"].dtype == torch.float8_e4m3fn
+    assert out["layers.0.ffn.experts.1.w1.scale"].shape == (8, 32)
+
     # With an export dtype set, V4's hook returns the weights unquantized.
     plain = bridge.maybe_modify_converted_hf_weight(Task(torch.bfloat16), converted, hf_state_dict)
     assert plain["layers.0.attn.wkv.weight"] is attn

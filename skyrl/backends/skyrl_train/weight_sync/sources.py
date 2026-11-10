@@ -50,19 +50,17 @@ _MEGATRON_SHARED_WITH_DRAFT = ("embedding.word_embeddings.weight", "output_layer
 
 
 def wire_dtype(tensor: torch.Tensor, dtype: torch.dtype) -> torch.dtype:
-    """The dtype a Megatron parameter goes out in: ``dtype``, except fp32, integer and narrower float tensors.
+    """The dtype a Megatron parameter goes out in: ``dtype``, except fp32, integer and FP8 tensors.
 
     Parameters a model keeps in fp32 under bf16 training (the MoE router expert bias; Beam's router
     weight too; DeepSeek-V4's mHC mixing weights and attention sinks) go out in fp32:
     vLLM keeps them in fp32 too, and a bf16 round trip changes them by ~1/256, enough to move router
     top-k choices. Integer tables (DeepSeek-V4's hash-routing tid2eid) keep their dtype: bf16 holds
-    integers exactly only up to 256. Floats narrower than ``dtype`` keep theirs too: an export that
-    re-quantizes to the checkpoint's layout (DeepSeek-V4 / V4.1: FP8 E4M3 weights, e8m0 scales) is
-    already in the dtype vLLM loads, and vLLM's scale loaders reject a widened scale.
+    integers exactly only up to 256. One-byte floats keep theirs too: an export that re-quantizes to
+    the checkpoint's layout (DeepSeek-V4 / V4.1: FP8 E4M3 weights, e8m0 scales) is already in the
+    dtype vLLM loads, and vLLM's scale loaders reject a widened scale.
     """
-    if tensor.dtype == torch.float32 or not tensor.is_floating_point():
-        return tensor.dtype
-    if tensor.element_size() < dtype.itemsize:
+    if tensor.dtype == torch.float32 or not tensor.is_floating_point() or tensor.element_size() == 1:
         return tensor.dtype
     return dtype
 
