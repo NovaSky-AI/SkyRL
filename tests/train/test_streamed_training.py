@@ -443,6 +443,13 @@ def test_each_row_is_logged_with_its_own_trajectorys_prompt():
     assert _row_prompts([group]) == ["first", "second", "second"]
 
 
+def test_rows_without_trajectory_ids_are_logged_with_their_prompts():
+    # SkyRLGymGenerator outputs no trajectory ids unless step-wise: one row per trajectory.
+    output = {"rewards": [1.0, 0.0], "trajectory_ids": None}
+    group = GeneratedOutputGroup(generator_output=output, uid="a", global_step_when_scheduled=0, prompts=["p0", "p1"])
+    assert _row_prompts([group]) == ["p0", "p1"]
+
+
 def test_a_streamed_steps_metrics_come_from_the_metadata():
     outputs = [_output("a", [1.0, 0.0], [1, 2])]
     outputs[0]["rollout_stats"] = [{"turns": 1}, {"turns": 2}, {"turns": 3}]

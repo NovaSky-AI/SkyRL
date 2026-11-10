@@ -153,7 +153,12 @@ def _row_prompts(groups: List[GeneratedOutputGroup]) -> List[Any]:
     for group in groups:
         if group.prompts is None:
             return []
-        trajectories = [t.to_string() for t in group.metadata_view()["trajectory_ids"]]
+        trajectory_ids = group.metadata_view().get("trajectory_ids")
+        if trajectory_ids is None:
+            # Without trajectory ids the output is not step-wise: one row per trajectory.
+            prompts.extend(group.prompts)
+            continue
+        trajectories = [t.to_string() for t in trajectory_ids]
         index = {trajectory: i for i, trajectory in enumerate(dict.fromkeys(trajectories))}
         prompts.extend(group.prompts[index[trajectory]] for trajectory in trajectories)
     return prompts
