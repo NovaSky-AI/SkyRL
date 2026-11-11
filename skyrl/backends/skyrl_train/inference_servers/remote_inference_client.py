@@ -1530,10 +1530,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
         from it; set False to discard it (e.g. when the sync will reset it anyway).
         Pair with :meth:`wake_for_weight_sync`; the caller must KEEP-pause before and
         ``resume`` after.
+
+        The sleep discards the weights, because a full-weight sync sends every parameter
+        again. When the trainer syncs LoRA adapters only (``uses_lora_weight_sync``), the
+        sleep copies the weights to host memory instead, and the wake restores them.
         """
+        kwargs: Dict[str, Any] = {"offload_kv": offload_kv}
+        if self.uses_lora_weight_sync:
+            kwargs["offload_weights"] = True
         return await self._call_all_servers(
             "/collective_rpc",
-            {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": offload_kv}},
+            {"method": "skyrl_sleep_for_weight_sync", "kwargs": kwargs},
         )
 
     @property
@@ -1563,7 +1570,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
         self._requests_frozen_asleep = True
         logger.info(
             f"Engines asleep with frozen requests: pause(keep) took {pause_seconds:.2f} s, "
-            f"allocator sleep (offload_kv={offload_kv}) took {time.perf_counter() - sleep_start:.2f} s."
+            f"allocator sleep (offload_kv={offload_kv}, offload_weights={self.uses_lora_weight_sync}) "
+            f"took {time.perf_counter() - sleep_start:.2f} s."
         )
 
     async def wake_for_weight_sync(self, tags: List[str]) -> Dict[str, Any]:

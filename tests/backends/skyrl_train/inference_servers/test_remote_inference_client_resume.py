@@ -157,3 +157,22 @@ async def test_sleep_with_frozen_requests_keeps_the_gate_open_until_resume():
     assert client._get_generation_gate().is_set(), "a keep pause holds no request in the client"
     await client.resume_generation()
     assert client.requests_frozen_asleep is False
+
+
+@pytest.mark.asyncio
+async def test_sleep_with_frozen_requests_keeps_the_weights_for_a_lora_sync():
+    """A LoRA adapter sync does not send the base model again, so the sleep offloads the weights."""
+    client = _client(resume=True)
+    client.uses_lora_weight_sync = True
+    calls = []
+
+    async def _call(endpoint, json=None, method="POST", params=None):
+        calls.append((endpoint, json))
+        return {}
+
+    client._call_all_servers = _call
+    await client.sleep_with_frozen_requests(offload_kv=True)
+    assert calls[-1] == (
+        "/collective_rpc",
+        {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": True, "offload_weights": True}},
+    )
