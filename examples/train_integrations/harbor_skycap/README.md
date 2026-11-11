@@ -93,9 +93,9 @@ flight, and a call whose reply hasn't started after about 125 s fails, so use
 ## Sharing a sandbox provider
 
 A remote sandbox counts against the provider account's quota, which other runs
-may share. The generator refuses Daytona, Modal or a custom environment without
-a cap on trials in flight (`generator.rate_limit.enabled=true
-generator.rate_limit.max_concurrency=<n>`); eval and retries count against it too.
+may share. Cap trials in flight with `generator.rate_limit.enabled=true
+generator.rate_limit.max_concurrency=<n>`, which also bounds the load on the
+inference engines; eval and retries count against it too.
 
 When the trainer dies, Harbor never deletes its sandboxes. Harbor's Daytona
 environment can label each one, so a run's leftovers can be told apart from
