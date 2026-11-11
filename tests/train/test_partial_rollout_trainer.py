@@ -148,7 +148,7 @@ def test_partial_rollout_step_sleeps_trains_checkpoints_then_syncs(monkeypatch):
     client = MagicMock()
     client.sleep = AsyncMock(side_effect=lambda *a, **k: order.append("sleep"))
     recorder = RecorderCallback()
-    trainer = _partial_trainer(client, callbacks=[recorder])
+    trainer = _partial_trainer(client, cfg=_partial_cfg(cut_mode="abort"), callbacks=[recorder])
     assert client.resume_aborted_requests is True
 
     dispatch_mock = MagicMock()
@@ -231,7 +231,7 @@ async def test_abort_mode_sleeps_with_abort():
     client = MagicMock()
     client.sleep = AsyncMock()
     client.sleep_with_frozen_requests = AsyncMock()
-    trainer = _partial_trainer(client)
+    trainer = _partial_trainer(client, cfg=_partial_cfg(cut_mode="abort"))
     trainer._staleness_manager._stat.running = 1
 
     await trainer._before_training_step()
@@ -239,6 +239,11 @@ async def test_abort_mode_sleeps_with_abort():
     assert client.sleep.await_count == 1
     assert client.sleep_with_frozen_requests.await_count == 0
     assert trainer.all_metrics["partial_rollout/groups_cut"] == 1
+
+
+def test_cut_mode_defaults_to_freeze():
+    assert _partial_cfg().trainer.fully_async.partial_rollout.cut_mode == "freeze"
+    assert _partial_trainer(MagicMock())._freeze_requests_at_cut is True
 
 
 def test_rejects_an_unknown_cut_mode():

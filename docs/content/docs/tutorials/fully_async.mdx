@@ -330,9 +330,9 @@ To address this, our `AsyncDataloader` records the data UIDs that have been cons
 
 `skyrl/train/partial_rollout_trainer.py::PartialRolloutRayPPOTrainer` is the fully-async trainer for the case where the inference engines and the trainer **share the GPUs** (`trainer.placement.colocate_all=true`), for clusters too small to split or models too large to split. `examples/train/fully_async/main_fully_async.py` selects it from `colocate_all`. Each step:
 
-1. `num_parallel_generation_workers` groups are kept in flight. When `policy_mini_batch_size` of them have finished, the in-flight requests are aborted and the engines sleep. The client holds the aborted requests with the tokens generated so far (`RemoteInferenceClient.resume_aborted_requests`).
+1. `num_parallel_generation_workers` groups are kept in flight. When `policy_mini_batch_size` of them have finished, the trainer cuts the in-flight requests and the engines sleep. The engines keep the cut requests paused, or the client holds them, by `cut_mode` (see below).
 2. The trainer runs on the finished groups and writes the step's checkpoint while the engines sleep.
-3. The weight sync wakes the engines with the new weights, and the held requests continue from `prompt + generated` under the new policy. The engines rebuild the KV cache for the resumed prefix.
+3. The weight sync wakes the engines with the new weights, and the cut requests continue from the tokens they generated before the cut.
 
 So `1 - policy_mini_batch_size / num_parallel_generation_workers` of the in-flight groups are cut per step, and a group's staleness is the number of cuts it survived (`async/staleness_*`). Tokens produced before a cut carry the older policy's rollout logprobs, so use a rollout-logprob loss (`rollout_is`, `dppo`, ...) as for fully async training. The trainer never blocks a resumed group. See `examples/train/fully_async/partial_rollout_run_gsm8k.sh`.
 
@@ -345,12 +345,12 @@ The trainer sets no limit on the number of cuts that one group survives: it cuts
 - `0`: a finished group holds its slot until the step that trains on it. At most `num_parallel_generation_workers` groups are not yet trained on. The number of generating groups falls during each generation phase. The mean staleness is about `num_parallel_generation_workers / policy_mini_batch_size - 1` steps. The GPU runs of this trainer used this rule, and the example script sets it.
 - `1` or more: a finished group frees its slot at once, as in the fully-async trainer. The inference engines stay at `num_parallel_generation_workers` generating groups. At most `max(num_parallel_generation_workers, policy_mini_batch_size * (max_staleness_steps + 1))` groups are not yet trained on. Each cut hits about `num_parallel_generation_workers` groups, so the mean staleness is about one step higher. The default of `max_staleness_steps` is 4, so set `0` explicitly for the first rule.
 
-`trainer.fully_async.partial_rollout.cut_mode` selects what a cut does to the in-flight requests. `abort` (the default) aborts them: the client holds each request and resubmits the prompt and the generated tokens after the weight sync, and the inference engine prefills them again. `freeze` keeps the requests in the inference engine: the engine pauses them and resumes them after the weight sync. Under `freeze`, `trainer.fully_async.clear_kv_cache_on_weight_sync` selects what happens to the key-value (KV) cache:
+`trainer.fully_async.partial_rollout.cut_mode` selects what a cut does to the in-flight requests. `freeze` (the default) keeps the requests in the inference engine: the engine pauses them and resumes them after the weight sync. `abort` aborts them: the client holds each request and resubmits the prompt and the generated tokens after the weight sync, and the inference engine prefills them again. Under `freeze`, `trainer.fully_async.clear_kv_cache_on_weight_sync` selects what happens to the key-value (KV) cache:
 
 - `false` (the default) copies the KV cache to host memory for the training phase and restores it. A request resumes with no prefill. Its next tokens continue from KV states of the older weights. Each step pays one copy of the KV pool to host memory and back, and the host needs memory for the KV pools of all engines.
 - `true` discards the KV cache. The inference engine prefills the paused requests again with the new weights. This is the same recompute as `abort`, without the client resubmission.
 
-`freeze` requires full-weight sync (no LoRA). Under `freeze` the client counters (`partial_rollout/aborted_requests`, `partial_rollout/cuts_survived_*`) stay at zero, because no request is aborted. `partial_rollout/groups_cut` reports the groups in flight at each cut in both modes.
+`freeze` requires full-weight sync; set `cut_mode=abort` for LoRA. On Qwen3-4B with 8xH100, `freeze` gave 4 percent shorter steps than `abort` with the same training reward, and used about 60 GiB more host memory per GPU. Under `freeze` the client counters (`partial_rollout/aborted_requests`, `partial_rollout/cuts_survived_*`) stay at zero, because no request is aborted. `partial_rollout/groups_cut` reports the groups in flight at each cut in both modes.
 
 ## VI. Future Work
 

@@ -5,11 +5,10 @@ The inference engines and the trainer share the GPUs, as in the synchronous trai
 keeps ``num_parallel_generation_workers`` groups in flight. When ``policy_mini_batch_size`` of them
 have finished, the step runs in this order:
 
-1. The inference engines abort the in-flight requests and sleep.
+1. The inference engines stop the in-flight requests and sleep.
 2. The trainer trains on the finished groups.
 3. The inference engines wake with the new weights.
-4. The aborted requests continue from the tokens they generated before the cut
-   (see ``RemoteInferenceClient.resume_aborted_requests``).
+4. The stopped requests continue from the tokens they generated before the cut.
 
 ``trainer.fully_async.max_staleness_steps`` selects when a finished group frees its slot. With ``0``, a
 finished group holds its slot until the step that trains on it. Each step then cuts the fraction
@@ -26,9 +25,11 @@ logprobs of the older policy. The loss must use rollout logprobs, and ``FullyAsy
 asserts this.
 
 ``trainer.fully_async.partial_rollout.cut_mode`` selects what the cut does to the in-flight requests.
-``abort`` is the sequence above. Under ``freeze``, the inference engines pause the requests instead of
-aborting them, and resume them after the weight sync.
-``trainer.fully_async.clear_kv_cache_on_weight_sync`` then selects the handling of the key-value (KV)
+Under ``freeze`` (the default), the inference engines pause the requests and resume them after the
+weight sync. Under ``abort``, the inference engines abort the requests, and the client resubmits each
+request with the tokens it generated (see ``RemoteInferenceClient.resume_aborted_requests``).
+Under ``freeze``,
+``trainer.fully_async.clear_kv_cache_on_weight_sync`` selects the handling of the key-value (KV)
 cache. ``false`` copies the KV cache to host memory during training and restores it, so a request
 resumes with no prefill. ``true`` discards the KV cache, and the inference engine prefills the paused
 requests again with the new weights.
@@ -122,8 +123,9 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
         ), f"trainer.fully_async.partial_rollout.cut_mode must be one of {CUT_MODES}. Got: {cut_mode!r}"
         if cut_mode == "freeze":
             assert self.cfg.trainer.policy.model.lora.rank == 0, (
-                'trainer.fully_async.partial_rollout.cut_mode="freeze" requires full-weight sync. The sleep '
-                "discards the weights of the inference engines, and a LoRA sync does not send them again."
+                'trainer.fully_async.partial_rollout.cut_mode="freeze" (the default) requires full-weight sync. '
+                "The sleep discards the weights of the inference engines, and a LoRA sync does not send them "
+                'again. Set trainer.fully_async.partial_rollout.cut_mode="abort" for LoRA.'
             )
             if self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync:
                 assert self.cfg.generator.inference_engine.enable_prefix_caching, (

@@ -1222,16 +1222,17 @@ class PartialRolloutConfig(BaseConfig):
     """Knobs for the colocated partial-rollout trainer. The fully-async trainer ignores them.
     See https://docs.skyrl.ai/docs/tutorials/fully_async."""
 
-    cut_mode: str = "abort"
-    """What a cut does to the in-flight requests. ``abort`` aborts them: the client holds each request
-    and resubmits the prompt and the generated tokens after the weight sync, and the inference engine
-    prefills them again. ``freeze`` keeps them in the inference engine: the engine pauses the requests
-    and resumes them after the weight sync. Under ``freeze``,
+    cut_mode: str = "freeze"
+    """What a cut does to the in-flight requests. ``freeze`` keeps them in the inference engine: the
+    engine pauses the requests and resumes them after the weight sync. ``abort`` aborts them: the client
+    holds each request and resubmits the prompt and the generated tokens after the weight sync, and the
+    inference engine prefills them again. Under ``freeze``,
     ``trainer.fully_async.clear_kv_cache_on_weight_sync`` selects what happens to the key-value (KV)
     cache. ``false`` copies the KV cache to host memory for the training phase and restores it, so a
-    request resumes with no prefill and continues from KV states of the older weights. ``true``
-    discards the KV cache, and the inference engine prefills the paused requests again with the new
-    weights. ``freeze`` requires full-weight sync (no LoRA)."""
+    request resumes with no prefill and continues from KV states of the older weights. The host needs
+    memory for the KV pools of all inference engines. ``true`` discards the KV cache, and the
+    inference engine prefills the paused requests again with the new weights. ``freeze`` requires
+    full-weight sync. Set ``abort`` for LoRA."""
 
 
 @dataclass
