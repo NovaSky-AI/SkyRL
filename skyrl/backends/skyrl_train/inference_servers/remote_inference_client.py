@@ -51,7 +51,7 @@ import contextlib
 import json
 import logging
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
     Any,
@@ -542,23 +542,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
     tokenizer: Optional[Any] = None
     """Optional HF tokenizer for local tokenize/detokenize (avoids HTTP round-trips)."""
 
-    resume_aborted_requests: bool = False
-    """Hold a ``generate`` call whose request the inference engine aborted, and resubmit it on resume.
-
-    An ``abort`` or ``wait`` pause and ``sleep`` abort the in-flight requests. The client keeps the
-    tokens generated so far. When the engines resume, the client resubmits the prompt plus those
-    tokens. The caller receives one completion that spans the pause. The colocated partial-rollout
-    trainer sets this flag, because each training step aborts the in-flight requests. The flag is off
-    by default: the other trainers never abort in-flight requests, or they want ``abort`` reported as
-    the stop reason."""
-
     # Private fields excluded from repr for cleaner output
     _generate_client: Optional[RemoteGenerateClient] = field(default=None, repr=False)
-    # Set while the inference engines accept requests. An aborting pause clears it. Resume or wake sets it.
-    _generation_gate: Optional[asyncio.Event] = field(default=None, repr=False)
-    _gate_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
-    # Hold-and-resume counters since the last `pop_resume_stats` call (see `resume_aborted_requests`).
-    _resume_stats: Dict[str, int] = field(default_factory=dict, repr=False)
     # True from `sleep_with_frozen_requests` until `resume`. The inference engines then hold paused
     # requests, and only `wake_for_weight_sync` and `resume_generation` can wake them.
     _requests_frozen_asleep: bool = field(default=False, repr=False)
@@ -617,24 +602,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 self._detok_sem = None
             self._sem_loop = current_loop
         return self._gen_sem, self._detok_sem
-
-    def _get_generation_gate(self) -> asyncio.Event:
-        """Return the event that is set while the inference engines accept requests.
-
-        The event is bound to the running loop, like the semaphores. If the loop changed, the client
-        creates a new event in the set state."""
-        loop = asyncio.get_running_loop()
-        if self._generation_gate is None or self._gate_loop is not loop:
-            self._generation_gate = asyncio.Event()
-            self._generation_gate.set()
-            self._gate_loop = loop
-        return self._generation_gate
-
-    def _close_generation_gate(self) -> None:
-        self._get_generation_gate().clear()
-
-    def _open_generation_gate(self) -> None:
-        self._get_generation_gate().set()
 
     def _get_generate_client(self) -> RemoteGenerateClient:
         if self._generate_client is None:
@@ -803,147 +770,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return_sample_support: bool = False,
         return_sample_support_logprobs: bool = False,
     ) -> Dict[str, Any]:
-        if not self.resume_aborted_requests:
-            result = await self._generate_once(
-                prompt_token_ids,
-                sampling_params,
-                session_id,
-                model,
-                mm_features,
-                cache_salt,
-                routed_experts_prompt_start,
-                return_sample_support,
-                return_sample_support_logprobs,
-            )
-            return self._generate_result_to_dict(result)
-
-        # Hold and resume. When the inference engine aborts a request (pause or sleep), the result
-        # holds the tokens generated so far and ``finish_reason == "abort"``. Keep those tokens. Wait
-        # until the engines resume. Then continue from ``prompt + generated`` with the remaining token
-        # budget. The engines rebuild the KV cache for the resumed prefix, so the caller only pays
-        # the re-prefill.
-        if self.enable_return_routed_experts or return_sample_support:
-            raise ValueError(
-                "resume_aborted_requests cannot splice per-token side channels (routed experts, "
-                "sample support) across a resumed request."
-            )
-        generated_ids: List[int] = []
-        generated_logprobs: List[float] = []
-        request_params = dict(sampling_params)
-        max_tokens = request_params.get("max_tokens")
-        aborts = 0
-        while True:
-            await self._get_generation_gate().wait()
-            try:
-                result = await self._generate_once(
-                    prompt_token_ids + generated_ids,
-                    request_params,
-                    session_id,
-                    model,
-                    mm_features,
-                    cache_salt,
-                    routed_experts_prompt_start,
-                    return_sample_support,
-                    return_sample_support_logprobs,
-                )
-            except InferenceServerHTTPError as exc:
-                if exc.status != 503:
-                    raise
-                self._count_resume_stat("retried_503")
-                if self._get_generation_gate().is_set():
-                    # A 503 with the gate closed is the expected race with the pause call. A 503 with
-                    # the gate open means an engine rejects requests after the resume. Count those
-                    # and log the first bodies after each `pop_resume_stats`, with the session id so
-                    # the router log attributes them to an engine.
-                    self._count_resume_stat("retried_503_gate_open")
-                    if self._resume_stats.get("_logged_503", 0) < 3:
-                        self._resume_stats["_logged_503"] = self._resume_stats.get("_logged_503", 0) + 1
-                        logger.info(
-                            f"503 with the gate open from {exc.request_info.url} (session_id={session_id}, "
-                            f"aborts={aborts}): {exc.message!r}"
-                        )
-                # A paused engine rejects new requests with 503. Either the gate is already closed
-                # and the loop waits on it, or this request raced the pause call. Wait a short time
-                # and retry.
-                if self._get_generation_gate().is_set():
-                    await asyncio.sleep(0.5)
-                continue
-            generated_ids.extend(result.response_ids)
-            if result.response_logprobs is not None:
-                generated_logprobs.extend(result.response_logprobs)
-            if result.stop_reason != "abort":
-                break
-            self._count_resume_stat("aborted_requests")
-            self._count_resume_stat("aborted_segment_tokens", len(result.response_ids))
-            if generated_ids:
-                # An abort before the first token leaves the request as new. It ages no token, so
-                # it does not count as a survived cut.
-                aborts += 1
-            if max_tokens is not None:
-                remaining = max_tokens - len(generated_ids)
-                if remaining <= 0:
-                    result = replace(result, stop_reason="length")
-                    break
-                request_params["max_tokens"] = remaining
-            # The resubmission re-prefills the prompt and all tokens generated so far, because sleep
-            # drops the KV cache.
-            self._count_resume_stat("resume_prefill_tokens", len(prompt_token_ids) + len(generated_ids))
-        if result.stop_reason != "abort":
-            # The request completed. Record the number of cuts it survived for the staleness metrics.
-            self._count_resume_stat("completed_requests")
-            self._count_resume_stat("cuts_survived_sum", aborts)
-            self._resume_stats["cuts_survived_max"] = max(self._resume_stats.get("cuts_survived_max", 0), aborts)
-        return self._generate_result_to_dict(
-            replace(
-                result,
-                response_ids=generated_ids,
-                response_logprobs=generated_logprobs if result.response_logprobs is not None else None,
-            )
-        )
-
-    def _count_resume_stat(self, key: str, n: int = 1) -> None:
-        self._resume_stats[key] = self._resume_stats.get(key, 0) + n
-
-    def pop_resume_stats(self) -> Dict[str, int]:
-        """Return the hold-and-resume counters and reset them.
-
-        - ``aborted_requests``: requests that the engine aborted and the client held.
-        - ``aborted_segment_tokens``: tokens that those requests generated in the aborted segment.
-        - ``resume_prefill_tokens``: prompt and generated tokens that the resubmission re-prefilled.
-        - ``retried_503``: requests that a paused engine rejected and the client retried.
-        - ``retried_503_gate_open``: the part of ``retried_503`` that arrived while the gate was open.
-        - ``completed_requests``: requests that completed with a stop reason other than ``abort``.
-        - ``cuts_survived_sum``: the total number of aborts that the completed requests survived.
-        - ``cuts_survived_max``: the largest number of aborts that one completed request survived."""
-        stats = {
-            k: self._resume_stats.get(k, 0)
-            for k in (
-                "aborted_requests",
-                "aborted_segment_tokens",
-                "resume_prefill_tokens",
-                "retried_503",
-                "retried_503_gate_open",
-                "completed_requests",
-                "cuts_survived_sum",
-                "cuts_survived_max",
-            )
-        }
-        self._resume_stats.clear()
-        return stats
-
-    async def _generate_once(
-        self,
-        prompt_token_ids: List[int],
-        sampling_params: Dict[str, Any],
-        session_id: Optional[Any],
-        model: str,
-        mm_features: Optional[MultiModalFeatures],
-        cache_salt: Optional[str],
-        routed_experts_prompt_start: Optional[int],
-        return_sample_support: bool,
-        return_sample_support_logprobs: bool,
-    ) -> RemoteGenerateResult:
-        return await self._get_generate_client().generate(
+        result = await self._get_generate_client().generate(
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             session_id=session_id,
@@ -955,9 +782,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
             mm_features=mm_features,
             cache_salt=cache_salt,
         )
-
-    @staticmethod
-    def _generate_result_to_dict(result: RemoteGenerateResult) -> Dict[str, Any]:
         return {
             "stop_reason": result.stop_reason,
             "response_ids": result.response_ids,
@@ -1443,18 +1267,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
 
         params: Dict[str, Any] = {"mode": mode.value, "clear_cache": str(clear_cache).lower()}
 
-        if mode != PauseMode.KEEP:
-            # The engines reject new requests until resume. Hold the requests here instead (see
-            # ``resume_aborted_requests``). Close the gate before the call, so no request enters in
-            # between.
-            self._close_generation_gate()
         return await self._call_all_servers("/pause", params=params)
 
     async def resume(self) -> Dict[str, Any]:
         """Resume generation on all backends."""
         ret = await self._call_all_servers("/resume")
         self._requests_frozen_asleep = False
-        self._open_generation_gate()
         return ret
 
     async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
@@ -1491,19 +1309,11 @@ class RemoteInferenceClient(InferenceEngineInterface):
         # routed-experts capture (`enable_return_routed_experts`) unless paused in "keep" mode;
         # vllm#59060 (in 0.32) lifted that. Abort in-flight requests explicitly first, then sleep
         # in "keep" mode: the same end state for every engine config.
-        pause_start = time.perf_counter()
         await self.pause(mode=PauseMode.ABORT, clear_cache=False)
-        pause_seconds = time.perf_counter() - pause_start
         params: Dict[str, Any] = {"level": str(level), "mode": PauseMode.KEEP.value}
         if tags:
             params["tags"] = tags
-        sleep_start = time.perf_counter()
-        ret = await self._call_all_servers("/sleep", params=params)
-        logger.info(
-            f"Engines asleep: pause(abort) took {pause_seconds:.2f} s, "
-            f"/sleep level {level} took {time.perf_counter() - sleep_start:.2f} s."
-        )
-        return ret
+        return await self._call_all_servers("/sleep", params=params)
 
     async def wake_up(self, tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """
@@ -1514,12 +1324,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 Common tags: ["weights"], ["kv_cache"], or None for all.
         """
         params = {"tags": tags} if tags else {}
-        ret = await self._call_all_servers("/wake_up", params=params)
-        if not tags or "kv_cache" in tags:
-            # The KV cache is the last pool to wake. vLLM resumes its scheduler when every pool is
-            # resident. The held requests may go out again.
-            self._open_generation_gate()
-        return ret
+        return await self._call_all_servers("/wake_up", params=params)
 
     async def sleep_for_weight_sync(self, offload_kv: bool = True) -> Dict[str, Any]:
         """Free GPU memory for weight sync while keeping in-flight requests frozen.
@@ -1872,8 +1677,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
         state["_gen_sem"] = None
         state["_detok_sem"] = None
         state["_sem_loop"] = None
-        state["_generation_gate"] = None
-        state["_gate_loop"] = None
         return state
 
     def __setstate__(self, state: dict) -> None:
@@ -1882,8 +1685,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
         self._gen_sem = None
         self._detok_sem = None
         self._sem_loop = None
-        self._generation_gate = None
-        self._gate_loop = None
 
     async def aclose(self) -> None:
         await self.teardown()
