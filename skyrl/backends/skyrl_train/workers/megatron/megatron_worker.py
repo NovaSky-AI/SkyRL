@@ -95,6 +95,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_shared_expert_lora_tp imp
 from skyrl.backends.skyrl_train.patches.megatron.patch_sparse_mla_nope import (
     patch_sparse_mla_nope,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_triton_kernels_int64_offsets import (
+    apply_triton_kernels_int64_offsets_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_vision_attention_backend import (
     patch_vision_attention_backend,
 )
@@ -174,6 +177,8 @@ apply_dsa_hybrid_indexer_patch()
 apply_dist_ckpt_exchange_wait_patch()
 apply_dist_optim_te_load_state_dict_patch()
 apply_dsa_head_full_patch()
+# megatron-core Triton kernels (fused mHC, MLA RoPE): int64 row offsets for long sequences (DSv4 / V4.1 at >64k).
+apply_triton_kernels_int64_offsets_patch()
 # Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_distopt_mixed_dtype_group_index_patch()
