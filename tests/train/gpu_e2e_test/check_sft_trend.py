@@ -76,11 +76,16 @@ def main() -> int:
         if matched_run is None:
             print(f"FAIL: run '{args.run_name}' not found in project '{project_path}'", file=sys.stderr)
             return 1
-        rows = list(matched_run.scan_history(keys=[args.metric, "train/global_step"], use_cache=False))
-        training_rows = [
-            row for row in rows if row.get(args.metric) is not None and row.get("train/global_step") is not None
-        ]
-        final_step = max((row["train/global_step"] for row in training_rows), default=None)
+        keys = [args.metric, "train/global_step"] if args.expected_steps is not None else [args.metric]
+        rows = list(matched_run.scan_history(keys=keys, use_cache=False))
+        training_rows = [row for row in rows if row.get(args.metric) is not None]
+        if args.expected_steps is not None:
+            training_rows = [row for row in training_rows if row.get("train/global_step") is not None]
+        final_step = (
+            max((row["train/global_step"] for row in training_rows), default=None)
+            if args.expected_steps is not None
+            else None
+        )
         if args.expected_steps is None or (final_step is not None and final_step >= args.expected_steps):
             break
         if time.monotonic() >= deadline:

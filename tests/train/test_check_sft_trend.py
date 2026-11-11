@@ -23,3 +23,19 @@ def test_sft_completion_uses_history_when_summary_is_stale(monkeypatch):
     assert check_sft_trend.main() == 0
     assert run.scan_history.call_count == 2
     assert all(call.kwargs["use_cache"] is False for call in run.scan_history.call_args_list)
+
+
+def test_sft_trend_without_expected_steps_accepts_metric_only_history(monkeypatch):
+    rows = [{"train/loss": 3 - step / 100} for step in range(1, 101)]
+    run = MagicMock()
+    run.id = "finished-run"
+    run.state = "finished"
+    run.url = "https://example.test/run"
+    run.scan_history.return_value = rows
+    api = MagicMock()
+    api.runs.return_value = [run]
+    monkeypatch.setattr(check_sft_trend.wandb, "Api", lambda: api)
+    monkeypatch.setattr("sys.argv", ["check_sft_trend.py", "--run_name", "sft", "--project_name", "ci"])
+
+    assert check_sft_trend.main() == 0
+    assert run.scan_history.call_args.kwargs["keys"] == ["train/loss"]
