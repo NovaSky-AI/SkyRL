@@ -1222,17 +1222,6 @@ class PartialRolloutConfig(BaseConfig):
     """Knobs for the colocated partial-rollout trainer. The fully-async trainer ignores them.
     See https://docs.skyrl.ai/docs/tutorials/fully_async."""
 
-    stale_group_policy: str = "ignore"
-    """What the trainer does with a group that reaches ``max_cuts_per_group`` cuts. ``ignore`` sets no
-    limit: the trainer cuts and resumes the group until it finishes. ``wait`` delays the next cut
-    until every such group has finished. ``drop`` does not resume such a group: the client returns its
-    request with stop reason ``abort``, and the trainer discards the group and does not draw its
-    prompt again."""
-    max_cuts_per_group: int = 4
-    """The number of cuts one group can survive before ``stale_group_policy`` acts. Each cut adds one
-    step of staleness to the group. Not used under ``stale_group_policy="ignore"``. This field is
-    separate from ``trainer.fully_async.max_staleness_steps``, which bounds the admission of new
-    groups."""
     cut_mode: str = "abort"
     """What a cut does to the in-flight requests. ``abort`` aborts them: the client holds each request
     and resubmits the prompt and the generated tokens after the weight sync, and the inference engine
@@ -1242,8 +1231,7 @@ class PartialRolloutConfig(BaseConfig):
     cache. ``false`` copies the KV cache to host memory for the training phase and restores it, so a
     request resumes with no prefill and continues from KV states of the older weights. ``true``
     discards the KV cache, and the inference engine prefills the paused requests again with the new
-    weights. ``freeze`` requires full-weight sync (no LoRA) and does not support
-    ``stale_group_policy="drop"``."""
+    weights. ``freeze`` requires full-weight sync (no LoRA)."""
 
 
 @dataclass

@@ -25,12 +25,6 @@ the step does not wait for the longest trajectory. Tokens generated before a cut
 logprobs of the older policy. The loss must use rollout logprobs, and ``FullyAsyncRayPPOTrainer``
 asserts this.
 
-``trainer.fully_async.partial_rollout.stale_group_policy`` selects what happens to a group that reaches
-``trainer.fully_async.partial_rollout.max_cuts_per_group`` cuts. ``ignore`` sets no limit: the trainer
-cuts and resumes the group until it finishes. ``wait`` delays the next cut
-until every such group has finished. ``drop`` does not resume such a group: the client returns its
-request with stop reason ``abort``, and the trainer discards the group.
-
 ``trainer.fully_async.partial_rollout.cut_mode`` selects what the cut does to the in-flight requests.
 ``abort`` is the sequence above. Under ``freeze``, the inference engines pause the requests instead of
 aborting them, and resume them after the weight sync.
@@ -39,23 +33,19 @@ cache. ``false`` copies the KV cache to host memory during training and restores
 resumes with no prefill. ``true`` discards the KV cache, and the inference engine prefills the paused
 requests again with the new weights.
 
-The staleness that the policy bounds is the number of cuts a request survived. The metrics
-``partial_rollout/cuts_survived_mean`` and ``partial_rollout/cuts_survived_max`` report it per step over
-the completed requests. The metric ``async/staleness`` is the age of a trained group in steps. The age
-also counts the steps that a finished group waited in the buffer. With
-``max_staleness_steps=0`` the buffer holds at most ``num_parallel_generation_workers - 1`` groups, so the
-wait is short when that number is close to ``policy_mini_batch_size``.
+The trainer sets no limit on the number of cuts that one group survives. The metrics
+``partial_rollout/cuts_survived_mean`` and ``partial_rollout/cuts_survived_max`` report that number per
+step over the completed requests. The metric ``async/staleness`` is the age of a trained group in steps.
+The age also counts the steps that a finished group waited in the buffer.
 """
 
 from loguru import logger
 
 from skyrl.train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
-    GeneratedOutputGroup,
     _AsyncStalenessManager,
 )
 
-STALE_GROUP_POLICIES = ("ignore", "wait", "drop")
 CUT_MODES = ("abort", "freeze")
 
 
@@ -98,15 +88,7 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
         # The client holds each aborted request and resubmits it after the weight sync. The
         # generator receives one completion per trajectory, as if no cut happened.
         self.inference_engine_client.resume_aborted_requests = True
-        partial_rollout_cfg = self.cfg.trainer.fully_async.partial_rollout
-        self._stale_group_policy = partial_rollout_cfg.stale_group_policy
-        self._max_cuts_per_group = partial_rollout_cfg.max_cuts_per_group
-        self._freeze_requests_at_cut = partial_rollout_cfg.cut_mode == "freeze"
-        self._stale_groups_dropped = 0
-        if self._stale_group_policy == "drop":
-            # A request that survives more than max_cuts_per_group cuts comes back with stop reason
-            # "abort", and `_accept_generated_group` drops its group.
-            self.inference_engine_client.max_resumes_per_request = self._max_cuts_per_group
+        self._freeze_requests_at_cut = self.cfg.trainer.fully_async.partial_rollout.cut_mode == "freeze"
 
     def _generation_buffer_maxsize(self) -> int:
         # The admission controller allows this many groups that are not yet trained on. All of them
@@ -134,27 +116,11 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
             f"{self.num_parallel_generation_workers=}, {self.mini_batch_size=}"
         )
         # The base constructor calls this method before `__init__` of this class sets its attributes.
-        partial_rollout_cfg = self.cfg.trainer.fully_async.partial_rollout
-        policy = partial_rollout_cfg.stale_group_policy
-        max_cuts = partial_rollout_cfg.max_cuts_per_group
-        assert policy in STALE_GROUP_POLICIES, (
-            f"trainer.fully_async.partial_rollout.stale_group_policy must be one of {STALE_GROUP_POLICIES}. "
-            f"Got: {policy!r}"
-        )
-        if policy != "ignore":
-            assert max_cuts >= 0, (
-                "trainer.fully_async.partial_rollout.max_cuts_per_group must be >= 0 under "
-                f"stale_group_policy={policy!r}. Got: {max_cuts}"
-            )
-        cut_mode = partial_rollout_cfg.cut_mode
+        cut_mode = self.cfg.trainer.fully_async.partial_rollout.cut_mode
         assert (
             cut_mode in CUT_MODES
         ), f"trainer.fully_async.partial_rollout.cut_mode must be one of {CUT_MODES}. Got: {cut_mode!r}"
         if cut_mode == "freeze":
-            assert policy != "drop", (
-                'trainer.fully_async.partial_rollout.cut_mode="freeze" does not support stale_group_policy="drop": '
-                "the drop policy counts the aborts of a request, and a frozen request is never aborted."
-            )
             assert self.cfg.trainer.policy.model.lora.rank == 0, (
                 'trainer.fully_async.partial_rollout.cut_mode="freeze" requires full-weight sync. The sleep '
                 "discards the weights of the inference engines, and a LoRA sync does not send them again."
@@ -172,8 +138,7 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
             f"{self.mini_batch_size} finished groups, {cut_fraction:.0%} of in-flight groups cut per step, "
             f"max_staleness_steps={self.max_staleness_steps} "
             f"({'a finished group holds its slot' if self._holds_slot_until_trained() else 'a finished group frees its slot'}), "
-            f"cut_mode={cut_mode}, stale_group_policy={policy}"
-            + ("." if policy == "ignore" else f" at max_cuts_per_group={max_cuts}.")
+            f"cut_mode={cut_mode}."
         )
         router_kwargs = self.cfg.generator.inference_engine.router_init_kwargs or {}
         if router_kwargs.get("policy") != "sticky_least_loaded":
@@ -184,48 +149,9 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
                 "resumed segments pile up on one engine and can exhaust its KV cache."
             )
 
-    def _epoch_may_exhaust_early(self) -> bool:
-        # Dropped stale groups do not reach the buffer, so an epoch can run out of prompts mid mini-batch.
-        return super()._epoch_may_exhaust_early() or (
-            self.cfg.trainer.fully_async.partial_rollout.stale_group_policy == "drop"
-        )
-
-    def _accept_generated_group(self, group: GeneratedOutputGroup) -> bool:
-        if self._stale_group_policy != "drop":
-            return True
-        stop_reasons = group.generator_output.get("stop_reasons") or []
-        if "abort" not in stop_reasons:
-            return True
-        # The client did not resume a request of this group: it reached max_cuts_per_group cuts.
-        self._stale_groups_dropped += 1
-        logger.info(f"Dropping group {group.uid}: it reached {self._max_cuts_per_group} cuts.")
-        return False
-
-    async def _wait_for_groups_at_cut_limit(self) -> None:
-        """Delay the cut until every in-flight group at the cut limit has finished.
-
-        A group that started at step ``s`` has survived ``global_step - s`` cuts. A group with
-        ``s <= global_step - max_cuts_per_group`` would exceed the limit after one more cut. The trainer lets it finish before the inference engines sleep.
-        """
-        threshold = self.global_step - self._max_cuts_per_group
-        failure = self._generation_failure
-        waited_groups = 0
-        with self._phase_gauge.timed_phase("wait_for_stale_groups", self.all_timings):
-            while True:
-                stale = [uid for uid, start in self._in_flight_start_steps.items() if start <= threshold]
-                if not stale:
-                    break
-                waited_groups = max(waited_groups, len(stale))
-                self._in_flight_changed.clear()
-                changed = self._in_flight_changed.wait()
-                await (failure.guard(changed) if failure is not None else changed)
-        self.all_metrics["partial_rollout/stale_groups_waited"] = waited_groups
-
     async def _before_training_step(self) -> None:
-        if self._stale_group_policy == "wait":
-            await self._wait_for_groups_at_cut_limit()
         # The groups in flight at this point are the groups that this step cuts.
-        self.all_metrics["partial_rollout/groups_cut"] = len(self._in_flight_start_steps)
+        self.all_metrics["partial_rollout/groups_cut"] = self._staleness_manager._stat.running
         if self._freeze_requests_at_cut:
             # The inference engines keep the in-flight requests paused and free the GPUs for training.
             # The KV cache goes to host memory, unless the weight sync clears it.
@@ -247,8 +173,6 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
         cuts_survived_sum = stats.pop("cuts_survived_sum")
         self.all_metrics.update({f"partial_rollout/{k}": v for k, v in stats.items()})
         self.all_metrics["partial_rollout/cuts_survived_mean"] = cuts_survived_sum / completed if completed else 0.0
-        self.all_metrics["partial_rollout/stale_groups_dropped"] = self._stale_groups_dropped
-        self._stale_groups_dropped = 0
 
     async def _after_training_loop(self) -> None:
         await self.inference_engine_client.sleep()
