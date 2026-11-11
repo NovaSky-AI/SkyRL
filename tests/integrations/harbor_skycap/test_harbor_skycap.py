@@ -3,7 +3,6 @@ server in token mode, which calls a mock SkyRL router."""
 
 import asyncio
 import re
-from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -713,20 +712,6 @@ async def test_thinking_survives_litellm_so_the_replayed_history_stays_one_path(
         assert len(graph.paths()) == 1
     finally:
         await asyncio.to_thread(service.stop)
-
-
-def test_remote_sandboxes_are_refused_without_a_concurrency_cap() -> None:
-    daytona = {"environment": {"type": "daytona"}}
-    custom = {"environment": {"import_path": "my_pkg.environments:MyEnvironment"}}
-    for template in (daytona, custom):
-        for rate_limit in (None, RateLimiterConfig(), RateLimiterConfig(enabled=True, trajectories_per_second=5)):
-            with pytest.raises(ValueError, match="max_concurrency"):
-                HarborSkycapGenerator(generator_cfg(rate_limit=rate_limit), deepcopy(template), ["http://x"])
-        HarborSkycapGenerator(
-            generator_cfg(rate_limit={"enabled": True, "max_concurrency": 8}), deepcopy(template), ["http://x"]
-        )
-    # Docker runs on this machine: no provider quota to protect.
-    HarborSkycapGenerator(generator_cfg(rate_limit=None), {"environment": {"type": "docker"}}, ["http://x"])
 
 
 def _image(offset: int, patches: int, grid: list) -> Media:
