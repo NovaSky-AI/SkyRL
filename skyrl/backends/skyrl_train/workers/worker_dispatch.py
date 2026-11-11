@@ -897,7 +897,19 @@ class WorkerDispatch:
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
         self.ensure_active_adapter("policy", model_id, require_model_resident=not adapter_only_sync)
-        if self.colocate_all:
+        if self.colocate_all and self._inference_engine_client.requests_frozen_asleep is True:
+            # The partial-rollout trainer froze the in-flight requests and slept the allocator
+            # (`sleep_with_frozen_requests`). Wake the allocator directly, so the scheduler stays
+            # paused until the KV cache is back. Wake the KV cache and resume even if the sync
+            # fails, so the frozen requests never run on a sleeping KV cache.
+            async with cleanup_preserving_primary(self._inference_engine_client.resume_generation, "resume_generation"):
+                async with cleanup_preserving_primary(
+                    lambda: self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"]),
+                    "wake_for_weight_sync(kv_cache)",
+                ):
+                    await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
+                    await _broadcast_and_finish()
+        elif self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
             await _broadcast_and_finish()
             await self._inference_engine_client.wake_up(tags=["kv_cache"])
