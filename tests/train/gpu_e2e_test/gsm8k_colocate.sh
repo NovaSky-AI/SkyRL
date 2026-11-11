@@ -7,11 +7,11 @@ set -euo pipefail
 RUN_NAME="run_$(date +%Y%m%d%H%M%S)_$$"
 SCRIPT_DIR=$(dirname $(realpath $0))
 
-# Thresholds: 5% allowance from min/max of last 10 CI runs as of 23rd Feb 2026
+# Thresholds: approximately 5% allowance from completed DPPO CI runs on Nov 7-9, 2026.
 EVAL_ACC_MIN_VALUE=0.69
-TRAIN_ACC_MIN_VALUE=0.69
-NUM_TOKENS_MAX_VALUE=232
-LOGPROBS_DIFF_MAX_VALUE=0.0104
+TRAIN_ACC_MIN_VALUE=0.71
+NUM_TOKENS_MAX_VALUE=190
+LOGPROBS_DIFF_MAX_VALUE=0.012
 
 # The anyscale job's working_dir is the repo root, so we can use relative paths.
 bash examples/train/gsm8k/run_gsm8k.sh \
@@ -26,5 +26,5 @@ bash examples/train/gsm8k/run_gsm8k.sh \
 # We check for the following metrics:
 # Eval and train accuracy should be greater than the threshold
 # Average number of tokens generated should decrease over time
-# Policy rollout train logprobs absolute difference should be small
-uv run --isolated --extra fsdp $SCRIPT_DIR/get_summary.py --run_name $RUN_NAME --project_name "gsm8k_ci" --asserts "eval/all/avg_score >= $EVAL_ACC_MIN_VALUE" "loss/avg_final_rewards >= $TRAIN_ACC_MIN_VALUE" "generate/avg_num_tokens <= $NUM_TOKENS_MAX_VALUE" "policy/rollout_train_logprobs_abs_diff_mean <= $LOGPROBS_DIFF_MAX_VALUE"
+# Policy minibatch versus rollout logprobs absolute difference should be small.
+uv run --isolated --extra fsdp $SCRIPT_DIR/get_summary.py --run_name $RUN_NAME --project_name "gsm8k_ci" --wait_for_finished --asserts "eval/all/avg_score >= $EVAL_ACC_MIN_VALUE" "loss/avg_final_rewards >= $TRAIN_ACC_MIN_VALUE" "generate/avg_num_tokens <= $NUM_TOKENS_MAX_VALUE" "policy/minibatch_rollout_logprobs_abs_diff_mean <= $LOGPROBS_DIFF_MAX_VALUE"
