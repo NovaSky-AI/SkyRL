@@ -18,4 +18,5 @@ uv run --directory . --isolated --extra dev --extra megatron pytest -s -vvv -m h
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_lora_models.py \
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_vlm_init.py \
     tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_qwen38_qsa_long_context.py \
-    tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/test_sparse_mla_nope.py
+    tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/test_sparse_mla_nope.py \
+    tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/test_triton_kernels_int64_offsets.py

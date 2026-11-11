@@ -30,7 +30,7 @@ It only works with the INT4 QAT checkpoints. Training is text-only and full fine
 
 Every node needs the repo, the venv, the HF cache and the BF16 masters at the same paths.
 
-1. Install the `megatron` extra. The lockfile is CUDA 13 (torch 2.13, Transformer Engine 2.16, all CUDA libs from pip), which B300 needs, with driver R580+.
+1. Install the `megatron` extra. The lockfile is CUDA 13 (torch 2.14, Transformer Engine 2.19, all CUDA libs from pip), which B300 needs, with driver R580+.
 
    ```bash
    uv sync --extra megatron
