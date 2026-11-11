@@ -44,7 +44,7 @@ At 257K tokens, Megatron CP8 and vLLM logprobs differ by a mean |dlogp| of 0.031
 - TP=1 by default, or TP=2 with sequence parallelism. At TP=4 the cuDNN QSA kernels don't cover the head layout and it falls back to FlexAttention.
 - PP=1. The model scales with expert parallelism: EP=16 on 32 GPUs.
 - Context parallelism (CP>1) holds sequences up to 262,144 tokens (CP8 on 4x8 B200). It needs Blackwell and the cuDNN QSA kernels (`QSA_CUDNN_WHEEL`, see Notes),
-  and TP x CP <= 16. QSA attention runs split-K cuDNN QSA over the CP chunks with an LSE merge; GDN uses megatron-core's CP.
+  and TP x CP &lt;= 16. QSA attention runs split-K cuDNN QSA over the CP chunks with an LSE merge; GDN uses megatron-core's CP.
 - Full FT at CP8 uses TP=2 and EP=32, so the optimizer fits on the GPU. At TP=1 it needs CPU optimizer offload.
 - EP also shards the frozen PLE table (~100 GB / EP per rank, ~6.4 GB at EP=16, kept in pinned host memory).
 

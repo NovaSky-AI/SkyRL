@@ -97,7 +97,7 @@ skyrl-train = [
     "tensordict",
     "jaxtyping",
     "skyrl-gym",
-    "flash-attn==2.8.3; sys_platform == 'linux'",
+    "flash-attn==2.8.3.post1; sys_platform == 'linux'",
     "polars",
     "s3fs",
     "s5cmd>=0.3.3; sys_platform == 'linux'",
@@ -134,9 +134,9 @@ fsdp = [
     # 0.6.0+: with 0.5.2 + Triton 3.7.1, fla autotunes the GDN chunk_fwd_kernel_o to 8 warps on B200 (sm_100),
     # which hits a Triton race (triton-lang/triton#10590) and corrupts GDN outputs in ~40% of calls.
     "flash-linear-attention==0.6.0; sys_platform == 'linux'",
-    "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
-    "flash-attn==2.8.3; sys_platform == 'linux'",
-    "torch==2.13.0; sys_platform == 'linux'",
+    "causal-conv1d==1.7.0; sys_platform == 'linux'",
+    "flash-attn==2.8.3.post1; sys_platform == 'linux'",
+    "torch==2.14.0; sys_platform == 'linux'",
     "flashinfer-python==0.7.2.post1; sys_platform == 'linux'",
     "flashinfer-jit-cache==0.7.2.post1; sys_platform == 'linux'",
     "flashinfer-jit-cache-sm100a==0.7.2.post1; sys_platform == 'linux'",
@@ -161,27 +161,29 @@ megatron = [
     # Declared directly (not just via transformer-engine[pytorch]) so the
     # [tool.uv.sources] index below is honored — uv ignores sources for
     # transitive-only packages, which would otherwise fall back to the PyPI sdist.
-    "transformer-engine-torch==2.19.0; sys_platform == 'linux'",
+    # Astral's build for this torch, pinned with its local segment so uv cannot pick
+    # another torch's build of the same version.
+    "transformer-engine-torch==2.19.0+cu.13.0.torch.2.14; sys_platform == 'linux'",
     # TE core CUDA lib (libtransformer_engine.so). Declared directly because the
     # meta package only pulls a core via its `core*` extras, which we don't request
     # — without it the meta package's sanity check fails with "Found empty
     # `transformer-engine` meta package installed". cu13 is what
     # `transformer-engine-torch`'s metadata requires under a cu13 torch, so the two
-    # agree without an override. The version is plain `2.19.0`, not
-    # `2.19.0+cu.13.0`: that local segment was an artifact of Astral's cu130 index,
-    # which stops at 2.16.0. The meta and core packages now come from PyPI, which
-    # publishes both prebuilt -- see [tool.uv.sources].
-    "transformer-engine-cu13==2.19.0; sys_platform == 'linux'",
-    "flash-attn==2.8.3; sys_platform == 'linux'",
+    # agree without an override. Astral's transformer-engine-torch hard-depends on
+    # Astral's own core build (`==2.19.0+cu.13.0`), so the core -- and the meta package,
+    # whose version check must tolerate that local segment -- come from Astral too;
+    # see [tool.uv.sources].
+    "transformer-engine-cu13==2.19.0+cu.13.0; sys_platform == 'linux'",
+    "flash-attn==2.8.3.post1; sys_platform == 'linux'",
     # 0.6.0+: with 0.5.2 + Triton 3.7.1, fla autotunes the GDN chunk_fwd_kernel_o to 8 warps on B200 (sm_100),
     # which hits a Triton race (triton-lang/triton#10590) and corrupts GDN outputs in ~40% of calls.
     "flash-linear-attention==0.6.0; sys_platform == 'linux'",
-    "causal-conv1d==1.6.2.post1; sys_platform == 'linux'",
-    "mamba-ssm==2.3.2.post1; sys_platform == 'linux'",
+    "causal-conv1d==1.7.0; sys_platform == 'linux'",
+    "mamba-ssm==2.3.2.post1+cu.13.0.torch.2.14; sys_platform == 'linux'",
     # FlashMLA sparse-attention forward for megatron-core's `dsa_kernel_backend="cudnn"` DSA path
-    # (imported lazily as `flash_mla.flash_mla_sparse_fwd`). Not on PyPI: our own x86_64 build of
-    # the `nv_dev` branch, see [tool.uv.sources]. No aarch64 wheel yet.
-    "flash-mla==1.0.0+cu.13.0.torch.2.13.b7643bd; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    # (imported lazily as `flash_mla.flash_mla_sparse_fwd`). Not on PyPI: our own build of the
+    # `nv_dev` branch (x86_64 and aarch64), see [tool.uv.sources].
+    "flash-mla==1.0.0+cu.13.0.torch.2.14.b7643bd; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
     "vllm==0.33.0; sys_platform == 'linux'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
@@ -192,7 +194,7 @@ megatron = [
     # vLLM 0.33's NixlConnector refuses NIXL < 1.5.0 at engine start (check_nixl_version);
     # vLLM does not declare nixl, so the floor lives here.
     "nixl>=1.5.0; sys_platform == 'linux'",
-    "torch==2.13.0; sys_platform == 'linux'",
+    "torch==2.14.0; sys_platform == 'linux'",
     "flashinfer-python==0.7.2.post1; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
@@ -227,8 +229,8 @@ megatron = [
 #
 # Markers: `< '3.15'` matches the companion's own `Requires-Python`, and the
 # `platform_machine` bound keeps it off Linux arches with no combined wheel
-# (there `flash-attn` resolves to plain PyPI 2.8.3, which cannot satisfy the
-# companion's hard dep on ==2.8.3+cu.13.0.torch.2.13.fa4b28.skyrl1). Dropping
+# (there `flash-attn` resolves to plain PyPI 2.8.3.post1, which cannot satisfy the
+# companion's hard dep on ==2.8.3.post1+cu.13.0.torch.2.14.fa4b28.skyrl1). Dropping
 # either bound makes resolution fail outright.
 #
 # FA4 4.0.0b28 is a beta. TE 2.19 allows it under context parallelism for
@@ -248,7 +250,7 @@ miniswe = [
     "litellm",
 ]
 harbor = [
-    "harbor[daytona,modal]",
+    "harbor[daytona,modal]==0.14.0",
 ]
 # skycap, capturing each rollout's exact tokens in token mode (examples/train_integrations/harbor_skycap).
 skycap = [
@@ -381,28 +383,22 @@ override-dependencies = [
     # 0.1.13 is the first tilelang whose bound (`>=0.1.11,<0.1.13`) admits 0.1.12.
     "tilelang==0.1.13; sys_platform == 'linux'",
     "apache-tvm-ffi==0.1.12; sys_platform == 'linux'",
-    # vLLM 0.33.0 pins nvidia-cutlass-dsl==4.8.0 and quack-kernels==0.6.5, but the
-    # combined FA4 `flash-attn` wheel (`fa4` extra) pins quack-kernels==0.6.4 and an
-    # older cutlass-dsl, so both are held at vLLM's versions here.
+    # vLLM 0.33.0 pins nvidia-cutlass-dsl==4.8.0 and quack-kernels==0.6.5. The torch-2.14
+    # combined FA4 `flash-attn` wheels pin the same versions; held here so the two can
+    # never drift apart (the torch-2.13 combined wheels pinned quack-kernels 0.6.4).
     "nvidia-cutlass-dsl[cu13]==4.8.0; sys_platform == 'linux'",
     "quack-kernels[cu13]==0.6.5; sys_platform == 'linux'",
-    # vLLM 0.33.0 pins torch==2.14.0, but our CUDA extension wheels (flash-attn,
-    # causal-conv1d, mamba-ssm, fast-hadamard-transform, transformer-engine-torch,
-    # flash-mla; see [tool.uv.sources]) are built against torch 2.13.0, so torch is
-    # held at 2.13.0 here. Every vLLM 0.33.0 extension (including
-    # third_party/deep_gemm) is built against the stable libtorch ABI, and every
-    # `aoti_torch_*` shim symbol they import is exported by torch 2.13.0.
-    "torch==2.13.0; sys_platform == 'linux'",
+    # vLLM 0.33.0 pins torch==2.14.0. Held here so megatron-bridge / mamba-ssm metadata cannot
+    # pull a different torch under the CUDA extension wheels, which are built for exactly 2.14.0.
+    "torch==2.14.0; sys_platform == 'linux'",
     # torchvision is NOT stable-ABI (unlike vLLM), and each release hard-pins one
-    # torch: 0.29.0 wants torch 2.14.0, 0.28.0 wants 2.13.0. vLLM 0.33.0 pulls
-    # torchvision==0.29.0, so without this the torch override above would resolve
-    # a torchvision that cannot import against the torch we actually install.
-    "torchvision==0.28.0; sys_platform == 'linux'",
+    # torch: 0.29.0 wants torch 2.14.0, 0.28.0 wants 2.13.0.
+    "torchvision==0.29.0; sys_platform == 'linux'",
 ]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = [{requirement = "torch", match-runtime = true}]
-fast-hadamard-transform = ["torch==2.13.0", "ninja"]
+fast-hadamard-transform = ["torch==2.14.0", "ninja"]
 
 [tool.uv.extra-build-variables]
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
@@ -465,59 +461,46 @@ flashinfer-jit-cache-sm110a = { index = "flashinfer-cu130", marker = "sys_platfo
 flashinfer-jit-cache-sm121a = { index = "flashinfer-cu130", marker = "sys_platform == 'linux'" }
 flashinfer-cubin = { index = "flashinfer", marker = "sys_platform == 'linux'" }
 
-# TEMPORARY: torch-2.13 builds of these four are not published anywhere yet --
-# Astral's cu130 index stops at `torch.2.12` (mamba-ssm at `torch.2.11`), so the
-# usual `+cu.13.0.torch.<ver>` pins cannot resolve. These are wheels we built
-# ourselves against torch 2.13.0 + CUDA 13.0.88 and host on a GitHub release.
+# CUDA extension wheels for torch 2.14.0 + CUDA 13.
 #
-#   https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/cu13torch2.13
+# mamba-ssm, causal-conv1d and transformer-engine-torch come from Astral's cu130 index, which
+# publishes builds per (CUDA, torch) pair for cp310-cp314 on x86_64 and aarch64. Their wheels
+# require the matching torch, so `causal-conv1d==1.7.0` resolves to the torch-2.14 build without
+# naming its local segment, which keeps the `fsdp` extra installable from PyPI. causal-conv1d is 1.7.0 there
+# (Astral builds no 1.6.x for torch >= 2.13). Check for a newer torch with:
+#   curl -sL https://wheels.astral.sh/simple/cu130/mamba-ssm/ | grep -o 'torch\.2\.[0-9]*' | sort -uV
 #
-# They cover cp312/cp313/cp314 on both x86_64 and aarch64 -- the whole of this
-# project's `requires-python = ">=3.12"` range, matching the coverage Astral gave us.
-# Anything outside that matrix falls through to the PyPI sdist and builds from source.
-#
-# NOTE: `TORCH_CUDA_ARCH_LIST` does NOT control what these wheels contain -- four of
-# the five packages ignore it and hardcode their own gencode lists (mamba-ssm's
-# setup.py explicitly clears the variable; flash-attn reads `FLASH_ATTN_CUDA_ARCHS`,
-# default `80;90;100;120`). Actual embedded cubins, per `cuobjdump --list-elf`:
-#   flash-attn                                sm_80 90 100 120
-#   mamba-ssm / causal-conv1d / fast-hadamard sm_75 80 87 90 100 103 110 120 121
-#   transformer-engine-torch                  none (kernels live in -cu13)
-# So H100/GH200 (sm_90) and B200/GB200 (sm_100) are covered on both arches.
-#
-# TODO: DELETE THIS and go back to `{ index = "astral-cu130" }` with
-# `+cu.13.0.torch.2.13` pins as soon as Astral publishes those builds. Check with:
-#   curl -sL https://wheels.astral.sh/simple/cu130/mamba-ssm/ | grep -o 'torch\.2\.[0-9]*'
-#
-# flash-attn stays at exactly 2.8.3 for the combined-wheel reason below, not a TE
-# bound: TE 2.19 gates flash-attn on `version < max_version` with
-# `max_version = 2.8.4`, so 2.8.3.post1 would now pass too (2.16's `max_version =
-# 2.8.3` rejected it). TE >= 2.16 strips the local segment before comparing
-# (`PkgVersion(...).public`).
-# WARNING: every `flash-attn` entry below MUST stay a combined FA2+FA4 wheel.
-# The stock 2.8.3 wheel ships a stale `flash_attn/cute/` built against the
-# nvidia-cutlass-dsl 4.0/4.1 API, and megatron-core imports that tree
-# unconditionally -- before its own `flash-attn-4` metadata check -- under a
-# bare `except ImportError`. Against cutlass-dsl 4.6.x the stale tree raises
-# `AttributeError: ThrMma`, which escapes that handler and takes down every
-# `megatron.core.transformer.attention` import. SkyRL used to defuse this at
-# runtime in `skyrl/_compat.py`; that shim is gone, so pointing any of these
-# back at a plain wheel (e.g. the `astral-cu130` TODO above) reintroduces the
-# crash. Rebuild combined wheels instead.
+# All three Transformer Engine packages come from Astral, as a set. transformer-engine-torch
+# hard-depends on Astral's TE core build (`2.19.0+cu.13.0`), and only Astral's TE meta package can
+# load that pair: its import-time sanity check compares base versions (local segment stripped),
+# while PyPI's `transformer-engine` 2.19.0 requires the three version strings to be identical and
+# fails every Megatron import with "Transformer Engine package version mismatch".
+causal-conv1d = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
+mamba-ssm = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
+transformer-engine-torch = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
+transformer-engine-cu13 = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
+transformer-engine = { index = "astral-cu130", marker = "sys_platform == 'linux'" }
+
+# flash-attn: combined FA2+FA4 wheels, repacked from Astral's
+# `2.8.3.post1+cu.13.0.torch.2.14` FA2 wheels (compiled extension byte-identical) with the stale
+# `flash_attn/cute/` tree replaced by FA4 4.0.0b28's:
+#   https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/cu13torch2.14-fa4b28-skyrl1
+# Embedded cubins: sm_80 90 100 120. TE 2.19 gates flash-attn on `version < 2.8.4` (public part
+# only), so 2.8.3.post1 passes.
+# WARNING: every `flash-attn` entry below MUST stay a combined FA2+FA4 wheel. Astral's plain
+# FA2 wheel still ships a stale `flash_attn/cute/` (21 files) built against the
+# nvidia-cutlass-dsl 4.0/4.1 API, and megatron-core imports that tree unconditionally -- before
+# its own `flash-attn-4` metadata check -- under a bare `except ImportError`. Against
+# cutlass-dsl 4.6+ the stale tree raises `AttributeError: ThrMma`, which escapes that handler
+# and takes down every `megatron.core.transformer.attention` import. Rebuild combined wheels
+# instead (recipe and manifests are attached to the release).
 flash-attn = [
-    # Both architectures get the combined FA2+FA4 wheels: the plain
-    # cu13torch2.13 FA2 build ships a stale `flash_attn/cute/` tree (21 files,
-    # built against the nvidia-cutlass-dsl 4.0/4.1 API) that collides with real
-    # FA4 (52 files). This wheel is the same torch-2.13 FA2 extension with that
-    # tree replaced by FA4 4.0.0b28's, so one package owns `flash_attn.cute`
-    # outright and FA2 and FA4 are importable side by side. See `flash-attn-4`
-    # below for the companion.
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn-2.8.3%2Bcu.13.0.torch.2.13.fa4b28.skyrl1-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14-fa4b28-skyrl1/flash_attn-2.8.3.post1%2Bcu.13.0.torch.2.14.fa4b28.skyrl1-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14-fa4b28-skyrl1/flash_attn-2.8.3.post1%2Bcu.13.0.torch.2.14.fa4b28.skyrl1-cp313-cp313-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14-fa4b28-skyrl1/flash_attn-2.8.3.post1%2Bcu.13.0.torch.2.14.fa4b28.skyrl1-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14-fa4b28-skyrl1/flash_attn-2.8.3.post1%2Bcu.13.0.torch.2.14.fa4b28.skyrl1-cp312-cp312-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14-fa4b28-skyrl1/flash_attn-2.8.3.post1%2Bcu.13.0.torch.2.14.fa4b28.skyrl1-cp313-cp313-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14-fa4b28-skyrl1/flash_attn-2.8.3.post1%2Bcu.13.0.torch.2.14.fa4b28.skyrl1-cp314-cp314-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" },
 ]
 # Metadata-only companion: it carries no runtime files, declares the `cu13`
 # extra, and hard-depends on the exact combined wheel above (which is what
@@ -525,47 +508,22 @@ flash-attn = [
 # the companion cannot find the combined wheel on PyPI. Transformer Engine
 # gates FA4 on this distribution's metadata, so without it TE never uses FA4.
 flash-attn-4 = [
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-fa4b28-skyrl1/flash_attn_4-4.0.0b28%2Bskyrl1-py3-none-any.whl", marker = "sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64') and python_version < '3.15'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14-fa4b28-skyrl1/flash_attn_4-4.0.0b28%2Btorch2.14.skyrl1-py3-none-any.whl", marker = "sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64') and python_version < '3.15'" },
 ]
-# FlashMLA `nv_dev` @ b7643bd, built against torch 2.13.0 + CUDA 13.0.88 (sm_90a + sm_100f):
-#   https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/cu13torch2.13-flashmla-b7643bd
-# x86_64 only; FlashMLA has no PyPI release to fall back to, so the dependency is x86_64-gated.
+# FlashMLA `nv_dev` @ b7643bd, built against torch 2.14.0 + CUDA 13.0.88 (sm_90a + sm_100f):
+#   https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/cu13torch2.14
+# x86_64 and aarch64 (new with torch 2.14; aarch64 is import-verified, not yet GPU-tested). FlashMLA has
+# no PyPI release to fall back to, so the dependency is gated to these two architectures.
 flash-mla = [
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-flashmla-b7643bd/flash_mla-1.0.0%2Bcu.13.0.torch.2.13.b7643bd-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-flashmla-b7643bd/flash_mla-1.0.0%2Bcu.13.0.torch.2.13.b7643bd-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-flashmla-b7643bd/flash_mla-1.0.0%2Bcu.13.0.torch.2.13.b7643bd-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
-]
-causal-conv1d = [
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/causal_conv1d-1.6.2.post1-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" },
-]
-mamba-ssm = [
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/mamba_ssm-2.3.2.post1-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" },
-]
-# The TE meta and core packages carry no torch coupling, and PyPI publishes both
-# prebuilt at 2.19.0 -- the meta as `py3-none-any` (it ships the whole pure-Python
-# `transformer_engine/pytorch/` tree) and the core as manylinux_2_28 wheels for
-# x86_64 and aarch64. They no longer come from `astral-cu130`, whose cu130 index
-# stops at 2.16.0. Only the torch bindings are rebuilt below.
-transformer-engine-torch = [
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-te2.19/transformer_engine_torch-2.19.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-te2.19/transformer_engine_torch-2.19.0-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-te2.19/transformer_engine_torch-2.19.0-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-te2.19/transformer_engine_torch-2.19.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-te2.19/transformer_engine_torch-2.19.0-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13-te2.19/transformer_engine_torch-2.19.0-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/flash_mla-1.0.0%2Bcu.13.0.torch.2.14.b7643bd-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/flash_mla-1.0.0%2Bcu.13.0.torch.2.14.b7643bd-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/flash_mla-1.0.0%2Bcu.13.0.torch.2.14.b7643bd-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/flash_mla-1.0.0%2Bcu.13.0.torch.2.14.b7643bd-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/flash_mla-1.0.0%2Bcu.13.0.torch.2.14.b7643bd-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/flash_mla-1.0.0%2Bcu.13.0.torch.2.14.b7643bd-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" },
 ]
 # CUDA torch on Linux, CPU torch on macOS (must match skyrl-train).
-# Linux uses the cu130 index (torch 2.13 wheels are published there).
+# Linux uses the cu130 index (torch 2.14 wheels are published there).
 torch = [
     { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
@@ -574,7 +532,6 @@ torchvision = [
     { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
     { index = "pytorch-cpu", marker = "sys_platform == 'darwin'" },
 ]
-harbor = { git = "https://github.com/laude-institute/harbor", rev = "3de07a0e01f3368921766437fc7afece3ddec23d" }
 # NVRx 0.6 wheels require glibc 2.39; its supported source build also works on Ubuntu 22.04.
 nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext", rev = "6c5f2a13c7688d92a7ac7ee6e464721eb8b7345d", marker = "sys_platform == 'linux'" }
 # Megatron-Bridge upstream snapshot, with the matching Core revision below.
@@ -593,15 +550,16 @@ vllm-router = [
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_35_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" },
     { url = "https://github.com/SumanthRH/router/releases/download/0.1.14.post1/vllm_router-0.1.14.post1-cp38-abi3-manylinux_2_28_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" }
 ]
-# Built against torch 2.13 + CUDA 13.0.88 alongside the other CUDA extensions above
-# TODO (sumanthrh): Move towards official torch 13 + CUDA 13 wheels when available
+# Built against torch 2.14.0 + CUDA 13.0.88 (git rev e7706faf of Dao-AILab/fast-hadamard-transform);
+# Astral's index does not carry this package:
+#   https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/cu13torch2.14
 fast-hadamard-transform = [
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
-    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.13/fast_hadamard_transform-1.1.0-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" }
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/fast_hadamard_transform-1.1.0-cp312-cp312-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/fast_hadamard_transform-1.1.0-cp313-cp313-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/fast_hadamard_transform-1.1.0-cp314-cp314-linux_x86_64.whl", marker = "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/fast_hadamard_transform-1.1.0-cp312-cp312-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/fast_hadamard_transform-1.1.0-cp313-cp313-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'" },
+    { url = "https://github.com/NovaSky-AI/skyrl-wheels/releases/download/cu13torch2.14/fast_hadamard_transform-1.1.0-cp314-cp314-linux_aarch64.whl", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'" },
 ]
 
 
