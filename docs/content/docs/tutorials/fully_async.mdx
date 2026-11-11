@@ -326,7 +326,28 @@ dataloader's state is not reliable (which is usually used to save checkpoint in 
 
 To address this, our `AsyncDataloader` records the data UIDs that have been consumed by the trainer. Upon resuming from a checkpoint, we load the consumed data UIDs and skip the data that has already been trained. Therefore, the state of the dataloader is not used at all.
 
-## V. Future Work
+## V. Colocated partial rollout
+
+`skyrl/train/partial_rollout_trainer.py::PartialRolloutRayPPOTrainer` is the fully-async trainer for the case where the inference engines and the trainer **share the GPUs** (`trainer.placement.colocate_all=true`), for clusters too small to split or models too large to split. `examples/train/fully_async/main_fully_async.py` selects it from `colocate_all`. Each step:
+
+1. `num_parallel_generation_workers` groups are kept in flight. When `policy_mini_batch_size` of them have finished, the in-flight requests are aborted and the engines sleep. The client holds the aborted requests with the tokens generated so far (`RemoteInferenceClient.resume_aborted_requests`).
+2. The trainer runs on the finished groups and writes the step's checkpoint while the engines sleep.
+3. The weight sync wakes the engines with the new weights, and the held requests continue from `prompt + generated` under the new policy. The engines rebuild the KV cache for the resumed prefix.
+
+So `1 - policy_mini_batch_size / num_parallel_generation_workers` of the in-flight groups are cut per step, and a group's staleness is the number of cuts it survived (`async/staleness_*`). Tokens produced before a cut carry the older policy's rollout logprobs, so use a rollout-logprob loss (`rollout_is`, `dppo`, ...) as for fully async training. The trainer replaces the capacity rule of the staleness manager: it admits at most `num_parallel_generation_workers` groups that are not yet trained on, and it never blocks a resumed group. See `examples/train/fully_async/partial_rollout_run_gsm8k.sh`.
+
+Set `generator.inference_engine.router_init_kwargs.policy=sticky_least_loaded`. The default `consistent_hash` router policy places each trajectory by its session id, and a resumed segment goes back to the same engine, so long trajectories pile up on one engine and can exhaust its KV cache. `sticky_least_loaded` places each new trajectory on the engine with the fewest active sessions and keeps resumed segments on their engine. The pool depth trades throughput for staleness: the mean staleness is `(num_parallel_generation_workers - policy_mini_batch_size) / policy_mini_batch_size` steps, and a deeper pool keeps the engines fuller but re-prefills more tokens per step. With `policy_mini_batch_size=32` on 8xH100, 43 groups in flight (staleness 0.34) gave 10 to 13 percent shorter steps than synchronous training, and 64 groups (staleness 1.0) gave 26 percent. Keep the staleness under about 0.5 unless the loss is corrected for it.
+
+The partial-rollout settings are under `trainer.fully_async.partial_rollout`. `stale_group_policy` selects what happens to a group that reaches `max_cuts_per_group` cuts (default 4). `ignore` (the default) sets no limit: the trainer cuts and resumes the group until it finishes. `wait` delays the next cut until every such group has finished, so that step waits for their tails. `drop` does not resume such a group: the client returns its request with stop reason `abort`, the trainer discards the group, and the prompt is not drawn again in this epoch. `wait` keeps every prompt, but one step can take as long as the longest trajectory. `drop` keeps the step short, but loses the prompt and the tokens spent on it. The step logs `partial_rollout/stale_groups_waited`, `partial_rollout/stale_groups_dropped` and `partial_rollout/not_resumed_requests`. The partial-rollout trainer does not use `trainer.fully_async.max_staleness_steps` for admission. It only logs a warning when a trained group is staler than that value.
+
+`cut_mode` selects what a cut does to the in-flight requests. `abort` (the default) aborts them: the client holds each request and resubmits the prompt and the generated tokens after the weight sync, and the inference engine prefills them again. `freeze` keeps the requests in the inference engine: the engine pauses them and resumes them after the weight sync. Under `freeze`, `trainer.fully_async.clear_kv_cache_on_weight_sync` selects what happens to the key-value (KV) cache:
+
+- `false` (the default) copies the KV cache to host memory for the training phase and restores it. A request resumes with no prefill. Its next tokens continue from KV states of the older weights. Each step pays one copy of the KV pool to host memory and back, and the host needs memory for the KV pools of all engines.
+- `true` discards the KV cache. The inference engine prefills the paused requests again with the new weights. This is the same recompute as `abort`, without the client resubmission.
+
+`freeze` requires full-weight sync (no LoRA) and does not support `stale_group_policy=drop`. Under `freeze` the client counters (`partial_rollout/aborted_requests`, `partial_rollout/cuts_survived_*`) stay at zero, because no request is aborted. `partial_rollout/groups_cut` reports the groups in flight at each cut in both modes.
+
+## VI. Future Work
 
 - Validate with correct algorithmic offset (importance weighting)
 - Support fully async training for `.generate()` and `/completions` as well.

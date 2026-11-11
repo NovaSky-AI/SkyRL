@@ -19,6 +19,8 @@ A subclass changes how generation and training share the GPUs through these hook
 - `_sync_weights_after_training_step`: pushes the new weights to the inference engines.
 - `_after_training_loop`: runs after the last epoch and before the final checkpoint.
 - `checkpoint_before_weight_sync`: writes the step's checkpoint before the weight sync instead of after eval.
+- `_accept_generated_group`: decides whether a finished group enters the buffer.
+- `_epoch_may_exhaust_early`: whether dropped groups can end an epoch before `num_steps_per_epoch` steps.
 """
 
 import asyncio
@@ -27,7 +29,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, replace
-from typing import Any, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import torch
 from loguru import logger
@@ -349,6 +351,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         self.mini_batch_size = cfg.trainer.policy_mini_batch_size
         self.max_staleness_steps = cfg.trainer.fully_async.max_staleness_steps
         self.sample_full_batch = cfg.trainer.fully_async.sample_full_batch
+        # The groups that a worker is generating now, by uid, with the global step they started at.
+        # A subclass can wait on `_in_flight_changed` for a group to leave this set, and raise the
+        # first worker failure of the epoch from `_generation_failure` while it waits.
+        self._in_flight_start_steps: Dict[str, int] = {}
+        self._in_flight_changed = asyncio.Event()
+        self._generation_failure: Optional[BackgroundFailure] = None
 
         self._phase_gauge = TrainingPhaseGauge()
 
@@ -472,6 +480,20 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     async def _after_training_loop(self) -> None:
         """Run after the last epoch and before the final checkpoint. The default does nothing."""
+
+    def _accept_generated_group(self, group: GeneratedOutputGroup) -> bool:
+        """Return whether a finished group enters the buffer. The default accepts every group.
+
+        When a subclass rejects a group, the worker frees its slot and the loop does not draw its
+        prompt again in this epoch."""
+        return True
+
+    def _epoch_may_exhaust_early(self) -> bool:
+        """Return whether dropped groups can end an epoch before ``num_steps_per_epoch`` steps.
+
+        When true, the loop watches the generation workers, and the collect loop returns an exhausted
+        epoch instead of blocking on an empty buffer."""
+        return self.sample_full_batch
 
     async def _save_step_checkpoints(self, force_save: bool, is_epoch_end: bool) -> None:
         """Write the step's checkpoint and its Hugging Face (HF) export.
@@ -604,6 +626,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 generation_output_group_buffer = asyncio.Queue[GeneratedOutputGroup](maxsize=self._gen_buffer_maxsize)
                 # First generation-worker exception; consumers waiting on the buffer raise it.
                 generation_failure = BackgroundFailure()
+                self._generation_failure = generation_failure
+                self._in_flight_start_steps = {}
+                self._in_flight_changed = asyncio.Event()
 
                 # Maintain self.num_parallel_generation_workers concurrent group-generation workers
                 generator_tasks = [
@@ -618,7 +643,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 # before num_steps_per_epoch steps complete.
                 all_generators_done = asyncio.Event()
                 generators_done_watcher = None
-                if self.sample_full_batch:
+                if self._epoch_may_exhaust_early():
                     generators_done_watcher = asyncio.create_task(
                         self._watch_generators_done(generator_tasks, all_generators_done, generation_failure)
                     )
@@ -655,7 +680,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                     [g.uid for g in cur_generation_group_mini_batch]
                                 )
                                 logger.warning(
-                                    f"sample_full_batch: epoch {epoch} exhausted with a partial mini-batch of "
+                                    f"Epoch {epoch} exhausted with a partial mini-batch of "
                                     f"{len(cur_generation_group_mini_batch)} group(s); discarding and ending the epoch."
                                 )
                             # Save the end-of-epoch checkpoint the normal is_epoch_end path would have, since
@@ -870,8 +895,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Return the next generated group, or None if generation is exhausted (all workers finished
         and the buffer is empty). Raises the recorded worker failure, if any, instead of blocking.
 
-        Only used under ``sample_full_batch``, where dropping groups can exhaust the epoch mid
-        mini-batch and a plain blocking ``buffer.get()`` would hang forever.
+        Used when :meth:`_epoch_may_exhaust_early` is true: dropped groups can exhaust the epoch mid
+        mini-batch, and a plain blocking ``buffer.get()`` would hang forever.
         """
         while True:
             failure.raise_if_failed()
@@ -947,7 +972,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             buffer_pbar = tqdm(total=self.mini_batch_size, initial=0, desc="Generation Buffer Progress", position=1)
             while len(kept_groups) < self.mini_batch_size:
                 # We do finish-time FIFO here (not schedule-time FIFO).
-                if not self.sample_full_batch:
+                if not self._epoch_may_exhaust_early():
                     kept_groups.append(await failure.guard(generation_output_group_buffer.get()))
                     buffer_pbar.update(1)
                     buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
@@ -958,7 +983,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     epoch_exhausted = True
                     break
                 try:
-                    if self._should_keep_group(group):
+                    if not self.sample_full_batch or self._should_keep_group(group):
                         kept_groups.append(group)
                         buffer_pbar.update(1)
                         buffer_pbar.set_postfix({"buffer qsize": generation_output_group_buffer.qsize()})
@@ -1059,29 +1084,40 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
                 # 3. Generate one rollout group
                 global_step_at_start = self.global_step  # for staleness control
+                self._in_flight_start_steps[uids[0]] = global_step_at_start
+                try:
+                    group_start_time = time.monotonic()
+                    if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
+                        # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
+                        # blast the console with each worker's progress bar.
+                        cur_generator_output: GeneratorOutput = await self.generator.generate(
+                            generator_input, disable_tqdm=True
+                        )
+                    else:
+                        cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
+                    group_completion_time_s = time.monotonic() - group_start_time
+                finally:
+                    # The group left the in-flight set. Wake a subclass that waits for that.
+                    self._in_flight_start_steps.pop(uids[0], None)
+                    self._in_flight_changed.set()
+                group = GeneratedOutputGroup(
+                    generator_output=cur_generator_output,
+                    uid=uids[0],
+                    global_step_when_scheduled=global_step_at_start,
+                    group_completion_time_s=group_completion_time_s,
+                    prompts=generator_input["prompts"],
+                )
 
-                group_start_time = time.monotonic()
-                if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
-                    # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
-                    # blast the console with each worker's progress bar.
-                    cur_generator_output: GeneratorOutput = await self.generator.generate(
-                        generator_input, disable_tqdm=True
-                    )
-                else:
-                    cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
-                group_completion_time_s = time.monotonic() - group_start_time
+                if not self._accept_generated_group(group):
+                    # 4a. The subclass rejected the group. Free its slot. Do not draw its prompt again.
+                    await self._staleness_manager.on_rollout_rejected()
+                    slot_acquired = False
+                    await self.async_train_dataloader.mark_filtered_uids([uids[0]])
+                    continue
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
                 try:
-                    generation_output_group_buffer.put_nowait(
-                        GeneratedOutputGroup(
-                            generator_output=cur_generator_output,
-                            uid=uids[0],
-                            global_step_when_scheduled=global_step_at_start,
-                            group_completion_time_s=group_completion_time_s,
-                            prompts=generator_input["prompts"],
-                        )
-                    )
+                    generation_output_group_buffer.put_nowait(group)
                 except asyncio.QueueFull:
                     raise AssertionError("Generation buffer should never be full given staleness control.")
                 await self._staleness_manager.on_rollout_accepted()

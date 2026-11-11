@@ -19,6 +19,7 @@ from skyrl.train.utils.utils import Timer
 # across all of them, and its activity is tracked separately by the buffer-depth gauges.
 PHASES = (
     "wait_for_generation_buffer",
+    "wait_for_stale_groups",
     "convert_to_training_input",
     "run_training",
     "sync_weights",
