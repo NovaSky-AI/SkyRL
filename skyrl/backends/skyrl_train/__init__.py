@@ -11,6 +11,12 @@ from skyrl.backends.skyrl_train.patches.flash_mla.preload import (  # noqa: E402
 
 preload_flash_mla()
 
+# Must precede the first cuDNN op, so cuDNN's sublibraries come from torch's wheel rather than
+# an older cuDNN on LD_LIBRARY_PATH (see the module docstring).
+from skyrl.backends.skyrl_train.patches.cudnn.preload import preload_cudnn  # noqa: E402
+
+preload_cudnn()
+
 # The pinned transformers has no Beam config; register SkyRL's so `AutoConfig` resolves
 # `model_type="beam"` in every SkyRL process (see the module docstring).
 from skyrl.backends.skyrl_train.patches.transformers.configuration_beam import (  # noqa: E402
