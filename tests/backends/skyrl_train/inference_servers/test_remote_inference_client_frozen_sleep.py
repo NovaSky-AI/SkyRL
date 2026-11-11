@@ -45,3 +45,16 @@ async def test_sleep_with_frozen_requests_keeps_the_weights_for_a_lora_sync():
         {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": True, "offload_weights": True}},
         None,
     )
+
+
+@pytest.mark.asyncio
+async def test_sleep_for_weight_sync_discards_the_weights_unless_asked():
+    """Only ``sleep_with_frozen_requests`` keeps the weights for a LoRA sync. A direct call does not,
+    so the fully-async weight sync never copies the base model to host memory."""
+    client, calls = _client(uses_lora_weight_sync=True)
+    await client.sleep_for_weight_sync(offload_kv=True)
+    assert calls[-1] == (
+        "/collective_rpc",
+        {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": True}},
+        None,
+    )
