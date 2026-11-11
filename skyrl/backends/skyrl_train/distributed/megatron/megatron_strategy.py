@@ -29,6 +29,7 @@ from torch import optim
 from transformers import PreTrainedTokenizer
 
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+    invalidate_frozen_param_offload_cache,
     load_megatron_grads_to_gpu,
     load_megatron_model_to_gpu,
     load_megatron_optimizer,
@@ -43,6 +44,9 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk i
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
     OffloadedDistributedOptimizer,
     disk_state_stores,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.optimizer_state import (
+    reload_optimizer_model_params,
 )
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
@@ -629,6 +633,7 @@ class MegatronStrategy(DistributedStrategy):
                 "model" in state_dict
             ), f"Model state dict not found in checkpoint loaded from {ckpt_dir}. Available keys: {state_dict.keys()}"
             model[0].load_state_dict(state_dict["model"], strict=load_module_strict)
+            invalidate_frozen_param_offload_cache(unwrapped_model)
             del state_dict["model"]  # free the loaded weights before the optimizer load
             torch.cuda.empty_cache()
             self.print("Loaded model state dict.")
@@ -644,6 +649,8 @@ class MegatronStrategy(DistributedStrategy):
             for store in disk_state_stores(optimizer):
                 store.load_from(os.path.join(ckpt_dir, OFFLOAD_TO_DISK_CHECKPOINT_SUBDIR))
             self.print("Loaded optimizer state dict.")
+        elif not load_optimizer_states and optimizer is not None:
+            reload_optimizer_model_params(optimizer)
 
         if scheduler and load_lr_scheduler_states:
             assert (
