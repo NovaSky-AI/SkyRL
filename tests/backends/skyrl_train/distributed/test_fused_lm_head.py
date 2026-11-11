@@ -336,3 +336,28 @@ def test_fused_lm_head_allreduce_dgrad_receives_contiguous_gradient(monkeypatch)
 
     output = fused_lm_head_output_processor(hidden_states=hidden_states, output_layer=output_layer, context={})
     output.backward(torch.randn_like(output))
+
+
+def test_unsupported_reason_is_none_for_a_model_that_takes_the_hook(hybrid_model_type):
+    from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
+        fused_lm_head_unsupported_reason,
+    )
+
+    class NativeInnerModel:
+        config = SimpleNamespace(mxfp8_output_projection=False, use_mup=False)
+
+        def forward(self, *, output_processor=None, output_processor_context=None): ...
+
+    assert fused_lm_head_unsupported_reason(Mock(module=NativeInnerModel())) is None
+
+
+def test_unsupported_reason_treats_an_uninspectable_forward_as_unsupported(hybrid_model_type):
+    from skyrl.backends.skyrl_train.distributed.megatron.fused_lm_head import (
+        fused_lm_head_unsupported_reason,
+    )
+
+    class OpaqueModel:
+        config = SimpleNamespace(mxfp8_output_projection=False, use_mup=False)
+        forward = max  # a builtin: inspect.signature raises ValueError
+
+    assert "OpaqueModel" in fused_lm_head_unsupported_reason(Mock(module=OpaqueModel()))

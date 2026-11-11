@@ -45,7 +45,6 @@ uv run --isolated --extra megatron \
     batch_size=$BATCH_SIZE \
     micro_train_batch_size_per_gpu=1 \
     remove_microbatch_padding=true \
-    fused_lm_head_logprob=true \
     logprobs_chunk_size=1024 \
     seed=42 \
     optimizer_config.lr=1e-6 \
