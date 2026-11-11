@@ -127,6 +127,7 @@ class RayPPOTrainer:
         self.generator = generator
         self.train_dataloader = None
         self._dataloader_state_restored = False
+        self._resumed_epoch_steps_remaining: Optional[int] = None
         self.total_training_steps = None
         self._build_train_dataloader_and_compute_training_steps()
 
@@ -225,11 +226,23 @@ class RayPPOTrainer:
         getattr(self._callback_handler, event_name)(self, cb_input, self._training_control)
 
     def _get_resumed_epoch_steps_remaining(self) -> Optional[int]:
-        """Bound the first resumed epoch when the global step is kept but the data cursor is not."""
-        if self.global_step == 0 or self._dataloader_state_restored:
+        """Recover the logical remainder when the data cursor and global step started at different offsets."""
+        if self.global_step == 0:
             return None
+        if self._dataloader_state_restored:
+            return self._resumed_epoch_steps_remaining
         steps_per_epoch = len(self.train_dataloader)
         return steps_per_epoch - (self.global_step % steps_per_epoch)
+
+    def _restore_dataloader_cursor(self, state: dict, generator_state: Optional[torch.Tensor]) -> None:
+        """Materialize the saved iterator before restoring the RNG for subsequent shuffled epochs.
+
+        StatefulDataLoader.state_dict() prepares the lazy iterator for the next iter() without consuming a batch.
+        """
+        self.train_dataloader.load_state_dict(state)
+        if generator_state is not None:
+            self.train_dataloader.state_dict()
+            self.train_dataloader.generator.set_state(generator_state)
 
     @property
     def has_critic(self) -> bool:
@@ -339,7 +352,7 @@ class RayPPOTrainer:
         # Compute start_epoch up-front so callback metadata is ready before
         # any event fires (including the baseline eval below).
         start_epoch = self.global_step // len(self.train_dataloader)
-        resumed_epoch_steps_remaining = self._get_resumed_epoch_steps_remaining()
+        self._resumed_epoch_steps_remaining = self._get_resumed_epoch_steps_remaining()
         self._current_epoch = start_epoch
         self._training_control.reset()
 
@@ -369,6 +382,7 @@ class RayPPOTrainer:
         will_save_ckpts = False
         hf_model_save = False
         self._profiler_start()
+        next_epoch_iterator = None
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
                 self._current_epoch = epoch
@@ -377,7 +391,9 @@ class RayPPOTrainer:
                 # dynamic-sampling into account (which span multiple inner iterations
                 # before completing a logical step).
                 step_started = False
-                for _, rand_prompts in enumerate(self.train_dataloader):
+                epoch_iterator = next_epoch_iterator if next_epoch_iterator is not None else iter(self.train_dataloader)
+                next_epoch_iterator = None
+                for rand_prompts in epoch_iterator:
                     if not step_started:
                         self._fire("on_step_start")
                         step_started = True
@@ -502,6 +518,10 @@ class RayPPOTrainer:
                             # One profiler step per RL global step.
                             self._profiler_step()
 
+                        resumed_epoch_ended = self._resumed_epoch_steps_remaining == 1
+                        if self._resumed_epoch_steps_remaining is not None:
+                            self._resumed_epoch_steps_remaining -= 1
+
                         self._fire(
                             "on_step_end",
                             batch=training_input,
@@ -526,6 +546,8 @@ class RayPPOTrainer:
                         )
                         will_save_ckpts = force_save or ckpt_interval_save
                         if will_save_ckpts:
+                            if resumed_epoch_ended:
+                                next_epoch_iterator = iter(self.train_dataloader)
                             with Timer("save_checkpoints", self.all_timings):
                                 ckpt_path = self.save_checkpoints()
                             self._fire("on_save", ckpt_path=ckpt_path)
@@ -602,9 +624,6 @@ class RayPPOTrainer:
                     # update progress bar after logging
                     pbar.update(1)
 
-                    if resumed_epoch_steps_remaining is not None and epoch == start_epoch:
-                        resumed_epoch_steps_remaining -= 1
-
                     self.global_step += 1
 
                     if (
@@ -619,7 +638,7 @@ class RayPPOTrainer:
 
                     del training_input, generator_output
 
-                    if resumed_epoch_steps_remaining == 0 and epoch == start_epoch:
+                    if resumed_epoch_ended:
                         break
 
                 # If dynamic sampling was still accumulating when the dataloader ran out, the step
@@ -638,6 +657,7 @@ class RayPPOTrainer:
 
                 if stop_training:
                     break
+                self._resumed_epoch_steps_remaining = None
         finally:
             self._profiler_stop()
 
@@ -1811,6 +1831,12 @@ class RayPPOTrainer:
             "global_step": self.global_step,
             "config": asdict(self.cfg),
         }
+        if self._resumed_epoch_steps_remaining is not None:
+            if self._resumed_epoch_steps_remaining > 0:
+                trainer_state["resumed_epoch_steps_remaining"] = self._resumed_epoch_steps_remaining
+            generator = getattr(self.train_dataloader, "generator", None)
+            if generator is not None:
+                trainer_state["dataloader_generator_state"] = generator.get_state()
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
         with io.open_file(trainer_state_path, "wb") as f:
             torch.save(trainer_state, f)
@@ -1926,6 +1952,7 @@ class RayPPOTrainer:
 
         # 2. Load dataloader state if requested and available
         self._dataloader_state_restored = False
+        self._resumed_epoch_steps_remaining = None
         if not self.cfg.trainer.resume_load_dataloader_state:
             logger.info("Skipping dataloader state restore; dataloader will start from beginning")
         elif not io.exists(dataloader_state_path):
@@ -1938,8 +1965,10 @@ class RayPPOTrainer:
             try:
                 with io.open_file(dataloader_state_path, "rb") as f:
                     dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
-                self.train_dataloader.load_state_dict(dataloader_state)
+                self._restore_dataloader_cursor(dataloader_state, trainer_state.get("dataloader_generator_state"))
                 self._dataloader_state_restored = True
+                if self.cfg.trainer.resume_load_global_step:
+                    self._resumed_epoch_steps_remaining = trainer_state.get("resumed_epoch_steps_remaining")
                 logger.info("Successfully loaded dataloader state")
             except Exception as e:
                 logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")

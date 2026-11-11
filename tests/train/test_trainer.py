@@ -3,7 +3,7 @@ uv  run --isolated --extra dev pytest tests/train/test_trainer.py
 """
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -399,9 +399,89 @@ def test_resumed_epoch_steps_remaining(global_step, state_restored, expected):
     trainer = RayPPOTrainer.__new__(RayPPOTrainer)
     trainer.global_step = global_step
     trainer._dataloader_state_restored = state_restored
+    trainer._resumed_epoch_steps_remaining = None
     trainer.train_dataloader = [object()] * 4
 
     assert trainer._get_resumed_epoch_steps_remaining() == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume_mid_epoch", [False, True], ids=["epoch-end", "mid-epoch-then-epoch-end"])
+async def test_full_resume_after_skipping_dataloader_cursor(tmp_path, resume_mid_epoch):
+    class Prompts(list):
+        collate_fn = list
+
+    batch_size = 2
+    source_step = 1
+    dataset = Prompts({"uid": str(idx), "prompt": [], "env_class": None, "env_extras": {}} for idx in range(8))
+
+    async def run(output_dir, *, resume=None, skip_cursor=False, ckpt_interval=-1, max_steps=None):
+        cfg = example_dummy_config()
+        cfg.trainer.train_batch_size = batch_size
+        cfg.trainer.epochs = 2
+        cfg.trainer.max_training_steps = max_steps
+        cfg.trainer.ckpt_path = str(output_dir)
+        cfg.trainer.ckpt_interval = ckpt_interval
+        cfg.trainer.eval_interval = cfg.trainer.print_example_interval = 0
+        cfg.trainer.enable_ray_gpu_monitor = cfg.trainer.log_mfu = False
+        cfg.trainer.placement.colocate_all = False
+        cfg.generator.inference_engine.enable_ray_prometheus_stats = False
+        if resume is not None:
+            cfg.trainer.resume_mode = "from_path"
+            cfg.trainer.resume_path = str(resume)
+        if skip_cursor:
+            cfg.trainer.resume_load_dataloader_state = False
+
+        batches = []
+
+        def record_training_input(generator_output, uids):
+            batches.append(tuple(uids))
+            batch = TrainingInputBatch({"rewards": torch.zeros(len(uids))})
+            batch.metadata = {"uids": uids}
+            return batch
+
+        trainer = RayPPOTrainer(
+            cfg,
+            tracker=MagicMock(),
+            tokenizer=None,
+            train_dataset=dataset,
+            inference_engine_client=None,
+            generator=None,
+        )
+        trainer.dispatch = MagicMock()
+        trainer.dispatch.get_lcm_dp_size.return_value = 1
+        trainer.dispatch.save_weights_for_sampler = AsyncMock()
+        trainer.generate = AsyncMock(return_value={})
+        trainer.postprocess_generator_output = lambda output, uids: (output, uids)
+        trainer.convert_to_training_input = record_training_input
+        trainer.fwd_logprobs_values_reward = lambda batch: batch
+        trainer.compute_advantages_and_returns = lambda batch: batch
+        trainer.train_critic_and_policy = lambda batch: {}
+        trainer._cleanup_old_checkpoints = MagicMock()
+        await trainer.train()
+        return batches
+
+    source_batches = await run(tmp_path / "source", ckpt_interval=1, max_steps=source_step)
+    source = tmp_path / "source" / f"global_step_{source_step}"
+    uninterrupted = await run(tmp_path / "no-saves", resume=source, skip_cursor=True)
+    assert uninterrupted[:source_step] == source_batches
+
+    epoch_end = len(dataset) // batch_size
+    remaining_steps = epoch_end - source_step
+    next_epoch = uninterrupted[remaining_steps:]
+    checkpoints = tmp_path / "checkpoints"
+    assert await run(checkpoints, resume=source, skip_cursor=True, ckpt_interval=3) == uninterrupted
+
+    if resume_mid_epoch:
+        mid_checkpoint = checkpoints / f"global_step_{epoch_end - 1}"
+        checkpoints = tmp_path / "after-mid-epoch-resume"
+        continued = await run(checkpoints, resume=mid_checkpoint, ckpt_interval=3)
+        assert continued == uninterrupted[remaining_steps - 1 :]
+        next_epoch = continued[1:]
+
+    assert sorted(uid for batch in next_epoch for uid in batch) == [row["uid"] for row in dataset]
+    resumed = await run(tmp_path / "resumed", resume=checkpoints / f"global_step_{epoch_end}")
+    assert resumed == next_epoch
 
 
 def test_resume_without_train_dataloader_skips_cursor_restore(dummy_config, tmp_path: Path):
