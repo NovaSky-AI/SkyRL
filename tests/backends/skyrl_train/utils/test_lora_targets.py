@@ -255,8 +255,41 @@ def test_fused_moe_experts_cannot_be_adapted() -> None:
 @pytest.mark.parametrize(
     ("lora_type", "include_gdn_in_proj", "expected"),
     [
-        ("lora", True, ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]),
-        ("lora", False, ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "out_proj"]),
+        (
+            "lora",
+            True,
+            [
+                "linear_qkv",
+                "linear_q_proj",
+                "linear_q_down_proj",
+                "linear_q_up_proj",
+                "linear_kv_down_proj",
+                "linear_kv_up_proj",
+                "linear_qkv_down_proj",
+                "linear_proj",
+                "linear_fc1",
+                "linear_fc2",
+                "in_proj",
+                "out_proj",
+            ],
+        ),
+        (
+            "lora",
+            False,
+            [
+                "linear_qkv",
+                "linear_q_proj",
+                "linear_q_down_proj",
+                "linear_q_up_proj",
+                "linear_kv_down_proj",
+                "linear_kv_up_proj",
+                "linear_qkv_down_proj",
+                "linear_proj",
+                "linear_fc1",
+                "linear_fc2",
+                "out_proj",
+            ],
+        ),
         (
             "canonical_lora",
             True,
@@ -264,6 +297,12 @@ def test_fused_moe_experts_cannot_be_adapted() -> None:
                 "linear_q",
                 "linear_k",
                 "linear_v",
+                "linear_q_proj",
+                "linear_q_down_proj",
+                "linear_q_up_proj",
+                "linear_kv_down_proj",
+                "linear_kv_up_proj",
+                "linear_qkv_down_proj",
                 "linear_proj",
                 "linear_fc1_up",
                 "linear_fc1_gate",
@@ -284,11 +323,60 @@ def test_megatron_all_linear_with_both_groups_is_unchanged(
 @pytest.mark.parametrize(
     ("lora_type", "train_attn", "include_gdn_in_proj", "expected"),
     [
-        ("lora", True, True, ["linear_qkv", "linear_proj", "in_proj", "out_proj"]),
-        ("lora", True, False, ["linear_qkv", "linear_proj", "out_proj"]),
+        (
+            "lora",
+            True,
+            True,
+            [
+                "linear_qkv",
+                "linear_q_proj",
+                "linear_q_down_proj",
+                "linear_q_up_proj",
+                "linear_kv_down_proj",
+                "linear_kv_up_proj",
+                "linear_qkv_down_proj",
+                "linear_proj",
+                "in_proj",
+                "out_proj",
+            ],
+        ),
+        (
+            "lora",
+            True,
+            False,
+            [
+                "linear_qkv",
+                "linear_q_proj",
+                "linear_q_down_proj",
+                "linear_q_up_proj",
+                "linear_kv_down_proj",
+                "linear_kv_up_proj",
+                "linear_qkv_down_proj",
+                "linear_proj",
+                "out_proj",
+            ],
+        ),
         ("lora", False, True, ["linear_fc1", "linear_fc2"]),
         ("lora", False, False, ["linear_fc1", "linear_fc2"]),
-        ("canonical_lora", True, True, ["linear_q", "linear_k", "linear_v", "linear_proj", "in_proj", "out_proj"]),
+        (
+            "canonical_lora",
+            True,
+            True,
+            [
+                "linear_q",
+                "linear_k",
+                "linear_v",
+                "linear_q_proj",
+                "linear_q_down_proj",
+                "linear_q_up_proj",
+                "linear_kv_down_proj",
+                "linear_kv_up_proj",
+                "linear_qkv_down_proj",
+                "linear_proj",
+                "in_proj",
+                "out_proj",
+            ],
+        ),
         ("canonical_lora", False, True, ["linear_fc1_up", "linear_fc1_gate", "linear_fc2"]),
     ],
 )
@@ -307,16 +395,19 @@ def test_megatron_unknown_lora_type_is_rejected() -> None:
 
 
 @pytest.mark.parametrize(
-    ("has_vision_tower", "multi_latent_attention", "train_attn", "train_mlp", "error"),
+    ("has_vision_tower", "multi_latent_attention", "train_attn", "train_mlp", "mla_down_proj_fusion", "error"),
     [
-        (False, False, True, False, None),
-        (False, False, False, True, None),
-        (True, False, True, True, None),
-        (True, False, True, False, "vision-language"),
-        (True, False, False, True, "vision-language"),
-        (False, True, True, True, None),
-        (False, True, False, True, None),
-        (False, True, True, False, "multi-latent attention"),
+        (False, False, True, False, False, None),
+        (False, False, False, True, False, None),
+        (True, False, True, True, False, None),
+        (True, False, True, False, False, "vision-language"),
+        (True, False, False, True, False, "vision-language"),
+        (False, True, True, True, False, None),
+        (False, True, False, True, False, None),
+        (False, True, True, False, False, None),
+        (False, True, True, True, True, "mla_down_proj_fusion"),
+        (False, True, True, False, True, "mla_down_proj_fusion"),
+        (False, True, False, True, True, None),
     ],
     ids=[
         "dense_attn_only",
@@ -327,19 +418,85 @@ def test_megatron_unknown_lora_type_is_rejected() -> None:
         "mla_both",
         "mla_mlp_only",
         "mla_attn_only",
+        "mla_down_proj_fusion_both",
+        "mla_down_proj_fusion_attn_only",
+        "mla_down_proj_fusion_mlp_only",
     ],
 )
 def test_megatron_group_support(
-    has_vision_tower: bool, multi_latent_attention: bool, train_attn: bool, train_mlp: bool, error: str | None
+    has_vision_tower: bool,
+    multi_latent_attention: bool,
+    train_attn: bool,
+    train_mlp: bool,
+    mla_down_proj_fusion: bool,
+    error: str | None,
 ) -> None:
-    """Narrowing is rejected on a vision tower, and attention-only on MLA; everything else passes."""
-    kwargs = dict(has_vision_tower=has_vision_tower, multi_latent_attention=multi_latent_attention)
+    """Narrowing is rejected on a vision tower, fused MLA down proj on attention; everything else passes."""
+    kwargs = dict(
+        has_vision_tower=has_vision_tower,
+        multi_latent_attention=multi_latent_attention,
+        mla_down_proj_fusion=mla_down_proj_fusion,
+    )
     if error is None:
         check_megatron_lora_group_support(train_attn, train_mlp, **kwargs)
         return
     with pytest.raises(ValueError, match=error) as exc:
         check_megatron_lora_group_support(train_attn, train_mlp, **kwargs)
-    assert "target_modules" in str(exc.value)
+    if error != "mla_down_proj_fusion":
+        assert "target_modules" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("target_modules", "should_fail"),
+    [
+        (["linear_fc1", "linear_fc2"], False),
+        (["linear_fc1_up", "linear_fc1_gate", "linear_fc2"], False),
+        (["linear_q_proj"], True),
+        (["linear_q_down_proj"], True),
+        (["linear_qkv_down_proj"], True),
+        (["linear_proj"], True),
+        (["linear_fc1", "linear_q_proj"], True),
+        ("all-linear", True),
+    ],
+    ids=[
+        "mlp_only",
+        "canonical_mlp_only",
+        "q_proj_attn",
+        "q_down_proj_attn",
+        "fused_down_proj_attn",
+        "linear_proj_attn",
+        "mixed_mlp_and_attn",
+        "all_linear_with_attn",
+    ],
+)
+def test_megatron_mla_down_proj_fusion_with_explicit_targets(
+    target_modules: list[str] | str,
+    should_fail: bool,
+) -> None:
+    """Explicit targets adapting only MLP pass with mla_down_proj_fusion; attention targets fail."""
+    kwargs = dict(
+        train_attn=True,
+        train_mlp=True,
+        has_vision_tower=False,
+        mla_down_proj_fusion=True,
+        target_modules=target_modules,
+    )
+    if should_fail:
+        with pytest.raises(ValueError, match="mla_down_proj_fusion"):
+            check_megatron_lora_group_support(**kwargs)
+    else:
+        check_megatron_lora_group_support(**kwargs)
+
+
+def test_megatron_mla_down_proj_fusion_with_all_linear_mlp_only() -> None:
+    """all-linear with train_attn=False passes with mla_down_proj_fusion."""
+    check_megatron_lora_group_support(
+        train_attn=False,
+        train_mlp=True,
+        has_vision_tower=False,
+        mla_down_proj_fusion=True,
+        target_modules="all-linear",
+    )
 
 
 def test_a_name_shared_across_groups_is_rejected() -> None:
@@ -418,3 +575,33 @@ def test_default_critic_targets_are_unchanged() -> None:
     """With both flags on, the critic passes target_modules through unchanged."""
     resolved = resolve_critic_lora_target_modules(_CriticModel(), "all-linear", True, True, "value_head")
     assert resolved == "all-linear"
+
+
+def test_megatron_mla_projections_in_all_linear() -> None:
+    """MLA attention projections are covered by target_modules='all-linear' on Megatron."""
+    mla_targets = {
+        "linear_q_proj",
+        "linear_q_down_proj",
+        "linear_q_up_proj",
+        "linear_kv_down_proj",
+        "linear_kv_up_proj",
+        "linear_qkv_down_proj",
+        "linear_proj",
+    }
+    for lora_type in ("lora", "canonical_lora"):
+        all_targets = set(
+            megatron_all_linear_target_modules(lora_type, train_attn=True, train_mlp=True, include_gdn_in_proj=True)
+        )
+        assert mla_targets.issubset(all_targets), f"Missing MLA projections in {lora_type}: {mla_targets - all_targets}"
+
+        attn_targets = set(
+            megatron_all_linear_target_modules(lora_type, train_attn=True, train_mlp=False, include_gdn_in_proj=True)
+        )
+        assert mla_targets.issubset(
+            attn_targets
+        ), f"Missing MLA projections in {lora_type} (attn only): {mla_targets - attn_targets}"
+
+        mlp_targets = set(
+            megatron_all_linear_target_modules(lora_type, train_attn=False, train_mlp=True, include_gdn_in_proj=True)
+        )
+        assert not (mla_targets & mlp_targets), f"MLA projections leaked into MLP group: {mla_targets & mlp_targets}"
