@@ -1231,9 +1231,8 @@ class PartialRolloutConfig(BaseConfig):
     max_cuts_per_group: int = 4
     """The number of cuts one group can survive before ``stale_group_policy`` acts. Each cut adds one
     step of staleness to the group. Not used under ``stale_group_policy="ignore"``. This field is
-    separate from ``trainer.fully_async.max_staleness_steps``, which bounds the admission of the
-    fully-async trainer. The partial-rollout trainer uses that field only for the warning on a
-    trained group whose ``async/staleness`` exceeds it."""
+    separate from ``trainer.fully_async.max_staleness_steps``, which bounds the admission of new
+    groups."""
     cut_mode: str = "abort"
     """What a cut does to the in-flight requests. ``abort`` aborts them: the client holds each request
     and resubmits the prompt and the generated tokens after the weight sync, and the inference engine
@@ -1256,7 +1255,14 @@ class FullyAsyncConfig(BaseConfig):
     """Indicates whether fully async training is enabled"""
     max_staleness_steps: int = 4
     """Maximum off-policy steps allowed. If a trajectory group is scheduled at step *i* and trained at step *j*,
-    then ``j - i <= max_staleness_steps``. Larger values increase throughput but also off-policy-ness."""
+    then ``j - i <= max_staleness_steps``. Larger values increase throughput but also off-policy-ness.
+
+    The colocated partial-rollout trainer also uses this field for admission. With ``0``, a finished
+    group holds its slot until the step that trains on it. With a larger value, a finished group
+    frees its slot at once, and at most
+    ``max(num_parallel_generation_workers, policy_mini_batch_size * (max_staleness_steps + 1))`` groups
+    are not yet trained on. A cut can add steps to the age of a group, so that trainer does not
+    guarantee ``j - i <= max_staleness_steps``."""
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""

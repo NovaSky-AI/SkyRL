@@ -11,8 +11,13 @@ have finished, the step runs in this order:
 4. The aborted requests continue from the tokens they generated before the cut
    (see ``RemoteInferenceClient.resume_aborted_requests``).
 
-Each step cuts the fraction ``1 - policy_mini_batch_size / num_parallel_generation_workers`` of the
-in-flight groups.
+``trainer.fully_async.max_staleness_steps`` selects when a finished group frees its slot. With ``0``, a
+finished group holds its slot until the step that trains on it. Each step then cuts the fraction
+``1 - policy_mini_batch_size / num_parallel_generation_workers`` of the in-flight groups, and the mean
+staleness is about ``num_parallel_generation_workers / policy_mini_batch_size - 1`` steps. With a larger
+value, a finished group frees its slot at once, as in the fully-async trainer. The inference engines
+stay full, each cut hits about ``num_parallel_generation_workers`` groups, and the mean staleness is
+about one step higher. See ``_PartialRolloutAdmissionController``.
 
 Compared with the fully-async trainer, there is no GPU split and no generation during training. A
 mini-batch is at most a few cuts behind the current policy. Compared with the synchronous trainer,
@@ -37,9 +42,9 @@ requests again with the new weights.
 The staleness that the policy bounds is the number of cuts a request survived. The metrics
 ``partial_rollout/cuts_survived_mean`` and ``partial_rollout/cuts_survived_max`` report it per step over
 the completed requests. The metric ``async/staleness`` is the age of a trained group in steps. The age
-also counts the steps that a finished group waited in the buffer. The buffer holds at most
-``num_parallel_generation_workers - 1`` groups, so the wait is short when that number is close to
-``policy_mini_batch_size``.
+also counts the steps that a finished group waited in the buffer. With
+``max_staleness_steps=0`` the buffer holds at most ``num_parallel_generation_workers - 1`` groups, so the
+wait is short when that number is close to ``policy_mini_batch_size``.
 """
 
 from loguru import logger
@@ -55,24 +60,31 @@ CUT_MODES = ("abort", "freeze")
 
 
 class _PartialRolloutAdmissionController(_AsyncStalenessManager):
-    """Admit a group while fewer than ``max_concurrent_generation_groups`` groups are not yet trained on.
+    """Admit a group under two limits.
 
-    A group holds its slot from submission until the step that trains on it. A finished group that
-    waits in the buffer still holds its slot, and so does a cut group that waits to resume. So each
-    step admits ``mini_batch_size`` new groups, and a resumed group is never blocked.
+    1. At most ``max_concurrent_generation_groups`` groups generate at one time. A cut group that
+       waits to resume counts as generating, so a resumed group is never blocked.
+    2. At most ``max(max_concurrent_generation_groups, mini_batch_size * (max_staleness_steps + 1))``
+       groups are not yet trained on. This count includes the finished groups in the buffer.
 
-    This rule replaces the staleness capacity rule of ``_AsyncStalenessManager``. The cut bounds the
-    staleness, so ``max_staleness_steps`` is not used."""
+    With ``max_staleness_steps=0`` the second limit is ``max_concurrent_generation_groups``. A
+    finished group then holds its slot until the step that trains on it, and each step admits
+    ``mini_batch_size`` new groups. With a larger ``max_staleness_steps``, a finished group frees its
+    slot at once, and the inference engines stay at ``max_concurrent_generation_groups`` groups. The
+    buffer then holds more groups, and each cut hits more groups, so the staleness is higher.
 
-    def __init__(self, max_concurrent_generation_groups: int, mini_batch_size: int):
-        # The override of `_compute_capacity_unlocked` does not read `max_staleness_steps`.
-        super().__init__(max_concurrent_generation_groups, mini_batch_size, max_staleness_steps=0)
+    The rule of ``_AsyncStalenessManager`` has the second limit without the ``max``. It needs
+    ``max_concurrent_generation_groups <= mini_batch_size * (max_staleness_steps + 1)``, which does
+    not hold for partial rollout at ``max_staleness_steps=0``."""
 
     def _compute_capacity_unlocked(self) -> int:
         # The steps before `_current_global_step` trained on `mini_batch_size` groups each.
         trained = (self._current_global_step - 1) * self.mini_batch_size
         not_yet_trained = self._stat.accepted + self._stat.running - trained
-        return self.max_concurrent_generation_groups - not_yet_trained
+        max_not_yet_trained = max(
+            self.max_concurrent_generation_groups, self.mini_batch_size * (self.max_staleness_steps + 1)
+        )
+        return min(self.max_concurrent_generation_groups - self._stat.running, max_not_yet_trained - not_yet_trained)
 
 
 class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
@@ -97,14 +109,19 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
             self.inference_engine_client.max_resumes_per_request = self._max_cuts_per_group
 
     def _generation_buffer_maxsize(self) -> int:
-        # Every in-flight group can finish before the training loop drains the buffer.
-        return self.num_parallel_generation_workers
+        # The admission controller allows this many groups that are not yet trained on. All of them
+        # can finish before the training loop drains the buffer.
+        return max(self.num_parallel_generation_workers, self.mini_batch_size * (self.max_staleness_steps + 1))
 
     def _build_admission_controller(self) -> _AsyncStalenessManager:
         return _PartialRolloutAdmissionController(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
+            max_staleness_steps=self.max_staleness_steps,
         )
+
+    def _holds_slot_until_trained(self) -> bool:
+        return self.mini_batch_size * (self.max_staleness_steps + 1) <= self.num_parallel_generation_workers
 
     def _validate_placement_and_capacity(self) -> None:
         assert self.colocate_all, (
@@ -153,6 +170,8 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
         logger.info(
             f"Partial rollout: {self.num_parallel_generation_workers} groups in flight, train on every "
             f"{self.mini_batch_size} finished groups, {cut_fraction:.0%} of in-flight groups cut per step, "
+            f"max_staleness_steps={self.max_staleness_steps} "
+            f"({'a finished group holds its slot' if self._holds_slot_until_trained() else 'a finished group frees its slot'}), "
             f"cut_mode={cut_mode}, stale_group_policy={policy}"
             + ("." if policy == "ignore" else f" at max_cuts_per_group={max_cuts}.")
         )

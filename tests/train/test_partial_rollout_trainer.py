@@ -57,7 +57,9 @@ async def test_admission_without_staleness_holds_slot_until_trained():
     A finished group that waits in the buffer still holds its slot. So running + buffered never exceeds
     the in-flight bound, which is also the buffer size, and the cut fraction is
     1 - mini_batch / in_flight. There is no staleness term."""
-    ctrl = _PartialRolloutAdmissionController(max_concurrent_generation_groups=3, mini_batch_size=2)
+    ctrl = _PartialRolloutAdmissionController(
+        max_concurrent_generation_groups=3, mini_batch_size=2, max_staleness_steps=0
+    )
     for _ in range(3):
         await ctrl.acquire_submission_slot()
     fourth = asyncio.create_task(ctrl.acquire_submission_slot())
@@ -85,6 +87,43 @@ async def test_admission_without_staleness_holds_slot_until_trained():
     # 6 submitted = 4 trained (steps 1, 2) + 2 filtered.
     await ctrl.notify_capacity_change(3)
     await ctrl.validate_state_at_epoch_end(global_step=3)
+
+
+@pytest.mark.asyncio
+async def test_admission_with_staleness_frees_the_slot_at_finish():
+    """With ``max_staleness_steps >= 1`` a finished group frees its slot at once.
+
+    At most 3 groups generate at one time. At most max(3, 2 * (1 + 1)) = 4 groups are not yet trained
+    on."""
+    ctrl = _PartialRolloutAdmissionController(
+        max_concurrent_generation_groups=3, mini_batch_size=2, max_staleness_steps=1
+    )
+    for _ in range(3):
+        await ctrl.acquire_submission_slot()
+    fourth = asyncio.create_task(ctrl.acquire_submission_slot())
+    await asyncio.sleep(0)
+    assert not fourth.done(), "3 groups generate"
+    # One group finishes: its slot is free, and 3 running + 1 buffered = 4 are not yet trained on.
+    await ctrl.on_rollout_accepted()
+    await asyncio.wait_for(fourth, timeout=1)
+    # A second group finishes. A fifth group would make 5 groups not yet trained on.
+    await ctrl.on_rollout_accepted()
+    fifth = asyncio.create_task(ctrl.acquire_submission_slot())
+    await asyncio.sleep(0)
+    assert not fifth.done(), "4 groups are not yet trained on"
+    # Training step 1 consumed 2 groups.
+    await ctrl.notify_capacity_change(2)
+    await asyncio.wait_for(fifth, timeout=1)
+
+
+def test_buffer_size_follows_max_staleness_steps():
+    cfg = _partial_cfg()
+    cfg.trainer.fully_async.max_staleness_steps = 0
+    assert _partial_trainer(MagicMock(), cfg=cfg)._gen_buffer_maxsize == 3
+    cfg = _partial_cfg()
+    cfg.trainer.fully_async.max_staleness_steps = 2
+    trainer = _partial_trainer(MagicMock(), cfg=cfg)
+    assert trainer._gen_buffer_maxsize == max(3, trainer.mini_batch_size * 3)
 
 
 # ---------------------------------------------------------------------------
