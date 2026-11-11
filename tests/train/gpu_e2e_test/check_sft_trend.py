@@ -9,7 +9,7 @@ Checks performed (any failure exits non-zero):
     (defaults to ``2 * window``, i.e. enough for non-overlapping windows).
   * No NaN/inf in the logged loss history.
   * ``mean(last N losses) < mean(first N losses)`` where N is ``--window``.
-  * Optionally: the run's final ``_step`` >= ``--expected_steps`` (skipped if
+  * Optionally: the last logged training ``_step`` >= ``--expected_steps`` (skipped if
     ``--expected_steps`` is not provided).
 
 The first 4 checks are CI-critical; the last is opt-in because some callers
@@ -56,7 +56,7 @@ def parse_args() -> argparse.Namespace:
         "--expected_steps",
         type=int,
         default=None,
-        help="If set, assert the run's final _step is >= this value (completion check).",
+        help="If set, assert the training history reaches this step (completion check).",
     )
     return parser.parse_args()
 
@@ -82,7 +82,7 @@ def main() -> int:
 
     # ---- Completion check (optional) ----
     if args.expected_steps is not None:
-        final_step = matched_run.summary_metrics.get("_step")
+        final_step = max((row["_step"] for row in rows if "_step" in row), default=None)
         if final_step is None or final_step < args.expected_steps:
             print(
                 f"FAIL: run final _step={final_step} < expected_steps={args.expected_steps}",

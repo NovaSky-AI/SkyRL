@@ -58,7 +58,7 @@ bash examples/train/sft/run_sft_megatron_tulu3_50k.sh \
 
 # ---- Wandb-side assertions ----
 # Pulls the run's logged ``train/loss`` history and asserts:
-#   * final _step >= NUM_STEPS (completion),
+#   * last logged training step >= NUM_STEPS (completion),
 #   * no NaN/inf in the history,
 #   * mean(last 5) < mean(first 5) (lenient windowed trend).
 uv run --isolated --extra fsdp $SCRIPT_DIR/check_sft_trend.py \
