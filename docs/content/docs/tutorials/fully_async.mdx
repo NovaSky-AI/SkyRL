@@ -350,7 +350,7 @@ The trainer sets no limit on the number of cuts that one group survives: it cuts
 - `false` (the default) copies the KV cache to host memory for the training phase and restores it. A request resumes with no prefill. Its next tokens continue from KV states of the older weights. Each step pays one copy of the KV pool to host memory and back, and the host needs memory for the KV pools of all engines.
 - `true` discards the KV cache. The inference engine prefills the paused requests again with the new weights. This is the same recompute as `abort`, without the client resubmission.
 
-`freeze` requires full-weight sync; set `cut_mode=abort` for LoRA. On Qwen3-4B with 8xH100, `freeze` gave 4 percent shorter steps than `abort` with the same training reward, and used about 60 GiB more host memory per GPU. Under `freeze` the client counters (`partial_rollout/aborted_requests`, `partial_rollout/cuts_survived_*`) stay at zero, because no request is aborted. `partial_rollout/groups_cut` reports the groups in flight at each cut in both modes.
+With a LoRA adapter sync, `freeze` also copies the base model to host memory for the training phase, because the sync does not send it again. On Qwen3-4B with 8xH100, `freeze` gave 4 percent shorter steps than `abort` with the same training reward, and used about 60 GiB more host memory per GPU. Under `freeze` the client counters (`partial_rollout/aborted_requests`, `partial_rollout/cuts_survived_*`) stay at zero, because no request is aborted. `partial_rollout/groups_cut` reports the groups in flight at each cut in both modes.
 
 ## VI. Future Work
 

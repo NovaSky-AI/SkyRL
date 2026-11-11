@@ -1231,8 +1231,8 @@ class PartialRolloutConfig(BaseConfig):
     cache. ``false`` copies the KV cache to host memory for the training phase and restores it, so a
     request resumes with no prefill and continues from KV states of the older weights. The host needs
     memory for the KV pools of all inference engines. ``true`` discards the KV cache, and the
-    inference engine prefills the paused requests again with the new weights. ``freeze`` requires
-    full-weight sync. Set ``abort`` for LoRA."""
+    inference engine prefills the paused requests again with the new weights. With a LoRA adapter
+    sync, ``freeze`` also copies the base model to host memory for the training phase."""
 
 
 @dataclass

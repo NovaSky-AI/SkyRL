@@ -121,19 +121,13 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
         assert (
             cut_mode in CUT_MODES
         ), f"trainer.fully_async.partial_rollout.cut_mode must be one of {CUT_MODES}. Got: {cut_mode!r}"
-        if cut_mode == "freeze":
-            assert self.cfg.trainer.policy.model.lora.rank == 0, (
-                'trainer.fully_async.partial_rollout.cut_mode="freeze" (the default) requires full-weight sync. '
-                "The sleep discards the weights of the inference engines, and a LoRA sync does not send them "
-                'again. Set trainer.fully_async.partial_rollout.cut_mode="abort" for LoRA.'
+        if cut_mode == "freeze" and self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync:
+            assert self.cfg.generator.inference_engine.enable_prefix_caching, (
+                'trainer.fully_async.partial_rollout.cut_mode="freeze" with '
+                "trainer.fully_async.clear_kv_cache_on_weight_sync=true requires "
+                "generator.inference_engine.enable_prefix_caching=true. The prefix-cache reset is the "
+                "step that makes the inference engine prefill the frozen requests again."
             )
-            if self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync:
-                assert self.cfg.generator.inference_engine.enable_prefix_caching, (
-                    'trainer.fully_async.partial_rollout.cut_mode="freeze" with '
-                    "trainer.fully_async.clear_kv_cache_on_weight_sync=true requires "
-                    "generator.inference_engine.enable_prefix_caching=true. The prefix-cache reset is the "
-                    "step that makes the inference engine prefill the frozen requests again."
-                )
         cut_fraction = 1 - self.mini_batch_size / self.num_parallel_generation_workers
         logger.info(
             f"Partial rollout: {self.num_parallel_generation_workers} groups in flight, train on every "

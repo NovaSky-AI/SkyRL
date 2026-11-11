@@ -251,11 +251,10 @@ def test_rejects_an_unknown_cut_mode():
         _partial_trainer(MagicMock(), cfg=_partial_cfg(cut_mode="pause"))
 
 
-def test_freeze_mode_rejects_lora():
+def test_freeze_mode_accepts_lora():
     cfg = _partial_cfg(cut_mode="freeze")
     cfg.trainer.policy.model.lora.rank = 8
-    with pytest.raises(AssertionError, match="full-weight sync"):
-        _partial_trainer(MagicMock(), cfg=cfg)
+    assert _partial_trainer(MagicMock(), cfg=cfg)._freeze_requests_at_cut is True
 
 
 def test_freeze_mode_with_cache_clear_requires_prefix_caching():
