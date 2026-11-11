@@ -93,19 +93,18 @@ flight, and a call whose reply hasn't started after about 125 s fails, so use
 ## Sharing a sandbox provider
 
 A remote sandbox counts against the provider account's quota, which other runs
-may share. The generator refuses Daytona, Modal or a custom environment without
-a cap on trials in flight (`generator.rate_limit.enabled=true
-generator.rate_limit.max_concurrency=<n>`); eval and retries count against it too.
+may share. Cap trials in flight with `generator.rate_limit.enabled=true
+generator.rate_limit.max_concurrency=<n>`, which also bounds the load on the
+inference engines; eval and retries count against it too.
 
-When the trainer dies, Harbor never deletes its sandboxes. `daytona.py`'s
-`LabelledDaytonaEnvironment` labels each one and gives it a hard lifetime, so a
-run's leftovers can be found and deleted without touching anyone else's:
+When the trainer dies, Harbor never deletes its sandboxes. Harbor's Daytona
+environment can label each one, so a run's leftovers can be told apart from
+anyone else's, and have Daytona stop it once idle and then delete it:
 
 ```bash
-  harbor_trial_config.environment.import_path=examples.train_integrations.harbor_skycap.daytona:LabelledDaytonaEnvironment \
   harbor_trial_config.environment.kwargs.labels.owner=<you> harbor_trial_config.environment.kwargs.labels.run=<run> \
-  harbor_trial_config.environment.kwargs.ttl_minutes=180
-uv run --isolated --extra harbor python -m examples.train_integrations.harbor_skycap.daytona cleanup --label owner=<you> --label run=<run>
+  harbor_trial_config.environment.kwargs.auto_stop_interval_mins=30 \
+  harbor_trial_config.environment.kwargs.auto_delete_interval_mins=0
 ```
 
 ## Images
