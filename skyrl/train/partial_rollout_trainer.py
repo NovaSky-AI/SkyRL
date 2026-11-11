@@ -5,10 +5,10 @@ The inference engines and the trainer share the GPUs, as in the synchronous trai
 keeps ``num_parallel_generation_workers`` groups in flight. When ``policy_mini_batch_size`` of them
 have finished, the step runs in this order:
 
-1. The inference engines stop the in-flight requests and sleep.
+1. The inference engines pause the in-flight requests and sleep. The requests stay in the engines.
 2. The trainer trains on the finished groups.
 3. The inference engines wake with the new weights.
-4. The stopped requests continue from the tokens they generated before the cut.
+4. The paused requests continue from the tokens they generated before the cut.
 
 ``trainer.fully_async.max_staleness_steps`` selects when a finished group frees its slot. With ``0``, a
 finished group holds its slot until the step that trains on it. Each step then cuts the fraction
@@ -24,20 +24,15 @@ the step does not wait for the longest trajectory. Tokens generated before a cut
 logprobs of the older policy. The loss must use rollout logprobs, and ``FullyAsyncRayPPOTrainer``
 asserts this.
 
-``trainer.fully_async.partial_rollout.cut_mode`` selects what the cut does to the in-flight requests.
-Under ``freeze`` (the default), the inference engines pause the requests and resume them after the
-weight sync. Under ``abort``, the inference engines abort the requests, and the client resubmits each
-request with the tokens it generated (see ``RemoteInferenceClient.resume_aborted_requests``).
-Under ``freeze``,
-``trainer.fully_async.clear_kv_cache_on_weight_sync`` selects the handling of the key-value (KV)
-cache. ``false`` copies the KV cache to host memory during training and restores it, so a request
-resumes with no prefill. ``true`` discards the KV cache, and the inference engine prefills the paused
-requests again with the new weights.
+``trainer.fully_async.clear_kv_cache_on_weight_sync`` selects the handling of the key-value (KV) cache
+of the paused requests. ``false`` copies the KV cache to host memory during training and restores it, so
+a request resumes with no prefill and continues from KV states of the older weights. ``true`` discards
+the KV cache, and the inference engine prefills the paused requests again with the new weights.
 
-The trainer sets no limit on the number of cuts that one group survives. The metrics
-``partial_rollout/cuts_survived_mean`` and ``partial_rollout/cuts_survived_max`` report that number per
-step over the completed requests. The metric ``async/staleness`` is the age of a trained group in steps.
-The age also counts the steps that a finished group waited in the buffer.
+The trainer sets no limit on the number of cuts that one group survives. The metric
+``partial_rollout/groups_cut`` reports the groups in flight at each cut. The metric ``async/staleness``
+is the age of a trained group in steps. The age also counts the steps that a finished group waited in
+the buffer.
 """
 
 from loguru import logger
@@ -46,8 +41,6 @@ from skyrl.train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
     _AsyncStalenessManager,
 )
-
-CUT_MODES = ("abort", "freeze")
 
 
 class _PartialRolloutAdmissionController(_AsyncStalenessManager):
@@ -84,13 +77,6 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
     # The checkpoint loads the policy back to the GPUs. It must run while the inference engines sleep.
     checkpoint_before_weight_sync = True
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # The client holds each aborted request and resubmits it after the weight sync. The
-        # generator receives one completion per trajectory, as if no cut happened.
-        self.inference_engine_client.resume_aborted_requests = True
-        self._freeze_requests_at_cut = self.cfg.trainer.fully_async.partial_rollout.cut_mode == "freeze"
-
     def _generation_buffer_maxsize(self) -> int:
         # The admission controller allows this many groups that are not yet trained on. All of them
         # can finish before the training loop drains the buffer.
@@ -116,17 +102,11 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
             "(equal means no partial rollout: every step waits for all its groups). Got: "
             f"{self.num_parallel_generation_workers=}, {self.mini_batch_size=}"
         )
-        # The base constructor calls this method before `__init__` of this class sets its attributes.
-        cut_mode = self.cfg.trainer.fully_async.partial_rollout.cut_mode
-        assert (
-            cut_mode in CUT_MODES
-        ), f"trainer.fully_async.partial_rollout.cut_mode must be one of {CUT_MODES}. Got: {cut_mode!r}"
-        if cut_mode == "freeze" and self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync:
+        if self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync:
             assert self.cfg.generator.inference_engine.enable_prefix_caching, (
-                'trainer.fully_async.partial_rollout.cut_mode="freeze" with '
-                "trainer.fully_async.clear_kv_cache_on_weight_sync=true requires "
-                "generator.inference_engine.enable_prefix_caching=true. The prefix-cache reset is the "
-                "step that makes the inference engine prefill the frozen requests again."
+                "PartialRolloutRayPPOTrainer with trainer.fully_async.clear_kv_cache_on_weight_sync=true "
+                "requires generator.inference_engine.enable_prefix_caching=true. The prefix-cache reset is "
+                "the step that makes the inference engine prefill the paused requests again."
             )
         cut_fraction = 1 - self.mini_batch_size / self.num_parallel_generation_workers
         logger.info(
@@ -134,7 +114,8 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
             f"{self.mini_batch_size} finished groups, {cut_fraction:.0%} of in-flight groups cut per step, "
             f"max_staleness_steps={self.max_staleness_steps} "
             f"({'a finished group holds its slot' if self._holds_slot_until_trained() else 'a finished group frees its slot'}), "
-            f"cut_mode={cut_mode}."
+            f"KV cache of the paused requests: "
+            f"{'cleared' if self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync else 'kept in host memory'}."
         )
         router_kwargs = self.cfg.generator.inference_engine.router_init_kwargs or {}
         if router_kwargs.get("policy") != "sticky_least_loaded":
@@ -148,27 +129,11 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
     async def _before_training_step(self) -> None:
         # The groups in flight at this point are the groups that this step cuts.
         self.all_metrics["partial_rollout/groups_cut"] = self._staleness_manager._stat.running
-        if self._freeze_requests_at_cut:
-            # The inference engines keep the in-flight requests paused and free the GPUs for training.
-            # The KV cache goes to host memory, unless the weight sync clears it.
-            offload_kv = not self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync
-            await self.inference_engine_client.sleep_with_frozen_requests(offload_kv=offload_kv)
-        else:
-            # The sleep aborts the in-flight requests, which the client holds, and frees the GPUs for training.
-            await self.inference_engine_client.sleep()
-
-    async def _sync_weights_after_training_step(self) -> None:
-        # The inherited weight sync wakes the weights, broadcasts them, and wakes the key-value (KV)
-        # cache. Under cut_mode="abort", the KV cache wake resumes the inference engines, and the
-        # client resubmits the held requests. Under cut_mode="freeze", the dispatch resumes the
-        # frozen requests after the KV cache wake.
-        await super()._sync_weights_after_training_step()
-        # At this point the client holds every request that this step's cut aborted.
-        stats = self.inference_engine_client.pop_resume_stats()
-        completed = stats.pop("completed_requests")
-        cuts_survived_sum = stats.pop("cuts_survived_sum")
-        self.all_metrics.update({f"partial_rollout/{k}": v for k, v in stats.items()})
-        self.all_metrics["partial_rollout/cuts_survived_mean"] = cuts_survived_sum / completed if completed else 0.0
+        # The inference engines keep the in-flight requests paused and free the GPUs for training.
+        # The KV cache goes to host memory, unless the weight sync clears it. The inherited weight
+        # sync wakes the engines and resumes the paused requests (`WorkerDispatch.save_weights_for_sampler`).
+        offload_kv = not self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync
+        await self.inference_engine_client.sleep_with_frozen_requests(offload_kv=offload_kv)
 
     async def _after_training_loop(self) -> None:
         await self.inference_engine_client.sleep()

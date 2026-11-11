@@ -1218,24 +1218,6 @@ class AlgorithmConfig(BaseConfig):
 
 
 @dataclass
-class PartialRolloutConfig(BaseConfig):
-    """Knobs for the colocated partial-rollout trainer. The fully-async trainer ignores them.
-    See https://docs.skyrl.ai/docs/tutorials/fully_async."""
-
-    cut_mode: str = "freeze"
-    """What a cut does to the in-flight requests. ``freeze`` keeps them in the inference engine: the
-    engine pauses the requests and resumes them after the weight sync. ``abort`` aborts them: the client
-    holds each request and resubmits the prompt and the generated tokens after the weight sync, and the
-    inference engine prefills them again. Under ``freeze``,
-    ``trainer.fully_async.clear_kv_cache_on_weight_sync`` selects what happens to the key-value (KV)
-    cache. ``false`` copies the KV cache to host memory for the training phase and restores it, so a
-    request resumes with no prefill and continues from KV states of the older weights. The host needs
-    memory for the KV pools of all inference engines. ``true`` discards the KV cache, and the
-    inference engine prefills the paused requests again with the new weights. With a LoRA adapter
-    sync, ``freeze`` also copies the base model to host memory for the training phase."""
-
-
-@dataclass
 class FullyAsyncConfig(BaseConfig):
     """Knobs for fully async training.
     See https://docs.skyrl.ai/docs/tutorials/fully_async#step-2-config-knobs-to-tune-for-fully-async-training."""
@@ -1255,8 +1237,6 @@ class FullyAsyncConfig(BaseConfig):
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
-    partial_rollout: PartialRolloutConfig = field(default_factory=PartialRolloutConfig)
-    """Only used by the colocated partial-rollout trainer (``trainer.placement.colocate_all=true``)."""
     sample_full_batch: bool = False
     """Requires ``zero_variance_filter=True``. Drop zero-variance groups and keep pulling until the
     mini-batch is full of non-zero-variance groups (async-native DAPO ``dynamic_sampling="filter"``).
@@ -1267,6 +1247,11 @@ class FullyAsyncConfig(BaseConfig):
     """Whether or not to clear the KV cache on weight sync. Defaults to False.
     If False, we reuse KV cache from stale policies during generation
     (avoids recomputation at the cost of using slightly stale KV cache).
+
+    The colocated partial-rollout trainer keeps the in-flight requests paused in the inference engines
+    during training. With ``False``, it copies the KV cache to host memory for the training phase and
+    restores it, so the host needs memory for the KV pools of all inference engines. With ``True``, it
+    discards the KV cache, and the inference engines prefill the paused requests again.
     """
 
     # --- Trainer simulation (no real trainer components) ---

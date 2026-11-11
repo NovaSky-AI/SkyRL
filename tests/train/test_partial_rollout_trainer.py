@@ -1,7 +1,7 @@
 """CPU tests for colocated partial rollout.
 
 The tests cover the admission controller of the partial-rollout trainer, the order of engine sleep,
-training, checkpoint and weight sync in one step, and the two cut modes ``abort`` and ``freeze``. The client side is in
+training, checkpoint and weight sync in one step, and the handling of the KV cache at the cut. The client side is in
 ``tests/backends/skyrl_train/inference_servers/test_remote_inference_client_resume.py``."""
 
 import asyncio
@@ -108,7 +108,7 @@ def test_buffer_size_follows_max_staleness_steps():
 # ---------------------------------------------------------------------------
 
 
-def _partial_cfg(**partial_rollout):
+def _partial_cfg():
     cfg = _build_test_cfg()
     cfg.trainer.fully_async.enabled = True
     cfg.trainer.fully_async.num_parallel_generation_workers = 3
@@ -117,8 +117,6 @@ def _partial_cfg(**partial_rollout):
     cfg.generator.batched = False
     cfg.trainer.placement.colocate_all = True
     cfg.trainer.ckpt_interval = 1
-    for k, v in partial_rollout.items():
-        setattr(cfg.trainer.fully_async.partial_rollout, k, v)
     return cfg
 
 
@@ -141,15 +139,15 @@ def _partial_trainer(client, cfg=None, callbacks=(), train_size=4):
 def test_partial_rollout_step_sleeps_trains_checkpoints_then_syncs(monkeypatch):
     """One step runs sleep, train, checkpoint, weight sync, in this order.
 
-    The sleep aborts the in-flight requests before training. The trainer writes the checkpoint while
+    The sleep keeps the in-flight requests paused in the engines. The trainer writes the checkpoint while
     the engines sleep. The weight sync wakes the engines and comes last. The callback sequence is the
     same as in the fully-async trainer."""
     order = []
     client = MagicMock()
-    client.sleep = AsyncMock(side_effect=lambda *a, **k: order.append("sleep"))
+    client.sleep = AsyncMock(side_effect=lambda *a, **k: order.append("final_sleep"))
+    client.sleep_with_frozen_requests = AsyncMock(side_effect=lambda *a, **k: order.append("sleep"))
     recorder = RecorderCallback()
-    trainer = _partial_trainer(client, cfg=_partial_cfg(cut_mode="abort"), callbacks=[recorder])
-    assert client.resume_aborted_requests is True
+    trainer = _partial_trainer(client, callbacks=[recorder])
 
     dispatch_mock = MagicMock()
     dispatch_mock.save_weights_for_sampler = AsyncMock(side_effect=lambda *a, **k: order.append("sync"))
@@ -193,7 +191,7 @@ def test_partial_rollout_step_sleeps_trains_checkpoints_then_syncs(monkeypatch):
         "train",
         "ckpt",
         "sync",
-        "sleep",
+        "final_sleep",
         "ckpt",
     ], order
     event_names = [name for name, _ in recorder.events]
@@ -202,19 +200,19 @@ def test_partial_rollout_step_sleeps_trains_checkpoints_then_syncs(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# cut_mode: freeze
+# The cut: paused requests and their KV cache
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("clear_kv_cache, offload_kv", [(False, True), (True, False)])
-async def test_freeze_mode_sleeps_with_frozen_requests(clear_kv_cache, offload_kv):
-    """Under ``freeze`` the cut aborts no request. ``clear_kv_cache_on_weight_sync`` selects whether
-    the sleep copies the KV cache to host memory or discards it."""
+async def test_cut_sleeps_with_frozen_requests(clear_kv_cache, offload_kv):
+    """The cut aborts no request. ``clear_kv_cache_on_weight_sync`` selects whether the sleep copies
+    the KV cache to host memory or discards it."""
     client = MagicMock()
     client.sleep = AsyncMock()
     client.sleep_with_frozen_requests = AsyncMock()
-    cfg = _partial_cfg(cut_mode="freeze")
+    cfg = _partial_cfg()
     cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = clear_kv_cache
     trainer = _partial_trainer(client, cfg=cfg)
     trainer._staleness_manager._stat.running = 2
@@ -226,39 +224,14 @@ async def test_freeze_mode_sleeps_with_frozen_requests(clear_kv_cache, offload_k
     assert trainer.all_metrics["partial_rollout/groups_cut"] == 2
 
 
-@pytest.mark.asyncio
-async def test_abort_mode_sleeps_with_abort():
-    client = MagicMock()
-    client.sleep = AsyncMock()
-    client.sleep_with_frozen_requests = AsyncMock()
-    trainer = _partial_trainer(client, cfg=_partial_cfg(cut_mode="abort"))
-    trainer._staleness_manager._stat.running = 1
-
-    await trainer._before_training_step()
-
-    assert client.sleep.await_count == 1
-    assert client.sleep_with_frozen_requests.await_count == 0
-    assert trainer.all_metrics["partial_rollout/groups_cut"] == 1
-
-
-def test_cut_mode_defaults_to_freeze():
-    assert _partial_cfg().trainer.fully_async.partial_rollout.cut_mode == "freeze"
-    assert _partial_trainer(MagicMock())._freeze_requests_at_cut is True
-
-
-def test_rejects_an_unknown_cut_mode():
-    with pytest.raises(AssertionError, match="cut_mode"):
-        _partial_trainer(MagicMock(), cfg=_partial_cfg(cut_mode="pause"))
-
-
-def test_freeze_mode_accepts_lora():
-    cfg = _partial_cfg(cut_mode="freeze")
+def test_accepts_lora():
+    cfg = _partial_cfg()
     cfg.trainer.policy.model.lora.rank = 8
-    assert _partial_trainer(MagicMock(), cfg=cfg)._freeze_requests_at_cut is True
+    _partial_trainer(MagicMock(), cfg=cfg)
 
 
-def test_freeze_mode_with_cache_clear_requires_prefix_caching():
-    cfg = _partial_cfg(cut_mode="freeze")
+def test_cache_clear_requires_prefix_caching():
+    cfg = _partial_cfg()
     cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = True
     cfg.generator.inference_engine.enable_prefix_caching = False
     with pytest.raises(AssertionError, match="enable_prefix_caching"):

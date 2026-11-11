@@ -31,7 +31,6 @@ uv run --isolated --extra fsdp -m examples.train.fully_async.main_fully_async \
   trainer.fully_async.enabled=true \
   trainer.fully_async.num_parallel_generation_workers=${NUM_PARALLEL_GENERATION_WORKERS} \
   trainer.fully_async.max_staleness_steps=0 \
-  trainer.fully_async.partial_rollout.cut_mode=abort \
   trainer.algorithm.policy_loss_type="rollout_is" \
   trainer.algorithm.advantage_estimator="grpo" \
   trainer.algorithm.off_policy_correction.sequence_mask_metric=$SEQUENCE_MASK_METRIC \
