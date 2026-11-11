@@ -225,6 +225,15 @@ image(s) in the chat `messages` format. See
 and
 [`prepare_cauldron_vlm.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/sft/prepare_cauldron_vlm.py).
 
+By default every row's image tensors (`pixel_values`) are materialized when the
+dataset is tokenized and cached in that form, so host memory on the driver grows
+with the dataset. Set `lazy_vlm_dataset=true` to keep only the surviving row
+indices and token lengths after the tokenization pass and re-run the tokenizer
+and image processor when the dataloader fetches each example; the cache then
+holds just that index (`<cache_key>.lazy_vlm.json`). The up-front pass still
+processes every image once (to drop over-length rows and record lengths), and
+`dataloader_num_workers > 0` overlaps the per-fetch processing with training.
+
 ## Key configuration
 
 See [`SFTConfig` in the API reference](/docs/api-ref/skyrl/sft/sft_config)
