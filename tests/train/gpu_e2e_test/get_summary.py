@@ -44,16 +44,25 @@ def main() -> int:
             raise ValueError(f"Run {args.run_name} ended with state {matched_run.state}")
 
         if matched_run is not None and matched_run.state == "finished":
-            step_rows = matched_run.scan_history(keys=["trainer/global_step", "trainer/total_training_steps"])
+            step_rows = matched_run.scan_history(
+                keys=["trainer/global_step", "trainer/total_training_steps"], use_cache=False
+            )
             final_steps = [
                 row["trainer/global_step"]
                 for row in step_rows
-                if row["trainer/global_step"] >= row["trainer/total_training_steps"]
+                if row.get("trainer/global_step") is not None
+                and row.get("trainer/total_training_steps") is not None
+                and row["trainer/global_step"] >= row["trainer/total_training_steps"]
             ]
             if final_steps:
                 final_step = max(final_steps)
-                metric_rows = matched_run.scan_history(keys=["trainer/global_step", *metric_names])
-                final_rows = [row for row in metric_rows if row["trainer/global_step"] == final_step]
+                metric_rows = matched_run.scan_history(keys=["trainer/global_step", *metric_names], use_cache=False)
+                final_rows = [
+                    row
+                    for row in metric_rows
+                    if row.get("trainer/global_step") == final_step
+                    and all(row.get(name) is not None for name in metric_names)
+                ]
                 if final_rows:
                     metric_values = final_rows[-1]
                     break

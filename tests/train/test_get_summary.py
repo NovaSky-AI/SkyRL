@@ -35,3 +35,8 @@ def test_wait_for_finished_uses_final_history_row(monkeypatch):
     )
 
     assert get_summary.main() == 0
+    stale_run.scan_history.assert_called_once_with(
+        keys=["trainer/global_step", "trainer/total_training_steps"], use_cache=False
+    )
+    assert final_run.scan_history.call_args_list[0].kwargs["use_cache"] is False
+    assert final_run.scan_history.call_args_list[1].kwargs["use_cache"] is False
