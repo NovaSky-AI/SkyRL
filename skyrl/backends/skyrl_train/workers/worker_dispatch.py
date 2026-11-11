@@ -802,9 +802,12 @@ class WorkerDispatch:
             self.empty_cache("policy")
             return
 
-        is_sleeping = await self._inference_engine_client.is_sleeping()
-        if not is_sleeping:
-            await self._inference_engine_client.sleep()
+        # Engines that hold frozen requests already freed the GPU memory. `sleep()` would abort
+        # those requests, so do not call it for them.
+        if not self._engines_hold_frozen_requests():
+            is_sleeping = await self._inference_engine_client.is_sleeping()
+            if not is_sleeping:
+                await self._inference_engine_client.sleep()
 
         offload_optimizer = self.cfg.trainer.policy.optimizer_config.offload_after_step
         self._ensure_on_gpu(
@@ -831,6 +834,14 @@ class WorkerDispatch:
             offload_optimizer=self.cfg.trainer.policy.optimizer_config.offload_after_step,
             offload_model=True,
         )
+
+    def _engines_hold_frozen_requests(self) -> bool:
+        """True while the colocated inference engines sleep with paused requests.
+
+        See ``RemoteInferenceClient.sleep_with_frozen_requests``. Other client classes do not have
+        the attribute. The comparison with ``True`` keeps a mock client, whose attributes are all
+        truthy, on the default path."""
+        return self.colocate_all and getattr(self._inference_engine_client, "requests_frozen_asleep", False) is True
 
     def _is_lora_no_merge(self) -> bool:
         """True for the megatron LoRA path that ships standalone adapters to vLLM."""
@@ -897,18 +908,21 @@ class WorkerDispatch:
         # Make the requested adapter live on every worker before broadcasting
         # — otherwise we'd export some other tenant's LoRA weights to vLLM.
         self.ensure_active_adapter("policy", model_id, require_model_resident=not adapter_only_sync)
-        if self.colocate_all and self._inference_engine_client.requests_frozen_asleep is True:
+        if self._engines_hold_frozen_requests():
             # The partial-rollout trainer froze the in-flight requests and slept the allocator
             # (`sleep_with_frozen_requests`). Wake the allocator directly, so the scheduler stays
             # paused until the KV cache is back. Wake the KV cache and resume even if the sync
-            # fails, so the frozen requests never run on a sleeping KV cache.
-            async with cleanup_preserving_primary(self._inference_engine_client.resume_generation, "resume_generation"):
-                async with cleanup_preserving_primary(
-                    lambda: self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"]),
-                    "wake_for_weight_sync(kv_cache)",
-                ):
-                    await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
-                    await _broadcast_and_finish()
+            # fails. Resume only after the KV cache wake succeeds, so the frozen requests never
+            # run on a sleeping KV cache.
+            async def _wake_kv_cache_then_resume() -> None:
+                await self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"])
+                await self._inference_engine_client.resume_generation()
+
+            async with cleanup_preserving_primary(
+                _wake_kv_cache_then_resume, "wake_for_weight_sync(kv_cache) and resume_generation"
+            ):
+                await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
+                await _broadcast_and_finish()
         elif self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
             await _broadcast_and_finish()
