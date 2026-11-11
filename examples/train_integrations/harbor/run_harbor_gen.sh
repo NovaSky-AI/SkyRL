@@ -7,6 +7,7 @@ set -ex
 # export DAYTONA_API_KEY=YOUR_KEY_HERE
 # export MODAL_TOKEN_ID=YOUR_KEY_HERE
 # export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
+# export RUNTA_TOKEN=YOUR_KEY_HERE
 
 # Prepare dataset first (downloads from HuggingFace and extracts tasks):
 # uv run examples/train_integrations/harbor/prepare_harbor_dataset.py --dataset open-thoughts/CodeContests

@@ -29,6 +29,7 @@ export WANDB_API_KEY=your_wandb_api_key
 export DAYTONA_API_KEY=your_daytona_api_key
 # export MODAL_TOKEN_ID=your_modal_token_id
 # export MODAL_TOKEN_SECRET=your_modal_token_secret
+# export RUNTA_TOKEN=your_runta_token
 
 # 2. Prepare dataset
 uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
