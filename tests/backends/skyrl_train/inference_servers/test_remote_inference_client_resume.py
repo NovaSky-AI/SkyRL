@@ -1,6 +1,6 @@
 """CPU tests for the hold-and-resume of aborted requests in ``RemoteInferenceClient``.
 
-The tests cover ``resume_aborted_requests``, ``max_resumes_per_request``, the generation gate that
+The tests cover ``resume_aborted_requests``, the generation gate that
 pause, resume and wake drive, and ``sleep_with_frozen_requests``."""
 
 import asyncio
@@ -77,7 +77,6 @@ async def test_generate_resumes_aborted_request_after_gate_reopens():
         "resume_prefill_tokens": 4,
         "retried_503": 0,
         "retried_503_gate_open": 0,
-        "not_resumed_requests": 0,
         "completed_requests": 1,
         "cuts_survived_sum": 1,
         "cuts_survived_max": 1,
@@ -135,64 +134,6 @@ async def test_pause_and_wake_drive_the_gate():
     await client.pause(mode="wait")
     await client.resume()
     assert client._get_generation_gate().is_set()
-
-
-@pytest.mark.asyncio
-async def test_generate_stops_resuming_at_max_resumes_per_request():
-    """With a resume budget of 1, the second abort returns the spliced partial result with stop reason
-    ``abort`` instead of a third submission."""
-    client = _client(resume=True)
-    client.max_resumes_per_request = 1
-    results = iter([_result([10], [-0.1], "abort"), _result([11], [-0.2], "abort"), _result([12], [-0.3], "stop")])
-    calls = []
-
-    async def fake_generate(**kwargs):
-        calls.append(list(kwargs["prompt_token_ids"]))
-        return next(results)
-
-    client._generate_client.generate = fake_generate
-    out = await asyncio.wait_for(client._generate_single([1, 2], {"max_tokens": 8}, session_id=None, model="m"), 5)
-    assert out["stop_reason"] == "abort"
-    assert out["response_ids"] == [10, 11]
-    assert out["response_logprobs"] == [-0.1, -0.2]
-    assert calls == [[1, 2], [1, 2, 10]]
-    stats = client.pop_resume_stats()
-    assert stats["aborted_requests"] == 2
-    assert stats["not_resumed_requests"] == 1
-    assert stats["resume_prefill_tokens"] == 3, "only the first abort was resubmitted"
-    assert stats["completed_requests"] == 0, "a request that is not resumed does not count as completed"
-    assert stats["cuts_survived_max"] == 0
-
-
-@pytest.mark.asyncio
-async def test_abort_before_the_first_token_does_not_count_against_the_budget():
-    """A request that the engine aborts while it is still queued has no tokens. The client resubmits it
-    without charging the budget, so a request that is not resumed always carries at least one token."""
-    client = _client(resume=True)
-    client.max_resumes_per_request = 1
-    results = iter(
-        [
-            _result([], [], "abort"),
-            _result([10], [-0.1], "abort"),
-            _result([11], [-0.2], "abort"),
-            _result([12], [-0.3], "stop"),
-        ]
-    )
-    calls = []
-
-    async def fake_generate(**kwargs):
-        calls.append(list(kwargs["prompt_token_ids"]))
-        return next(results)
-
-    client._generate_client.generate = fake_generate
-    out = await asyncio.wait_for(client._generate_single([1, 2], {"max_tokens": 8}, session_id=None, model="m"), 5)
-    assert out["stop_reason"] == "abort"
-    assert out["response_ids"] == [10, 11]
-    assert calls == [[1, 2], [1, 2], [1, 2, 10]], "the empty abort was resubmitted as-is"
-    stats = client.pop_resume_stats()
-    assert stats["aborted_requests"] == 3
-    assert stats["not_resumed_requests"] == 1
-    assert stats["resume_prefill_tokens"] == 5
 
 
 @pytest.mark.asyncio

@@ -552,14 +552,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
     by default: the other trainers never abort in-flight requests, or they want ``abort`` reported as
     the stop reason."""
 
-    max_resumes_per_request: Optional[int] = None
-    """The number of times the client resubmits one held request. ``None`` means no limit. When a
-    request that has generated at least one token is aborted once more than this, the client returns
-    it with stop reason ``abort`` and the tokens generated so far. An abort before the first token
-    does not count: the resubmission is the same as a new request. The colocated partial-rollout
-    trainer sets it to ``max_cuts_per_group`` under ``stale_group_policy="drop"``. Only used with
-    ``resume_aborted_requests``."""
-
     # Private fields excluded from repr for cleaner output
     _generate_client: Optional[RemoteGenerateClient] = field(default=None, repr=False)
     # Set while the inference engines accept requests. An aborting pause clears it. Resume or wake sets it.
@@ -885,18 +877,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
             self._count_resume_stat("aborted_segment_tokens", len(result.response_ids))
             if generated_ids:
                 # An abort before the first token leaves the request as new. It ages no token, so
-                # it does not count against the resume budget. The caller also cannot handle an
-                # empty response.
+                # it does not count as a survived cut.
                 aborts += 1
-            if self.max_resumes_per_request is not None and aborts > self.max_resumes_per_request:
-                # The request reached its resume budget. Return it with stop reason "abort" so the
-                # caller can drop it.
-                self._count_resume_stat("not_resumed_requests")
-                logger.debug(
-                    f"Not resuming a request after {aborts} aborts "
-                    f"(max_resumes_per_request={self.max_resumes_per_request}); returning stop reason abort."
-                )
-                break
             if max_tokens is not None:
                 remaining = max_tokens - len(generated_ids)
                 if remaining <= 0:
@@ -930,8 +912,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
         - ``resume_prefill_tokens``: prompt and generated tokens that the resubmission re-prefilled.
         - ``retried_503``: requests that a paused engine rejected and the client retried.
         - ``retried_503_gate_open``: the part of ``retried_503`` that arrived while the gate was open.
-        - ``not_resumed_requests``: requests returned with stop reason ``abort`` because they reached
-          ``max_resumes_per_request``.
         - ``completed_requests``: requests that completed with a stop reason other than ``abort``.
         - ``cuts_survived_sum``: the total number of aborts that the completed requests survived.
         - ``cuts_survived_max``: the largest number of aborts that one completed request survived."""
@@ -943,7 +923,6 @@ class RemoteInferenceClient(InferenceEngineInterface):
                 "resume_prefill_tokens",
                 "retried_503",
                 "retried_503_gate_open",
-                "not_resumed_requests",
                 "completed_requests",
                 "cuts_survived_sum",
                 "cuts_survived_max",
