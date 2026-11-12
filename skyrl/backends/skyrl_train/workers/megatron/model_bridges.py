@@ -50,21 +50,6 @@ try:
         rope fields so the base CONFIG_MAPPING can handle them.
         """
 
-        def build_conversion_tasks(self, hf_pretrained, megatron_model, weight_dtype=None):
-            """Filter out None tasks from the base implementation.
-
-            megatron-bridge 0.3.1 build_conversion_tasks returns None entries
-            for params with no mapping, but load_weights_hf_to_megatron
-            doesn't guard against them.
-
-            ``weight_dtype`` was added to the base signature in megatron-bridge
-            0.7.0 and is passed by keyword from ``load_weights_hf_to_megatron``;
-            overrides must accept and forward it (see upstream's own overrides in
-            ``kimi_k3_bridge`` / ``kimi_k25_vl_bridge``).
-            """
-            tasks = super().build_conversion_tasks(hf_pretrained, megatron_model, weight_dtype=weight_dtype)
-            return [t for t in tasks if t is not None]
-
         def provider_bridge(self, hf_pretrained: PreTrainedCausalLM):
             hf_config = hf_pretrained.config
 
@@ -207,20 +192,6 @@ try:
     )
     class KimiK25TextBridge(DeepSeekV3Bridge):
         """Kimi K2.5-family language model (``language_model.*``) -> GPTModel."""
-
-        def build_conversion_tasks(self, hf_pretrained, megatron_model, *args, **kwargs):
-            """Filter out None tasks (same megatron-bridge quirk as GLM47FlashBridge).
-
-            Extra positional/keyword arguments are forwarded untouched so the
-            override survives base-signature growth: megatron-bridge 0.7.0
-            adds a ``weight_dtype`` keyword (passed by keyword from
-            ``load_weights_hf_to_megatron``), and a fixed two-argument
-            signature would raise TypeError there. Under 0.7.0 the None-filter
-            itself is redundant (see NovaSky-AI/SkyRL#2042's module-level
-            filter) but harmless.
-            """
-            tasks = super().build_conversion_tasks(hf_pretrained, megatron_model, *args, **kwargs)
-            return [t for t in tasks if t is not None]
 
         def provider_bridge(self, hf_pretrained):
             hf_config = hf_pretrained.config
