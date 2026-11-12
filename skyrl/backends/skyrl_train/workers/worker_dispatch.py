@@ -90,6 +90,11 @@ class WorkerDispatch:
         # records the model as resident.
         self._gpu_state[model] = GPUState(model_on_gpu=False, optimizer_on_gpu=False)
 
+    def unregister_actor_group(self, model: str) -> None:
+        """Undo ``register_actor_group``, e.g. after the model failed to initialize. Does not stop its workers."""
+        self._actor_groups.pop(model, None)
+        self._gpu_state.pop(model, None)
+
     # ------------------------------------------------------------------
     # Multi-LoRA: per-model adapter swap orchestration.
     # ------------------------------------------------------------------
