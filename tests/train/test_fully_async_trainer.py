@@ -304,9 +304,9 @@ def test_should_keep_group_token_level_rewards():
 
 
 def test_subclass_hooks_run_in_order_around_the_step(monkeypatch):
-    """A subclass sees its hooks in this order per step: before training, training, weight sync. A
-    subclass can write the checkpoint in ``_sync_weights_after_training_step``, before the weight
-    sync. ``_after_training_loop`` runs once, before the final checkpoint."""
+    """A subclass sees its hooks in this order per step: before training, training, checkpoint (when
+    ``_checkpoint_before_weight_sync`` returns ``True``), weight sync. ``_after_training_loop`` runs once,
+    before the final checkpoint."""
     from unittest.mock import MagicMock
 
     from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
@@ -326,13 +326,11 @@ def test_subclass_hooks_run_in_order_around_the_step(monkeypatch):
         async def _before_training_step(self) -> None:
             order.append("before")
 
-        async def _sync_weights_after_training_step(self, force_save: bool, is_epoch_end: bool) -> None:
-            # Write the checkpoint before the weight sync, not after eval.
-            await super()._save_step_checkpoints(force_save, is_epoch_end)
-            order.append("sync")
+        def _checkpoint_before_weight_sync(self) -> bool:
+            return True
 
-        async def _save_step_checkpoints(self, force_save: bool, is_epoch_end: bool) -> None:
-            return
+        async def _sync_weights_after_training_step(self) -> None:
+            order.append("sync")
 
         async def _after_training_loop(self) -> None:
             order.append("after_loop")

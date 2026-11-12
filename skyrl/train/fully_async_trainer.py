@@ -16,8 +16,8 @@ A subclass changes how generation and training share the GPUs through these hook
 - `_build_admission_controller`: the controller that admits generation groups into flight.
 - `_validate_placement_and_capacity`: the checks on `colocate_all` and `num_parallel_generation_workers`.
 - `_before_training_step`: runs after the mini-batch is collected and before training.
-- `_sync_weights_after_training_step`: runs after training; pushes the new weights to the inference engines.
-- `_save_step_checkpoints`: writes the step's checkpoint. The loop calls it after eval.
+- `_sync_weights_after_training_step`: pushes the new weights to the inference engines.
+- `_checkpoint_before_weight_sync`: whether the step's checkpoint runs before the weight sync instead of after eval.
 - `_after_training_loop`: runs after the last epoch and before the final checkpoint.
 """
 
@@ -453,15 +453,18 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         The default does nothing: generation runs on its own GPUs while training runs."""
 
-    async def _sync_weights_after_training_step(self, force_save: bool, is_epoch_end: bool) -> None:
-        """Push the new weights to the inference engines. The loop calls this after the training step.
+    def _checkpoint_before_weight_sync(self) -> bool:
+        """Return whether the loop writes the step's checkpoint before the weight sync.
 
-        The default lets the dispatch pause generation, transfer the weights, and resume generation.
+        The default is ``False``: the checkpoint runs after eval, so the weight sync is not delayed
+        while generation runs. A subclass whose inference engines share the GPUs returns ``True``,
+        so that the checkpoint runs while the engines sleep."""
+        return False
 
-        ``force_save`` and ``is_epoch_end`` are the arguments of ``_save_step_checkpoints``, which
-        the loop calls after eval. The default does not use them. A subclass that must write the
-        checkpoint before the weight sync writes it here first, and overrides
-        ``_save_step_checkpoints`` to do nothing."""
+    async def _sync_weights_after_training_step(self) -> None:
+        """Push the new weights to the inference engines.
+
+        The default lets the dispatch pause generation, transfer the weights, and resume generation."""
         async with self._weight_sync_deadline():
             with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
                 await self.dispatch.save_weights_for_sampler()
@@ -478,8 +481,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Write the step's checkpoint and its Hugging Face (HF) export. The loop calls this after eval.
 
         The loop writes each one at its interval, at the last step of the epoch, or when a callback
-        requested a save. A subclass can override this method (see
-        ``_sync_weights_after_training_step``)."""
+        requested a save. The loop calls it after eval, or before the weight sync when
+        ``_checkpoint_before_weight_sync`` returns ``True``."""
         ckpt_interval_save = self.cfg.trainer.ckpt_interval > 0 and (
             is_epoch_end or self.global_step % self.cfg.trainer.ckpt_interval == 0
         )
@@ -713,7 +716,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
 
                         # 4. After training: pause generation, sync weights, resume.
-                        await self._sync_weights_after_training_step(force_save, is_epoch_end)
+                        if self._checkpoint_before_weight_sync():
+                            await self._save_step_checkpoints(force_save, is_epoch_end)
+                        await self._sync_weights_after_training_step()
 
                     # One profiler step per async global step.
                     self._profiler_step()
@@ -737,7 +742,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self._fire("on_eval_end", metrics=eval_metrics)
 
                     # 7. Checkpointing. At interval, at the last step of each epoch, and when a callback asks.
-                    await self._save_step_checkpoints(force_save, is_epoch_end)
+                    if not self._checkpoint_before_weight_sync():
+                        await self._save_step_checkpoints(force_save, is_epoch_end)
 
                     log_payload = {**self.all_metrics, **{"timing/" + k: v for k, v in self.all_timings.items()}}
                     if self._ray_gpu_monitor is not None:
