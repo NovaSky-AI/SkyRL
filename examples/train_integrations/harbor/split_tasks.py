@@ -56,11 +56,16 @@ def split(
 
 
 def link(tasks_dir: Path, names: Sequence[str], out_dir: Path) -> None:
-    """``out_dir`` holds exactly one symlink per name, into ``tasks_dir``."""
+    """``out_dir`` holds exactly one symlink per name, into ``tasks_dir``. Anything else in it is refused, not deleted."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    foreign = sorted(entry.name for entry in out_dir.iterdir() if not entry.is_symlink())
+    if foreign:
+        listed = ", ".join(foreign[:3]) + (f" and {len(foreign) - 3} more" if len(foreign) > 3 else "")
+        raise ValueError(
+            f"{out_dir} holds {listed}, which aren't task symlinks: move them or use another run directory"
+        )
     for stale in out_dir.iterdir():
-        if stale.is_symlink():
-            stale.unlink()
+        stale.unlink()
     for name in names:
         (out_dir / name).symlink_to(tasks_dir / name)
 

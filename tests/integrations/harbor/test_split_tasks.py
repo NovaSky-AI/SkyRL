@@ -42,6 +42,18 @@ def test_named_training_tasks_may_not_be_held_out() -> None:
         split(NAMES, num_eval=10, num_train=0, seed=0, train_names=[held_out[0]])
 
 
+def test_a_run_directory_holding_anything_but_task_symlinks_is_refused_and_left_alone(tmp_path) -> None:
+    tasks_dir = tmp_path / "CodeContests"
+    for name in NAMES:
+        (tasks_dir / name).mkdir(parents=True)
+    stray = tmp_path / "run" / "tasks" / "my-notes"
+    stray.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="holds my-notes, which aren't task symlinks"):
+        main(["--tasks-dir", str(tasks_dir), "--run-dir", str(tmp_path / "run"), "--eval", "5", "--train", "8"])
+    assert stray.is_dir()
+
+
 def test_every_launch_rebuilds_the_run_directory_from_the_seed(tmp_path) -> None:
     tasks_dir = tmp_path / "CodeContests"
     for name in NAMES:
