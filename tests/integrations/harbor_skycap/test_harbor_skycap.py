@@ -167,7 +167,7 @@ async def generator(skycap):
     """Makes generators against the test's skycap, and closes each one's pool when the test ends."""
     made = []
 
-    def make(train_paths: str = "all", **cfg) -> HarborSkycapGenerator:
+    def make(train_paths: str = "all", check_first_batch: bool = True, **cfg) -> HarborSkycapGenerator:
         made.append(
             HarborSkycapGenerator(
                 generator_cfg(**cfg),
@@ -175,6 +175,7 @@ async def generator(skycap):
                 [skycap.url],
                 SimpleNamespace(weight_version=7),
                 train_paths=train_paths,
+                check_first_batch=check_first_batch,
             )
         )
         return made[-1]
@@ -345,7 +346,7 @@ async def test_a_custom_rule_by_import_path_picks_the_rows_and_is_recorded(skyca
 
 @pytest.mark.asyncio
 async def test_a_failing_path_rule_masks_the_trial_without_running_it_again(skycap, trials, generator) -> None:
-    out = await generator(train_paths=BROKEN).generate(batch("linear"), disable_tqdm=True)
+    out = await generator(train_paths=BROKEN, check_first_batch=False).generate(batch("linear"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     assert len(trials.configs) == 1
@@ -357,7 +358,7 @@ async def test_a_failing_path_rule_masks_the_trial_without_running_it_again(skyc
 
 @pytest.mark.asyncio
 async def test_a_crashing_trial_is_finished_with_the_configured_rule(skycap, trials, generator) -> None:
-    await generator(train_paths="final").generate(batch("crash"), disable_tqdm=True)
+    await generator(train_paths="final", check_first_batch=False).generate(batch("crash"), disable_tqdm=True)
 
     ids = list(record.list_ids(skycap.server.record_dir))
     assert len(ids) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
@@ -429,7 +430,7 @@ async def test_an_agent_that_exits_on_skycaps_context_length_error_is_a_context_
 
 @pytest.mark.asyncio
 async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(skycap, trials, generator) -> None:
-    out = await generator().generate(batch("crash"), disable_tqdm=True)
+    out = await generator(check_first_batch=False).generate(batch("crash"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     urls = [config["agent"]["kwargs"]["api_base"] for config in trials.configs]
@@ -479,6 +480,30 @@ async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_reward
     assert metrics["generate/harbor/environment_setup_time_mean"] == pytest.approx(SETUP)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "batches, check, stops",
+    [
+        ([("silent",)], True, True),
+        ([("silent",)], False, False),
+        ([("silent", "linear")], True, False),
+        ([("linear",), ("silent",)], True, False),
+    ],
+    ids=["nothing trains", "check off", "one trajectory trains", "a later batch"],
+)
+async def test_a_first_batch_with_nothing_to_train_stops_the_run(skycap, trials, generator, batches, check, stops):
+    gen = generator(check_first_batch=check)
+    *earlier, last = batches
+    for scripts in earlier:
+        await gen.generate(batch(*scripts), disable_tqdm=True)
+    if stops:
+        with pytest.raises(RuntimeError, match=r"first batch \(1\).*~/trials.*skycap\.check_first_batch=false"):
+            await gen.generate(batch(*last), disable_tqdm=True)
+    else:
+        out = await gen.generate(batch(*last), disable_tqdm=True)
+        assert len(out["trajectory_ids"]) == len(last)
+
+
 def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
     outcome = TrialOutcome(trajectory_id=TrajectoryID("a", 0), stop_reason="error")
 
@@ -524,7 +549,7 @@ async def test_with_r3_a_masked_instance_gets_distinct_dummy_routes(generator, t
 @pytest.mark.asyncio
 async def test_with_r3_a_trial_without_routes_is_retried_then_masked(generator, router, trials) -> None:
     router.routes = False
-    out = await generator(inference_engine=R3).generate(batch("linear"), disable_tqdm=True)
+    out = await generator(inference_engine=R3, check_first_batch=False).generate(batch("linear"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     assert len(trials.configs) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
