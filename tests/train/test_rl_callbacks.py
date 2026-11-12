@@ -493,7 +493,7 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
     asyncio.run(trainer.train())
 
     event_names = [name for name, _ in recorder.events]
-    # Unlike the synchronous trainer, the fully-async loop evaluates before it checkpoints.
+    # Like the synchronous trainer, the fully-async loop checkpoints before the weight sync and eval.
     expected = [
         "on_train_start",
         # --- eval before train ---
@@ -504,16 +504,16 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
         # --- step 1 ---
         "on_step_start",
         "on_step_end",
+        "on_save",  # forced
         "on_eval_start",  # forced
         "on_eval_end",
-        "on_save",  # forced
         "on_log",
         # --- step 2 ---
         "on_step_start",
         "on_step_end",
+        "on_save",  # interval
         "on_eval_start",  # interval
         "on_eval_end",
-        "on_save",  # interval
         "on_log",
         # --- epoch boundary + cleanup ---
         "on_epoch_end",
