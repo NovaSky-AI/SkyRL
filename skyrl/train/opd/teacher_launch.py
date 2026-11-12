@@ -26,9 +26,9 @@ if TYPE_CHECKING:
 def _teacher_start_port(cfg: "SkyRLTrainConfig") -> int:
     """The first port window past the student's launched servers.
 
-    Each server actor owns ``SERVER_PORT_STRIDE`` ports (HTTP port plus its DP TCPStore probe range)
-    from its base; the student's servers take ``num_engines * data_parallel_size`` windows from
-    ``VLLM_START_PORT``. With an external student nothing is launched and the teacher starts there.
+    Each server actor owns ``SERVER_PORT_STRIDE`` ports from its base; the student's servers take
+    ``num_engines * data_parallel_size`` windows from ``VLLM_START_PORT``. With an external student
+    nothing is launched and the teacher starts there.
     """
     student = cfg.generator.inference_engine
     student_launched = (

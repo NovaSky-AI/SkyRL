@@ -76,10 +76,9 @@ def create_inference_servers(
         placement_group: Optional resolved placement group for colocated
             training.  ``None`` when not colocated.
         start_port: Base of the first server's port window. Each server owns
-            ``SERVER_PORT_STRIDE`` ports from its base (HTTP port plus the DP
-            TCPStore probe range), so a second deployment on the same nodes
-            must start past the first one's ``num_engines * data_parallel_size``
-            windows.
+            ``SERVER_PORT_STRIDE`` ports from its base, so a second deployment
+            on the same nodes must start past the first one's
+            ``num_engines * data_parallel_size`` windows.
 
     Returns:
         An :class:`InferenceServerSetup` with the router, URLs, and
