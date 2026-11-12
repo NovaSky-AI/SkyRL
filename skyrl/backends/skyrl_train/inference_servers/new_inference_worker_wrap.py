@@ -362,6 +362,49 @@ class NewInferenceWorkerWrap:
 
         return discard_in_memory_adapter(lora_name)
 
+    # Debug probes for colocated weight sync (byte parity, memory, CuMem layout).
+
+    def skyrl_debug_weight_checksums(self) -> dict:
+        """Byte checksums of every parameter and buffer of the main model (debug only)."""
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            module_checksums,
+        )
+
+        torch.cuda.synchronize()
+        return module_checksums(self.model_runner.model)
+
+    def skyrl_debug_memory_stats(self, reset_peak: bool = False) -> dict:
+        """Torch allocator, device and CuMem-by-tag memory of this worker, in GiB."""
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            cumem_snapshot,
+            device_memory_snapshot,
+        )
+
+        out = {"device": device_memory_snapshot(), "cumem": cumem_snapshot()}
+        engine = getattr(self, "weight_transfer_engine", None)
+        stats = getattr(engine, "skyrl_receive_stats", None)
+        if stats is not None:
+            out["receive"] = dict(stats)
+        if reset_peak:
+            torch.cuda.reset_peak_memory_stats()
+        return out
+
+    def skyrl_debug_weight_allocation_map(self) -> dict:
+        """Layer -> ``weights`` CuMem allocation map of the loaded model (debug only)."""
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            weight_allocation_map,
+        )
+
+        return weight_allocation_map(self.model_runner.model)
+
+    def skyrl_debug_benchmark_create_and_map(self, restore: bool = True) -> list:
+        """Time CuMem re-mapping of fresh allocations, as a per-layer wake would do (debug only)."""
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            benchmark_create_and_map,
+        )
+
+        return benchmark_create_and_map(restore=restore)
+
     # Suspend / resume for non-colocated weight sync.
     #
     # Drives the per-worker CuMemAllocator directly instead of GPUWorker.sleep/

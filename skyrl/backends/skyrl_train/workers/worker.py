@@ -509,6 +509,10 @@ class Worker(DistributedTorchRayActor):
             "total": total,
         }
 
+    def get_last_weight_sync_stats(self) -> Optional[Dict[str, Any]]:
+        """Per-phase memory/time of this rank's last weight sync (``SKYRL_COLOCATED_SYNC_DEBUG=1`` only)."""
+        return getattr(self, "last_weight_sync_stats", None)
+
     def save_memory_snapshot(self, tag: str = ""):
         """Save a snapshot of memory usage on the Worker's CUDA device.
 
@@ -699,8 +703,24 @@ class Worker(DistributedTorchRayActor):
         # is incompatible with the VMM addresses expandable segments use; some
         # engines (sharded_rdt) share GPU memory on every run and ask for the
         # toggle unconditionally.
-        with self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments):
-            await self._weight_sync_thread(engine.send_weights)
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            PhaseRecorder,
+            debug_enabled,
+            instrument_send,
+            trainer_memory_cap,
+        )
+
+        recorder = PhaseRecorder("trainer_send") if debug_enabled() else None
+        with (
+            self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments),
+            trainer_memory_cap(),
+        ):
+            if recorder is None:
+                await self._weight_sync_thread(engine.send_weights)
+            else:
+                with recorder.phase("send"), instrument_send(engine, recorder):
+                    await self._weight_sync_thread(engine.send_weights)
+                self.last_weight_sync_stats = {"phases": recorder.phases, "counters": recorder.counters}
 
         if cache_reset_task is not None:
             await cache_reset_task
