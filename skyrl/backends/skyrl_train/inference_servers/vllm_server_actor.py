@@ -730,10 +730,14 @@ async def _build_and_serve_vllm_server(
 
     stat_loggers = None
     if enable_ray_prometheus_stats:
+        from vllm.v1.metrics.loggers import PrometheusStatLogger
         from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
 
-        logger.info("Enabling RayPrometheusStatLogger for vLLM engine metrics")
-        stat_loggers = [RayPrometheusStatLogger]
+        logger.info("Enabling native and Ray Prometheus loggers for vLLM engine metrics")
+        # Custom stat loggers disable vLLM's default native logger. Keep it
+        # explicit so adaptive admission can scrape each server's /metrics
+        # directly instead of scanning every Ray dashboard agent's full metric set.
+        stat_loggers = [RayPrometheusStatLogger, PrometheusStatLogger]
 
     engine = AsyncLLMEngine.from_engine_args(
         engine_args=engine_args,

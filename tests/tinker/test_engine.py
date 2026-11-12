@@ -1,21 +1,119 @@
+import asyncio
+import json
+import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from cloudpathlib import AnyPath
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session, SQLModel, select
 
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import FutureDB, ModelDB, RequestStatus, SessionDB
 from skyrl.tinker.engine import (
     TinkerEngine,
+    _DispatchedExternalSample,
+    _make_sampling_concurrency_controller,
     prepare_model_pass_batch,
     prepare_sample_batch,
 )
+from skyrl.utils.adaptive_concurrency import (
+    EngineLoadConcurrencyPolicy,
+    FixedConcurrencyPolicy,
+    SamplingConcurrencyController,
+)
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
+
+
+def test_sampling_policy_is_adaptive_only_for_managed_vllm():
+    adaptive = EngineConfig(
+        base_model=BASE_MODEL,
+        sampling_concurrency={"enabled": True, "policy": "engine_load", "initial_limit": 8},
+    )
+    controller = _make_sampling_concurrency_controller(adaptive, uses_managed_vllm=True)
+    assert controller is not None
+    assert isinstance(controller.policy, EngineLoadConcurrencyPolicy)
+
+    fixed = EngineConfig(
+        base_model=BASE_MODEL,
+        sampling_concurrency={"enabled": True, "policy": "fixed", "initial_limit": 8},
+    )
+    controller = _make_sampling_concurrency_controller(fixed, uses_managed_vllm=False)
+    assert controller is not None
+    assert isinstance(controller.policy, FixedConcurrencyPolicy)
+
+    with pytest.raises(ValueError, match="managed vLLM"):
+        _make_sampling_concurrency_controller(adaptive, uses_managed_vllm=False)
+
+
+def test_engine_load_policy_rejects_pd_role_ambiguity():
+    config = EngineConfig(
+        base_model=BASE_MODEL,
+        backend_config={"generator.inference_engine.enable_pd": True},
+        sampling_concurrency={"enabled": True, "policy": "engine_load"},
+    )
+
+    with pytest.raises(ValueError, match="does not yet support prefill/decode"):
+        _make_sampling_concurrency_controller(config, uses_managed_vllm=True)
+
+
+def test_engine_load_policy_does_not_depend_on_ray_prometheus_export():
+    config = EngineConfig(
+        base_model=BASE_MODEL,
+        backend_config={"generator.inference_engine.enable_ray_prometheus_stats": False},
+        sampling_concurrency={"enabled": True, "policy": "engine_load"},
+    )
+
+    controller = _make_sampling_concurrency_controller(config, uses_managed_vllm=True)
+
+    assert controller is not None
+    assert isinstance(controller.policy, EngineLoadConcurrencyPolicy)
+
+
+@pytest.mark.asyncio
+async def test_managed_vllm_feedback_producer_tracks_endpoint_changes(monkeypatch):
+    producers = []
+
+    class FakeProducer:
+        def __init__(self, controller, *, model_server_urls):
+            self.controller = controller
+            self.model_server_urls = model_server_urls
+            self.started = False
+            self.closed = False
+            producers.append(self)
+
+        def start(self):
+            self.started = True
+
+        async def aclose(self):
+            self.closed = True
+
+    metrics_module = ModuleType("skyrl.train.utils.vllm_metrics_scraper")
+    metrics_module.VLLMEngineFeedbackProducer = FakeProducer
+    monkeypatch.setitem(sys.modules, "skyrl.train.utils.vllm_metrics_scraper", metrics_module)
+    engine = object.__new__(TinkerEngine)
+    engine.sampling_concurrency_controller = SamplingConcurrencyController(
+        policy=FixedConcurrencyPolicy(), initial_limit=1
+    )
+    engine._vllm_feedback_producer = None
+    engine._active_feedback_urls = ()
+
+    await engine._replace_managed_vllm_feedback_producer(("http://first",))
+    await engine._replace_managed_vllm_feedback_producer(("http://second",))
+
+    assert producers[0].started
+    assert producers[0].closed
+    assert producers[1].started
+    assert producers[1].model_server_urls == ["http://second"]
+
+    await engine._replace_managed_vllm_feedback_producer(())
+    assert producers[1].closed
+    assert engine._vllm_feedback_producer is None
 
 
 @pytest.mark.parametrize("load_optimizer", [False, True])
@@ -331,6 +429,9 @@ def scheduling_engine():
     engine.db_engine = create_engine("sqlite:///:memory:", echo=False)
     enable_sqlite_wal(engine.db_engine)
     SQLModel.metadata.create_all(engine.db_engine)
+    engine.sampling_concurrency_controller = None
+    engine._forwarding_client = None
+    engine._external_samples = {}
     return engine
 
 
@@ -556,6 +657,212 @@ def test_find_batchable_sample_keeps_one_checkpoint_per_model(scheduling_engine)
     assert batchable[str(request_ids[0])][1].checkpoint_id == "ckpt_1"
 
 
+def test_internal_sample_dispatch_records_ownership(scheduling_engine):
+    engine = scheduling_engine
+    engine.config = EngineConfig(base_model=BASE_MODEL, backend="fsdp")
+    request_ids = add_futures(
+        engine,
+        [(types.RequestType.SAMPLE, "model_a", sample_payload("ckpt"))],
+    )
+
+    with Session(engine.db_engine) as session:
+        requests = engine.find_batchable_sample(session)
+        engine.dispatch_sample_requests(session, requests)
+
+    with Session(engine.db_engine) as session:
+        assert session.get(FutureDB, request_ids[0]).status == RequestStatus.DISPATCHED
+
+
+def test_external_samples_remain_pending_outside_the_service_window(scheduling_engine):
+    engine = scheduling_engine
+    engine._forwarding_client = object()
+    engine.sampling_concurrency_controller = SamplingConcurrencyController(
+        policy=FixedConcurrencyPolicy(), initial_limit=1
+    )
+    request_ids = add_futures(
+        engine,
+        [
+            (types.RequestType.EXTERNAL, "model_a", sample_payload("ckpt")),
+            (types.RequestType.EXTERNAL, "model_b", sample_payload("ckpt")),
+        ],
+    )
+
+    with Session(engine.db_engine) as session:
+        requests = engine.find_dispatchable_external_samples(session)
+        engine.dispatch_external_samples(session, requests)
+
+    assert set(requests) == {str(request_ids[0])}
+    with Session(engine.db_engine) as session:
+        statuses = {row.request_id: row.status for row in session.exec(select(FutureDB)).all()}
+    assert statuses == {
+        request_ids[0]: RequestStatus.DISPATCHED,
+        request_ids[1]: RequestStatus.PENDING,
+    }
+
+
+def test_engine_restart_requeues_dispatched_samples(scheduling_engine):
+    engine = scheduling_engine
+    request_ids = add_futures(
+        engine,
+        [
+            (types.RequestType.SAMPLE, "internal", sample_payload("ckpt")),
+            (types.RequestType.EXTERNAL, "external", sample_payload("ckpt")),
+            (types.RequestType.FORWARD, "training", forward_backward_payload()),
+        ],
+    )
+    with Session(engine.db_engine) as session:
+        session.exec(
+            FutureDB.__table__.update()
+            .where(FutureDB.request_id.in_(request_ids))
+            .values(status=RequestStatus.DISPATCHED)
+        )
+        session.commit()
+
+    engine._recover_dispatched_samples()
+
+    with Session(engine.db_engine) as session:
+        statuses = {row.request_id: row.status for row in session.exec(select(FutureDB)).all()}
+    assert statuses == {
+        request_ids[0]: RequestStatus.PENDING,
+        request_ids[1]: RequestStatus.PENDING,
+        request_ids[2]: RequestStatus.DISPATCHED,
+    }
+
+
+@pytest.mark.asyncio
+async def test_external_sample_task_crash_requeues_dispatched_request(scheduling_engine):
+    class CrashingForwardingClient:
+        async def call_and_store_result(self, *args, **kwargs):
+            raise RuntimeError("completion write failed")
+
+    engine = scheduling_engine
+    engine._forwarding_client = CrashingForwardingClient()
+    engine._forwarding_loop = asyncio.get_running_loop()
+    request_id = add_futures(
+        engine,
+        [(types.RequestType.EXTERNAL, "model_a", sample_payload("ckpt"))],
+    )[0]
+    with Session(engine.db_engine) as session:
+        requests = engine.find_dispatchable_external_samples(session)
+        engine.dispatch_external_samples(session, requests)
+
+    engine._submit_external_sample(str(request_id), "model_a", requests[str(request_id)][1])
+
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        with Session(engine.db_engine) as session:
+            if session.get(FutureDB, request_id).status == RequestStatus.PENDING:
+                break
+    else:
+        pytest.fail("crashed external sample was not returned to PENDING")
+
+
+@pytest.mark.asyncio
+async def test_failed_external_sample_does_not_report_a_successful_completion(scheduling_engine):
+    completions = []
+    forwarded = asyncio.Event()
+
+    class RecordingPolicy:
+        def on_feedback(self, feedback, context):
+            return None
+
+        def on_completion(self, completion, context):
+            completions.append(completion)
+            return None
+
+    class FailedForwardingClient:
+        async def call_and_store_result(self, *args, **kwargs):
+            forwarded.set()
+            return False
+
+    engine = scheduling_engine
+    engine._forwarding_client = FailedForwardingClient()
+    engine._forwarding_loop = asyncio.get_running_loop()
+    engine.sampling_concurrency_controller = SamplingConcurrencyController(
+        policy=RecordingPolicy(),
+        initial_limit=1,
+    )
+    request = types.SampleInput.model_validate(sample_payload("ckpt"))
+
+    engine._submit_external_sample("1", "model_a", request)
+    await asyncio.wait_for(forwarded.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert completions == []
+
+
+@pytest.mark.asyncio
+async def test_hard_pressure_cancels_and_requeues_youngest_external_request(tmp_path):
+    from sqlalchemy import create_engine
+
+    engine = object.__new__(TinkerEngine)
+    engine.db_engine = create_engine(f"sqlite:///{tmp_path / 'shedding.db'}", echo=False)
+    SQLModel.metadata.create_all(engine.db_engine)
+    request_ids = add_futures(
+        engine,
+        [
+            (types.RequestType.EXTERNAL, "old", sample_payload("ckpt")),
+            (types.RequestType.EXTERNAL, "young", sample_payload("ckpt")),
+        ],
+    )
+    with Session(engine.db_engine) as session:
+        session.exec(
+            FutureDB.__table__.update()
+            .where(FutureDB.request_id.in_(request_ids))
+            .values(status=RequestStatus.DISPATCHED)
+        )
+        session.commit()
+
+    async def block():
+        await asyncio.Event().wait()
+
+    tasks = [asyncio.create_task(block()) for _ in request_ids]
+    await asyncio.sleep(0)
+    engine._external_samples = {
+        request_id: _DispatchedExternalSample(request_id, float(index), tasks[index])
+        for index, request_id in enumerate(request_ids)
+    }
+
+    await engine._shed_external_samples(1, reason="engine_preemptions")
+
+    assert not tasks[0].cancelled()
+    assert tasks[1].cancelled()
+    with Session(engine.db_engine) as session:
+        statuses = {row.request_id: row.status for row in session.exec(select(FutureDB)).all()}
+    assert statuses == {
+        request_ids[0]: RequestStatus.DISPATCHED,
+        request_ids[1]: RequestStatus.PENDING,
+    }
+    tasks[0].cancel()
+    await asyncio.gather(tasks[0], return_exceptions=True)
+
+
+def test_cancel_requeue_does_not_overwrite_a_raced_completion(scheduling_engine):
+    engine = scheduling_engine
+    request_ids = add_futures(
+        engine,
+        [
+            (types.RequestType.EXTERNAL, "completed", sample_payload("ckpt")),
+            (types.RequestType.EXTERNAL, "cancelled", sample_payload("ckpt")),
+        ],
+    )
+    with Session(engine.db_engine) as session:
+        completed = session.get(FutureDB, request_ids[0])
+        completed.status = RequestStatus.COMPLETED
+        completed.result_data = json.dumps({"sequences": []})
+        dispatched = session.get(FutureDB, request_ids[1])
+        dispatched.status = RequestStatus.DISPATCHED
+        session.commit()
+
+    assert engine._requeue_external_samples(request_ids) == 1
+
+    with Session(engine.db_engine) as session:
+        completed = session.get(FutureDB, request_ids[0])
+        assert completed.status == RequestStatus.COMPLETED
+        assert json.loads(completed.result_data) == {"sequences": []}
+        assert session.get(FutureDB, request_ids[1]).status == RequestStatus.PENDING
+
+
 def test_payload_lookup_is_chunked(scheduling_engine):
     """A backlog larger than the per-statement id chunk must still resolve fully."""
     from skyrl.tinker.engine import _MAX_IDS_PER_QUERY
@@ -573,12 +880,6 @@ def test_payload_lookup_is_chunked(scheduling_engine):
 # ---------------------------------------------------------------------------
 # Continuous sampling (per-request future completion; drain before blocking ops)
 # ---------------------------------------------------------------------------
-
-import asyncio  # noqa: E402
-import threading  # noqa: E402
-import time  # noqa: E402
-
-from sqlmodel import select  # noqa: E402
 
 
 class _FakeContinuousBackend:
@@ -680,7 +981,7 @@ def test_continuous_sampling_completes_futures_independently(continuous_engine):
     engine.process_pending_requests_once()
 
     assert _wait_for(lambda: _future_status(engine, rid_fast) == RequestStatus.COMPLETED, timeout=3.0)
-    assert _future_status(engine, rid_slow) == RequestStatus.PENDING
+    assert _future_status(engine, rid_slow) == RequestStatus.DISPATCHED
     assert engine._sampler.inflight_count() == 1
 
     # Re-running the scheduler must not double-admit the in-flight request.

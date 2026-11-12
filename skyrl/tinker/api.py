@@ -53,11 +53,7 @@ from skyrl.tinker.db_models import (
     SessionDB,
     enable_sqlite_wal,
     get_async_database_url,
-)
-from skyrl.tinker.external_future_store import ExternalFutureStore
-from skyrl.tinker.extra import (
-    ExternalInferenceClient,
-    SkyRLTrainInferenceForwardingClient,
+    upgrade_request_status_schema,
 )
 from skyrl.tinker.proto_serialization import (
     PROTO_CONTENT_TYPE,
@@ -315,6 +311,7 @@ async def lifespan(app: FastAPI):
 
     async with app.state.db_engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
+        await upgrade_request_status_schema(conn)
 
     # Fail fast on a bad --torch-profiler rather than at the first request.
     app.state.profiler_cfg = None
@@ -340,7 +337,8 @@ async def lifespan(app: FastAPI):
     app.state.validated_sampler_checkpoints = set()
     app.state.sampler_checkpoint_validation_lock = asyncio.Lock()
 
-    # Setup external inference client if configured.
+    # Select the durable engine-owned forwarding lane. The API process only
+    # persists requests; TinkerEngine owns admission and execution.
     #
     # Three cases:
     #   1. external_inference_url set: forward sample requests to a fully
@@ -355,29 +353,17 @@ async def lifespan(app: FastAPI):
     # vLLM. Dedicated roles stay there for trainer-only rejection and
     # inference-only lazy startup.
     backend_name = app.state.engine_config.backend
-    store_ttls = dict(
-        retrieved_ttl_sec=app.state.engine_config.external_future_retrieved_ttl_sec,
-        completed_ttl_sec=app.state.engine_config.external_future_completed_ttl_sec,
-    )
     if app.state.engine_config.external_inference_url:
-        app.state.external_future_store = ExternalFutureStore(**store_ttls)
-        await app.state.external_future_store.start()
-        app.state.external_inference_client = ExternalInferenceClient(
-            app.state.engine_config, app.state.db_engine, app.state.external_future_store
-        )
+        app.state.external_inference_enabled = True
         logger.info(f"External engine configured: {app.state.engine_config.external_inference_url}")
     elif _should_forward_sample_requests(app.state.engine_config):
-        app.state.external_future_store = ExternalFutureStore(**store_ttls)
-        await app.state.external_future_store.start()
-        app.state.external_inference_client = SkyRLTrainInferenceForwardingClient(
-            app.state.engine_config, app.state.db_engine, app.state.external_future_store
-        )
+        app.state.external_inference_enabled = True
         logger.info(
-            "SkyRL-Train inference forwarding client enabled for non-colocated backend=%s",
+            "SkyRL-Train inference forwarding enabled for non-colocated backend=%s",
             backend_name,
         )
     else:
-        app.state.external_inference_client = None
+        app.state.external_inference_enabled = False
         logger.info("Using internal engine for inference")
 
     # Build subprocess command with engine config parameters.
@@ -1818,8 +1804,6 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
     )
     external_future_store = req.app.state.external_future_store
     if external_future_store is not None:
-        # Every external inference mode has a store, so this branch covers all
-        # forwarded samples; the DB path below is only for the internal engine.
         request_id = external_future_store.create(model_id, sample_input)
         external_future_store.spawn_forwarding_task(
             req.app.state.external_inference_client.call_and_store_result(
@@ -1827,9 +1811,14 @@ async def asample(request: SampleRequest, req: Request, session: AsyncSession = 
             )
         )
     else:
+        external_inference_enabled = getattr(
+            req.app.state,
+            "external_inference_enabled",
+            bool(getattr(req.app.state, "external_inference_client", None)),
+        )
         request_id = await create_future(
             session=session,
-            request_type=types.RequestType.SAMPLE,
+            request_type=types.RequestType.EXTERNAL if external_inference_enabled else types.RequestType.SAMPLE,
             model_id=model_id,
             request_data=sample_input,
         )

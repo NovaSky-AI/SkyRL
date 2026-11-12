@@ -260,7 +260,7 @@ class SkyRLTrainBackend(AbstractBackend):
         # (e.g. the Tinker engine subprocess) wires the persistence side via
         # set_inference_state_publisher. None when running outside a host
         # that needs to be notified (unit tests, non-Tinker uses).
-        self._inference_state_publisher: Callable[[str | None], None] | None = None
+        self._inference_state_publisher: Callable[[str | None, list[str] | None], None] | None = None
 
     def has_model(self, model_id: str) -> bool:
         return model_id in self._model_ids_to_role
@@ -467,18 +467,25 @@ class SkyRLTrainBackend(AbstractBackend):
         self._dispatch.init_weight_sync_state(self._inference_engine_client)
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
-    def set_inference_state_publisher(self, publisher: Callable[[str | None], None]) -> None:
-        """Wire a callback invoked when the inference proxy URL changes.
+    def set_inference_state_publisher(
+        self,
+        publisher: Callable[[str | None, list[str] | None], None],
+    ) -> None:
+        """Wire a callback invoked when managed inference endpoints change.
 
         Called by the host (e.g. the Tinker engine subprocess) after backend
-        construction. The callback receives the current proxy URL after a
-        new inference engine is brought up, or ``None`` on teardown. The
-        backend has no opinion on what the callback does — typical use is
-        to persist the URL somewhere the API process can read.
+        construction. The callback receives the client-facing proxy URL and
+        direct server URLs after new inference engines are brought up, or
+        ``None``/``None`` on teardown. The host may persist the proxy while
+        using direct URLs for engine-local control signals.
         """
         self._inference_state_publisher = publisher
 
-    def _publish_inference_state(self, proxy_url: str | None) -> None:
+    def _publish_inference_state(
+        self,
+        proxy_url: str | None,
+        server_urls: list[str] | None = None,
+    ) -> None:
         """Invoke the publisher if set; best-effort (failure must not raise).
 
         Callers rely on local state being reset regardless of publish outcome.
@@ -486,7 +493,7 @@ class SkyRLTrainBackend(AbstractBackend):
         if self._inference_state_publisher is None:
             return
         try:
-            self._inference_state_publisher(proxy_url)
+            self._inference_state_publisher(proxy_url, server_urls)
         except Exception as e:
             logger.warning(f"Inference-state publisher failed (proxy_url={proxy_url!r}): {e}")
 
@@ -521,7 +528,7 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # Publish inference endpoint so the API can forward samples directly
         # (only meaningful in non-colocated mode; the API gates on this).
-        self._publish_inference_state(server_setup.proxy_url)
+        self._publish_inference_state(server_setup.proxy_url, server_setup.server_urls)
 
         # In the new (HTTP) inference path the engines stay resident on the GPUs
         # after init. Under colocate_all those GPUs are shared with training, so
