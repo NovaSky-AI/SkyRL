@@ -699,7 +699,7 @@ class MegatronConfig(BaseConfig):
     ``True`` / ``False`` force both empties on / off."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
-    Used for bridge and RoPE resolution. Not a general HF-config override -- use
+    Used for bridge resolution. Not a general HF-config override -- use
     ``transformer_config_kwargs`` instead."""
     dist_ckpt_optim_fully_reshardable: bool = False
     """When True, use the "fully-reshardable" format for the distributed-optimizer checkpoint.
