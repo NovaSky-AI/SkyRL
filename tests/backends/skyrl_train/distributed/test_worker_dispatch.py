@@ -360,7 +360,8 @@ class TestSaveWeights:
     @pytest.mark.parametrize("fail", [False, True])
     async def test_colocated_sync_resumes_frozen_requests_after_the_kv_cache_wake(self, fail):
         """The partial-rollout trainer can sleep the engines with frozen requests. The sync then wakes
-        the allocator directly and resumes generation last, also when the transfer fails."""
+        the allocator directly and resumes generation last. When the transfer fails, the engines stay
+        asleep: the trainer model is still on the shared GPUs."""
         events = []
 
         def broadcast(*args, **kwargs):
@@ -381,7 +382,10 @@ class TestSaveWeights:
         else:
             await dispatch.save_weights_for_sampler()
 
-        assert events == ["wake_weights", "broadcast_done", "wake_kv_cache", "resumed"]
+        if fail:
+            assert events == ["wake_weights", "broadcast_done"]
+        else:
+            assert events == ["wake_weights", "broadcast_done", "wake_kv_cache", "resumed"]
         client.wake_up.assert_not_called()
 
     @pytest.mark.asyncio

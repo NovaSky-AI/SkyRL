@@ -911,18 +911,13 @@ class WorkerDispatch:
         if self._engines_hold_frozen_requests():
             # The partial-rollout trainer froze the in-flight requests and slept the allocator
             # (`sleep_with_frozen_requests`). Wake the allocator directly, so the scheduler stays
-            # paused until the KV cache is back. Wake the KV cache and resume even if the sync
-            # fails. Resume only after the KV cache wake succeeds, so the frozen requests never
-            # run on a sleeping KV cache.
-            async def _wake_kv_cache_then_resume() -> None:
-                await self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"])
-                await self._inference_engine_client.resume_generation()
-
-            async with cleanup_preserving_primary(
-                _wake_kv_cache_then_resume, "wake_for_weight_sync(kv_cache) and resume_generation"
-            ):
-                await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
-                await _broadcast_and_finish()
+            # paused until the KV cache is back. If the transfer fails, keep the engines asleep and
+            # the requests paused: the trainer model is still on the shared GPUs, and the error
+            # ends the run.
+            await self._inference_engine_client.wake_for_weight_sync(tags=["weights"])
+            await _broadcast_and_finish()
+            await self._inference_engine_client.wake_for_weight_sync(tags=["kv_cache"])
+            await self._inference_engine_client.resume_generation()
         elif self.colocate_all:
             await self._inference_engine_client.wake_up(tags=["weights"])
             await _broadcast_and_finish()
