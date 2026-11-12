@@ -142,6 +142,7 @@ from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
     RefWorkerBase,
+    _apply_adam_params_to_group,
 )
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -152,6 +153,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     reduce_metrics,
 )
 from skyrl.env_vars import SKYRL_MEGATRON_RANDOM_INIT, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.tinker import types
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import update_model_config
 from skyrl.utils.tok import get_tokenizer
@@ -713,7 +715,11 @@ class MegatronWorker:
             adapter,
             tp_size=mpu.get_tensor_model_parallel_world_size(),
             pp_size=mpu.get_pipeline_model_parallel_world_size(),
-            target_modules=None if lora_config.target_modules == "all-linear" else list(lora_config.target_modules),
+            target_modules=(
+                None
+                if isinstance(lora_config.target_modules, str) and lora_config.target_modules.lower() == "all-linear"
+                else list(lora_config.target_modules)
+            ),
         )
         if "output_layer" in plan.target_modules and self.cfg.fused_lm_head_logprob:
             raise ValueError(
@@ -1692,30 +1698,32 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             return opt.param_groups[0]["lr"]
         return self.optimizer.param_groups[0]["lr"]
 
-    def set_lr(self, learning_rate: float) -> None:
-        """
-        Set learning rate for the optimizer.
+    def set_optimizer_hparams(self, adam_params: types.AdamParams) -> None:
+        """Apply the request's ``AdamParams`` to the live optimizer before each ``optim_step``.
 
-        Handles both regular optimizers and ChainedOptimizer (used with
-        distributed optimizer). Updates all param_groups across all
-        underlying optimizers.
-
-        Note: This bypasses the scheduler. The next scheduler.step() call
-        will override this value unless the scheduler is configured for
-        constant LR. No-op when ``policy.inference_only_init=True``.
+        Megatron's distributed optimizer is a ``ChainedOptimizer`` whose inner optimizers
+        each own param groups and a config (``init_megatron_optim_config`` bakes the
+        build-time values into both). The param groups are rewritten per step through the
+        shared helper — no-decay groups keep their ``0`` — and ``grad_clip_norm`` is written
+        to each inner optimizer's ``config.clip_grad``, which its own ``step`` clips with.
+        No-op when the worker was initialized with ``policy.inference_only_init=True``.
         """
         if self.optimizer is None:
             return
         if isinstance(self.optimizer, ChainedOptimizer):
-            # ChainedOptimizer wraps multiple optimizers (e.g., for different param groups)
             for opt in self.optimizer.chained_optimizers:
                 if opt.optimizer is None:
                     continue
                 for param_group in opt.param_groups:
-                    param_group["lr"] = learning_rate
+                    _apply_adam_params_to_group(param_group, adam_params)
+                opt.config.clip_grad = adam_params.grad_clip_norm
         else:
             for param_group in self.optimizer.param_groups:
-                param_group["lr"] = learning_rate
+                _apply_adam_params_to_group(param_group, adam_params)
+            if hasattr(self.optimizer, "config"):
+                # The offload-to-disk and the generated Megatron optimizers both carry
+                # the OptimizerConfig they clip with; anything else would have no attr.
+                self.optimizer.config.clip_grad = adam_params.grad_clip_norm
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         """Resolve serialized FP8 before the parent builds the weight source."""
