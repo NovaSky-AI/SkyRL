@@ -50,9 +50,9 @@ MEGATRON_EP="${MEGATRON_EP:-16}"
 MEGATRON_ETP="${MEGATRON_ETP:-1}"
 
 # Chunks per MoE layer call during training. Each chunk repeats the routing, the expert all-to-all
-# and the kernel launches. Measured on 2 x 8 B200 (EP16) with this 2k/8k budget, together with
-# megatron_config.empty_cuda_cache=false: 1 chunk instead of 8 cut policy_train from 163 s to 60 s
-# and fwd_logprobs from 51 s to 21 s, for +4 GB peak (43.5 GB allocated). Raise it only to save memory.
+# and the kernel launches. Measured on 2 x 8 B200 (EP16) with this 2k/8k budget, at equal response
+# lengths: 1 chunk instead of 8 cut policy_train from 205 s to 61 s and fwd_logprobs from 68 s to
+# 21 s, for +4 GB peak (43.0 GB allocated). Raise it only to save memory.
 MLP_CHUNKS_FOR_TRAINING="${MLP_CHUNKS_FOR_TRAINING:-1}"
 
 MAX_PROMPT_LENGTH=2048
