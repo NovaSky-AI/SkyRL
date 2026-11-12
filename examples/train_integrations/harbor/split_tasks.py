@@ -68,6 +68,8 @@ def link(tasks_dir: Path, names: Sequence[str], out_dir: Path) -> None:
         )
     for stale in out_dir.iterdir():
         stale.unlink()
+    # A relative target would resolve against out_dir, not the directory the paths were given from.
+    tasks_dir = tasks_dir.absolute()
     for name in names:
         (out_dir / name).symlink_to(tasks_dir / name)
 

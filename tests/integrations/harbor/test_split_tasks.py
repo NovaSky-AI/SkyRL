@@ -55,6 +55,16 @@ def test_a_run_directory_holding_anything_but_task_symlinks_is_refused_and_left_
     assert stray.is_dir()
 
 
+def test_relative_paths_make_links_that_resolve(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    for name in NAMES:
+        (tmp_path / "data" / "CodeContests" / name).mkdir(parents=True)
+
+    main(["--tasks-dir", "data/CodeContests", "--run-dir", "runs/test", "--eval", "5", "--train", "8"])
+    links = [*(tmp_path / "runs/test/tasks").iterdir(), *(tmp_path / "runs/test/eval_tasks").iterdir()]
+    assert len(links) == 13 and all(link.is_dir() for link in links)
+
+
 def test_every_launch_rebuilds_the_run_directory_from_the_seed(tmp_path) -> None:
     tasks_dir = tmp_path / "CodeContests"
     for name in NAMES:
