@@ -172,8 +172,6 @@ class DeepseekV3Attention(nnx.Module):
         v = jnp.pad(v, ((0, 0), (0, 0), (0, 0), (0, self.qk_head_dim - self.v_head_dim)))
 
         is_causal = kv_cache is None
-        mps_sdpa_patched = getattr(jax.nn.dot_product_attention, "_mps_patched", False)
-        implementation = "xla" if mps_sdpa_patched and is_causal else None
         attn_output = jax.nn.dot_product_attention(
             q,
             k,
@@ -181,7 +179,7 @@ class DeepseekV3Attention(nnx.Module):
             scale=self.scaling,
             mask=attention_mask[:, None, None, :].astype(bool),
             is_causal=is_causal,
-            implementation=implementation,
+            implementation="xla" if is_causal else None,
         )
 
         attn_output = attn_output[:, :, :, : self.v_head_dim].reshape(B, T, self.num_heads * self.v_head_dim)
