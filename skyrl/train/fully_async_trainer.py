@@ -16,8 +16,7 @@ A subclass changes how generation and training share the GPUs through these hook
 - `_build_admission_controller`: the controller that admits generation groups into flight.
 - `_validate_placement_and_capacity`: the checks on `colocate_all` and `num_parallel_generation_workers`.
 - `_before_training_step`: runs after the mini-batch is collected and before training.
-- `_after_training_step`: runs after training and before the weight sync.
-- `_sync_weights_after_training_step`: pushes the new weights to the inference engines.
+- `_sync_weights_after_training_step`: runs after training; pushes the new weights to the inference engines.
 - `_save_step_checkpoints`: writes the step's checkpoint. The loop calls it after eval.
 - `_after_training_loop`: runs after the last epoch and before the final checkpoint.
 """
@@ -455,17 +454,15 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         The default does nothing: generation runs on its own GPUs while training runs."""
 
-    async def _after_training_step(self, force_save: bool, is_epoch_end: bool) -> None:
-        """Run after the training step and before the weight sync. The default does nothing.
+    async def _sync_weights_after_training_step(self, force_save: bool, is_epoch_end: bool) -> None:
+        """Push the new weights to the inference engines. The loop calls this after the training step.
+
+        The default lets the dispatch pause generation, transfer the weights, and resume generation.
 
         ``force_save`` and ``is_epoch_end`` are the arguments that the loop passes to
-        ``_save_step_checkpoints`` after eval. A subclass that must write the checkpoint before the
-        weight sync writes it here and overrides ``_save_step_checkpoints`` to do nothing."""
-
-    async def _sync_weights_after_training_step(self) -> None:
-        """Push the new weights to the inference engines.
-
-        The default lets the dispatch pause generation, transfer the weights, and resume generation."""
+        ``_save_step_checkpoints`` after eval. The default does not use them. A subclass that must
+        write the checkpoint before the weight sync writes it here first and overrides
+        ``_save_step_checkpoints`` to do nothing."""
         async with self._weight_sync_deadline():
             with self._phase_gauge.timed_phase("sync_weights", self.all_timings):
                 await self.dispatch.save_weights_for_sampler()
@@ -714,10 +711,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         # A training step completed: count it for this epoch's bookkeeping.
                         trained_steps_this_epoch += 1
                         is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
-                        await self._after_training_step(force_save, is_epoch_end)
 
                         # 4. After training: pause generation, sync weights, resume.
-                        await self._sync_weights_after_training_step()
+                        await self._sync_weights_after_training_step(force_save, is_epoch_end)
 
                     # One profiler step per async global step.
                     self._profiler_step()
