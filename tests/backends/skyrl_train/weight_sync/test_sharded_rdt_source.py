@@ -252,8 +252,10 @@ class TestRdtMegatronWeightSource:
         def __init__(self, names):
             self._names = names
 
-        def export_hf_weights(self, module, show_progress=False, conversion_tasks=None):
+        def export_hf_weights(self, module, show_progress=False, conversion_tasks=None, with_megatron_names=False):
             assert conversion_tasks is None, "the fallback exports the whole model in one call"
+            if with_megatron_names:
+                return ((n, torch.ones(2, 2), (n,)) for n in self._names)
             return ((n, torch.ones(2, 2)) for n in self._names)
 
     def _source(self, names):

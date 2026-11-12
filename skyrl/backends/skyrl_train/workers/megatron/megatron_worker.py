@@ -473,6 +473,14 @@ class MegatronWorker:
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
 
+        # The fused LM-head log-prob path multiplies the decoder output by the LM-head weight
+        # itself, so a soft-capping output layer (Gemma2, Inkling2) never runs there.
+        if getattr(self.cfg, "fused_lm_head_logprob", False) and getattr(provider, "final_logit_softcapping", None):
+            raise ValueError(
+                "trainer.fused_lm_head_logprob is not supported for models with final logit soft-capping "
+                f"(final_logit_softcapping={provider.final_logit_softcapping})."
+            )
+
         # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
         # the residual it would re-materialize is the n-stream tensor consumed by the mHC
         # mapping. Its own suggestion -- selective recompute with "mhc" in recompute_modules --
@@ -518,6 +526,11 @@ class MegatronWorker:
                 f"moe_enable_routing_replay is incompatible with virtual_pipeline_model_parallel_size={vpp_size}: "
                 "interleaved chunks desync the replay FIFO. Unset virtual_pipeline_model_parallel_size."
             )
+        # The fused router returns before it consults router replay (validate_cfg rejects it in
+        # transformer_config_kwargs). A provider can also default it on (Inkling2): turn it off.
+        if provider.moe_enable_routing_replay and getattr(provider, "moe_router_fusion", False):
+            provider.moe_router_fusion = False
+            logger.info("moe_enable_routing_replay: moe_router_fusion turned off (the fused router bypasses replay)")
 
         # MTP head count: megatron-bridge infers provider.mtp_num_layers from the model's HF config.
         if not enable_mtp:
@@ -652,6 +665,10 @@ class MegatronWorker:
                 lora_config.train_mlp,
                 include_gdn_in_proj=gdn_in_proj_lora_is_safe(self.bridge),
             )
+            # Models with linear layers outside the standard names (e.g. Inkling2's separate
+            # q / k / v projections) declare them on their provider.
+            if lora_config.train_attn:
+                target_modules += list(getattr(self.provider, "lora_all_linear_extra_targets", ()))
             if not (lora_config.train_attn and lora_config.train_mlp) and self._rank == 0:
                 group = "attn" if lora_config.train_attn else "mlp"
                 logger.info(f"LoRA restricted to {group} modules: {target_modules}")
@@ -1662,9 +1679,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         # whole accumulated window. Deferred out of forward_backward because the reduce
         # is not idempotent -- running it per call corrupts gradients once a window
         # spans more than one call.
+        started = time.perf_counter()
         self.model.run_pending_grad_sync()
+        torch.cuda.synchronize()
+        synced = time.perf_counter()
 
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+        torch.cuda.synchronize()
+        if torch.distributed.get_rank() == 0:
+            logger.info(
+                f"optim_step: grad sync {synced - started:.1f}s, optimizer step {time.perf_counter() - synced:.1f}s"
+            )
 
         # Clear the DDP grad buffers for the next window. `optimizer.zero_grad()` inside
         # `optimizer_step` only drops `param.grad` / the fp32 main-param grads -- the
@@ -1768,7 +1793,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         from skyrl.backends.skyrl_train.weight_sync.sources import MegatronWeightSource
 
-        source = MegatronWeightSource(self.bridge, self.actor_module, dtype)
+        source = MegatronWeightSource(
+            self.bridge,
+            self.actor_module,
+            dtype,
+        )
         if self._serialized_fp8_config is not None:
             from skyrl.backends.skyrl_train.weight_sync.sources import (
                 SerializedFp8WeightSource,
@@ -1880,6 +1909,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
                 or getattr(self.bridge.hf_pretrained, "name_or_path", "")
             ),
+            # Colocated, the woken engine leaves too little GPU memory for the whole adapter.
+            stage_on_host=bool(self.cfg.placement.colocate_all),
         )
 
     async def _publish_lora_adapter_in_memory(
@@ -2089,7 +2120,15 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # so sample(model=<model_id>) routes correctly. Single-tenant
             # (model_id=None) keeps the legacy shared path + name.
             cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
-            torch.cuda.empty_cache()
+            if self.cfg.placement.colocate_all:
+                # As for full weights below: the training step leaves activations in reference
+                # cycles that empty_cache alone cannot return, and the woken engine (and then its
+                # KV cache) needs that memory. Inkling2's rank-128 LoRA ran the KV-cache wake after
+                # the first post-training sync out of memory without it.
+                _release_gpu_garbage()
+            else:
+                torch.cuda.empty_cache()
+            _log_gpu_tensors("before adapter sync")
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             if self._lora_sync_mode_is_memory():
                 await self._publish_lora_adapter_in_memory(lora_name, inference_engine_client)
@@ -2098,11 +2137,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if cache_reset_task is not None:
                 await cache_reset_task
             if self.cfg.placement.colocate_all:
-                torch.cuda.empty_cache()
+                _release_gpu_garbage()
+            _log_gpu_tensors("after adapter sync")
             torch.distributed.barrier()
             return
 
+        if self.cfg.placement.colocate_all:
+            # The woken engine leaves the trainer ~30 GiB: release garbage the training step left
+            # (activations in reference cycles: 3-8 GiB per rank for Inkling2 full FT), cuBLAS
+            # workspaces and cached blocks, before the sync's gathers and again before the engine
+            # wakes its KV cache.
+            _release_gpu_garbage()
+        _log_gpu_tensors("before weight sync")
         await self._sync_weights_to_inference_engines(inference_engine_client, inference_engine_cfg)
+        if self.cfg.placement.colocate_all:
+            _release_gpu_garbage()
+        _log_gpu_tensors("after weight sync")
 
     def _set_pad_token_id(self, pad_token_id):
         # this already gets set in the init_model method
@@ -2324,3 +2374,43 @@ class MegatronCriticWorkerBase(MegatronWorker, CriticWorkerBase):
 PolicyWorker = ray.remote(num_gpus=1)(MegatronPolicyWorkerBase)
 RefWorker = ray.remote(num_gpus=1)(MegatronRefWorkerBase)
 CriticWorker = ray.remote(num_gpus=1)(MegatronCriticWorkerBase)
+
+
+def _release_gpu_garbage() -> None:
+    import gc
+
+    gc.collect()
+    torch._C._cuda_clearCublasWorkspaces()
+    torch.cuda.empty_cache()
+
+
+def _log_gpu_tensors(tag: str, top: int = 12) -> None:
+    """``SKYRL_DEBUG_GPU_TENSORS=1``: log this rank's allocator totals and its largest live CUDA
+    tensors (by storage), on each node's local rank 0. For tracking what a colocated trainer still
+    holds on the GPU when the inference engine needs it."""
+    if os.environ.get("SKYRL_DEBUG_GPU_TENSORS") != "1":
+        return
+    if torch.distributed.is_initialized() and torch.distributed.get_rank() % max(torch.cuda.device_count(), 1) != 0:
+        return
+    import gc
+
+    storages = {}
+    for obj in gc.get_objects():
+        try:
+            if isinstance(obj, torch.Tensor) and obj.is_cuda:
+                st = obj.untyped_storage()
+                key = st.data_ptr()
+                if st.nbytes() and key not in storages:
+                    storages[key] = (st.nbytes(), f"{tuple(obj.shape)} {obj.dtype} {type(obj).__name__}")
+        except Exception:  # noqa: BLE001
+            continue
+    biggest = sorted(storages.values(), key=lambda x: -x[0])[:top]
+    gib = 1024**3
+    free, total = torch.cuda.mem_get_info()
+    logger.info(
+        f"[gpu-tensors {tag}] rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 0}: "
+        f"device used {(total - free) / gib:.2f} GiB (free {free / gib:.2f}), allocated {torch.cuda.memory_allocated() / gib:.2f} GiB, reserved "
+        f"{torch.cuda.memory_reserved() / gib:.2f} GiB, live storages {len(storages)} "
+        f"({sum(n for n, _ in storages.values()) / gib:.2f} GiB): "
+        + "; ".join(f"{n / gib:.2f} GiB {d}" for n, d in biggest)
+    )

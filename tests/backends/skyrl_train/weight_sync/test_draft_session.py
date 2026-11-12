@@ -292,9 +292,12 @@ class TestFilteredMegatronWeightSource:
             def get_conversion_tasks(self, module):
                 return [SimpleNamespace(global_param_name=name) for name in names]
 
-            def export_hf_weights(self, module, show_progress=False, conversion_tasks=None):
+            def export_hf_weights(self, module, show_progress=False, conversion_tasks=None, with_megatron_names=False):
                 self.tasks_args.append(conversion_tasks)
-                return iter([(task.global_param_name, torch.zeros(2)) for task in conversion_tasks])
+                names = [task.global_param_name for task in conversion_tasks]
+                if with_megatron_names:
+                    return iter([(name, torch.zeros(2), (name,)) for name in names])
+                return iter([(name, torch.zeros(2)) for name in names])
 
         bridge = _Bridge()
         source = MegatronWeightSource(bridge, object(), torch.bfloat16, param_filter=is_megatron_draft_param)

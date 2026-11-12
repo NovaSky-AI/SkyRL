@@ -112,6 +112,17 @@ class TestPackedBufferSize:
         self._with_max_numel(monkeypatch, 151936 * 4096)
         assert _packed_buffer_size_bytes("m", 0.0, torch.float32) == 151936 * 4096 * 4
 
+    def test_a_splitting_source_sizes_the_floor_by_its_pieces(self, tmp_path):
+        """A source that sends a tensor in pieces (``MegatronWeightSource.wire_numel``) floors
+        the buffer at its largest piece, not the checkpoint's largest tensor."""
+        from safetensors.torch import save_file
+
+        # 2 GiB in bf16 as one tensor; 64 MiB per expert.
+        save_file({"experts": torch.empty(32, 4096, 8192, dtype=torch.uint8)}, str(tmp_path / "m.safetensors"))
+        assert _packed_buffer_size_bytes(str(tmp_path), 0.0, torch.bfloat16) == 32 * 4096 * 8192 * 2
+        per_expert = lambda name, shape: shape[1] * shape[2]  # noqa: E731
+        assert _packed_buffer_size_bytes(str(tmp_path), 0.0, torch.bfloat16, per_expert) == _1GiB
+
 
 def test_max_param_numel_skips_tensors_that_are_never_synced(tmp_path):
     """DeepSeek-V4.1's Engram tables stay in the inference engine; sizing the buffer for one would ask for
@@ -193,6 +204,25 @@ class TestIpcInitInfo:
 
     def test_backend_is_the_skyrl_key(self):
         assert _init_info("ipc")[0].backend == "skyrl_ipc"
+
+    def test_an_adapter_source_is_not_floored_at_the_checkpoint(self, monkeypatch):
+        """A LoRA adapter stream never carries checkpoint tensors: Inkling2's stacked experts
+        (15.2 GiB) floored the adapter's buffer and ran a colocated trainer out of memory."""
+        import skyrl.backends.skyrl_train.weight_sync.checkpoint_shapes as cs
+
+        monkeypatch.setattr(cs, "max_param_numel", lambda _p: 384 * 4608 * 4608 * 2)
+        info, _ = _build_sender_init_info(
+            backend="ipc",
+            ie_cfg=SimpleNamespace(weight_transfer_threshold_cuda_ipc_GB=1.0),
+            rank=0,
+            inference_world_size=4,
+            dtype=torch.bfloat16,
+            server_urls=["http://a"],
+            data_parallel_size=1,
+            base_model_path="/models/base",
+            size_from_checkpoint=False,
+        )
+        assert info.packed_buffer_size_bytes == _1GiB
 
 
 class TestShardedRdtInitInfo:

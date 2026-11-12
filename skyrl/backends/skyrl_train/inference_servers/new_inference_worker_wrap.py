@@ -362,6 +362,115 @@ class NewInferenceWorkerWrap:
 
         return discard_in_memory_adapter(lora_name)
 
+    # Debug probes for colocated weight sync (M0 of docs/design/colocated_weight_sync.md).
+
+    def skyrl_debug_weight_checksums(self) -> dict:
+        """Byte checksums of every parameter and buffer of the main model (debug only)."""
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            module_checksums,
+        )
+
+        torch.cuda.synchronize()
+        return module_checksums(self.model_runner.model)
+
+    def skyrl_debug_lora_checksums(self) -> dict:
+        """Byte checksums of every staged in-memory LoRA adapter, by name (debug only)."""
+        from skyrl.backends.skyrl_train.patches.vllm.patch_lora_in_memory import _STAGED
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            tensor_checksum,
+        )
+
+        return {name: {k: tensor_checksum(t) for k, t in a.tensors.items()} for name, a in _STAGED.items()}
+
+    def skyrl_debug_memory_stats(self, reset_peak: bool = False) -> dict:
+        """Torch allocator, device and CuMem-by-tag memory of this worker, in GiB."""
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            cumem_snapshot,
+            device_memory_snapshot,
+        )
+
+        out = {"device": device_memory_snapshot(), "cumem": cumem_snapshot()}
+        engine = getattr(self, "weight_transfer_engine", None)
+        stats = getattr(engine, "skyrl_receive_stats", None)
+        if stats is not None:
+            out["receive"] = dict(stats)
+        if reset_peak:
+            torch.cuda.reset_peak_memory_stats()
+        return out
+
+    def skyrl_debug_weight_allocation_map(self) -> dict:
+        """Layer -> ``weights`` allocation map of the loaded model (debug, M0)."""
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            weight_allocation_map,
+        )
+
+        return weight_allocation_map(self.model_runner.model)
+
+    def skyrl_debug_benchmark_create_and_map(self, restore: bool = True) -> list:
+        """Time CuMem re-mapping of fresh allocations, as a staged wake would do (debug, M0)."""
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            benchmark_create_and_map,
+        )
+
+        return benchmark_create_and_map(restore=restore)
+
+    def skyrl_enable_selective_sleep(self, staged_wake: bool = False) -> dict:
+        """Make every later level-2 sleep keep (on CPU) what the last reload did not rewrite.
+
+        See ``weight_sync/colocated/selective_sleep.py`` (M4a of the colocated design).
+        """
+        from skyrl.backends.skyrl_train.weight_sync.colocated import selective_sleep
+
+        selective_sleep.enable(staged_wake=staged_wake)
+        return selective_sleep.last_stats()
+
+    def skyrl_local_shard_info(self) -> dict:
+        """This worker's GPU, its index in ``update_weights`` lists, and the routed experts it serves.
+
+        For the colocated local-shard send (M2 of the colocated design). ``local_experts``
+        is None when the worker serves every expert (no vLLM expert parallelism), and
+        ``consistent`` is False if MoE layers disagree on placement (the trainer then
+        falls back to full tensors).
+        """
+        parallel = self.vllm_config.parallel_config
+        uuid = str(torch.cuda.get_device_properties(self.device.index).uuid)
+        local = None
+        consistent = True
+        num_experts = None
+        for module in self.model_runner.model.modules():
+            # A model's own expert layer can declare its experts directly
+            # (``skyrl_local_expert_ids() -> (ids, num_experts)``, e.g. Inkling2's BF16
+            # experts, sharded over the TP group); vLLM's FusedMoE has an expert_map.
+            declared = getattr(module, "skyrl_local_expert_ids", None)
+            if callable(declared):
+                ids, total = declared()
+                ids = tuple(int(i) for i in ids)
+            else:
+                emap = getattr(module, "expert_map", None)
+                if not isinstance(emap, torch.Tensor) or emap.dim() != 1:
+                    continue
+                ids = tuple(int(i) for i in torch.nonzero(emap >= 0).flatten().tolist())
+                total = int(emap.numel())
+            if local is None:
+                local, num_experts = ids, total
+            elif ids != local:
+                consistent = False
+        return {
+            "gpu_uuid": uuid,
+            "worker_index": parallel.data_parallel_index * parallel.world_size + self.rank,
+            "local_experts": list(local) if local is not None else None,
+            "num_experts": num_experts,
+            "consistent": consistent,
+        }
+
+    def skyrl_selective_sleep_stats(self) -> dict:
+        from skyrl.backends.skyrl_train.weight_sync.colocated import selective_sleep
+
+        stats = selective_sleep.last_stats()
+        stats["uncovered"] = selective_sleep.describe_uncovered(self.model_runner.model)
+        stats["staged_wake"] = selective_sleep.staged_stats()
+        return stats
+
     # Suspend / resume for non-colocated weight sync.
     #
     # Drives the per-worker CuMemAllocator directly instead of GPUWorker.sleep/
