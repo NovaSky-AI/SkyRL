@@ -45,6 +45,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
+    PolicyLossType,
     compute_approx_kl,
     ppo_critic_loss,
     score_centering_weight,
@@ -72,6 +73,7 @@ from skyrl.env_vars import (
     SKYRL_RAY_PG_TIMEOUT_IN_S,
     SKYRL_WORKER_NCCL_TIMEOUT_IN_S,
 )
+from skyrl.tinker import types as tinker_types
 from skyrl.train.config import TorchProfilerConfig, TrainerConfig
 from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.train.utils import deadline
@@ -84,6 +86,35 @@ from skyrl.train.utils.utils import (
 )
 
 _SET_AFFINITY = False
+
+
+def _apply_adam_params_to_group(param_group: dict, adam_params: tinker_types.AdamParams) -> None:
+    """Write the request's AdamParams into one optimizer param group.
+
+    Every Adam implementation in play (torch's eager and fused, Megatron's, apex's)
+    reads ``lr``/``betas``/``eps``/``weight_decay`` from the group inside ``step()``,
+    so per-step writes take effect without touching the optimizer objects.
+    ``weight_decay`` is only written where the optimizer already decays at build time,
+    so groups excluded from decay (e.g. Megatron's no-decay groups, ``wd_mult == 0``)
+    keep their ``0`` instead of decaying by the request's value. Whether a group
+    decays is a build-time decision, so it is latched here on the first visit: a
+    request's ``weight_decay=0`` zeroes a decaying group for that step only and later
+    requests can decay again, while structurally no-decay groups stay ``0`` forever.
+    """
+    param_group["lr"] = adam_params.learning_rate
+    param_group["betas"] = (adam_params.beta1, adam_params.beta2)
+    param_group["eps"] = adam_params.eps
+    if "skyrl_decaying_group" not in param_group:
+        # Megatron's structural exclusion lives in wd_mult: bias and 1-shape groups get 0.0
+        # while every group's weight_decay holds the same build-time default until the param
+        # scheduler folds wd_mult into it (after optimizer.step). A torch-built group carries
+        # no wd_mult; there the build-time weight_decay is the decision.
+        param_group["skyrl_decaying_group"] = (
+            param_group["wd_mult"] != 0.0 if "wd_mult" in param_group else bool(param_group["weight_decay"])
+        )
+    if param_group["skyrl_decaying_group"]:
+        param_group["weight_decay"] = adam_params.weight_decay
+
 
 # Allocation/free events kept in the ``record_memory`` history ring buffer. Live
 # blocks in a snapshot keep their allocation stacks regardless of this cap; it
@@ -428,6 +459,10 @@ class Worker(DistributedTorchRayActor):
         """Return this rank's last-window kernel summary, or None."""
         return self.profiler.get_kernel_summary() if self.profiler is not None else None
 
+    def get_device_name(self) -> str:
+        """Returns this worker's CUDA device name, e.g. ``"NVIDIA B200"``, or ``""`` without a GPU."""
+        return torch.cuda.get_device_name() if torch.cuda.is_available() else ""
+
     def _get_module_for_offload(self):
         """Return the model module(s) to be offloaded/backloaded. Megatron offloads `self.actor_module`. FSDP workers use `self.model` directly."""
         return self.model
@@ -738,18 +773,27 @@ class Worker(DistributedTorchRayActor):
             return None
         return self.optimizer.param_groups[0]["lr"]
 
-    def set_lr(self, learning_rate: float) -> None:
-        """
-        Set learning rate for the optimizer.
+    def set_optimizer_hparams(self, adam_params: tinker_types.AdamParams) -> None:
+        """Apply the request's ``AdamParams`` to the live optimizer before each ``optim_step``.
 
-        This directly updates the optimizer's param_groups, bypassing the scheduler.
-        Useful for external learning rate schedules (e.g., from Tinker). No-op when
-        ``policy.inference_only_init=True`` (no optimizer constructed).
+        ``lr``, ``betas``, ``eps`` and ``weight_decay`` live in the optimizer's param groups,
+        and every Adam implementation reads them from there on each step, so writing the
+        groups is all that is needed for the request's values to take effect.
+        ``weight_decay`` is only written where the optimizer already decays: groups excluded
+        at build time (e.g. Megatron's no-decay groups) keep their ``0``. ``grad_clip_norm``
+        (``0.0`` disables clipping, as in the Tinker SDK) is written wherever the backend
+        reads its per-step clip: an FSDP strategy clips with ``self.strategy.max_norm``,
+        and the Megatron worker overrides this method for its optimizer configs.
+        No-op when the worker was initialized with ``policy.inference_only_init=True``
+        (no optimizer constructed).
         """
         if self.optimizer is None:
             return
         for param_group in self.optimizer.param_groups:
-            param_group["lr"] = learning_rate
+            _apply_adam_params_to_group(param_group, adam_params)
+        # Only the FSDP strategies expose a per-step max_norm; other strategies clip elsewhere.
+        if hasattr(getattr(self, "strategy", None), "max_norm"):
+            self.strategy.max_norm = adam_params.grad_clip_norm
 
 
 # adapted from OpenReasonerZero: https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero/blob/main/orz/ppo/actors.py
@@ -1204,8 +1248,8 @@ class PolicyWorkerBase(Worker):
                 **score_centering_kwargs,
             )
 
-        # SFT path: skip KL/entropy terms, return per-token outputs for Tinker API
-        if resolved_loss_name == "cross_entropy":
+        # SFT objectives contain their complete loss and need no RL KL/entropy terms.
+        if resolved_loss_name == PolicyLossType.CROSS_ENTROPY:
             # Policy loss masks are pre-scaled to achieve the correct reduction
             # when summing across the entire minibatch (see `DefaultCollator`).
             # FSDP averages loss value over DP ranks by default,

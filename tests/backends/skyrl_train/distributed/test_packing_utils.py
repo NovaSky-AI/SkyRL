@@ -11,6 +11,20 @@ def test_packed_alignment_uses_layout_only_without_fp8():
     assert get_packed_seq_align_size(tp_size=1, cp_size=2) == 4
 
 
+def test_packed_alignment_with_cp_chunk_token_align():
+    """A model can require whole token blocks per CP chunk (Qwen4Exp: 4-token QSA blocks)."""
+    from skyrl.backends.skyrl_train.distributed.megatron import packing_utils
+
+    packing_utils.set_cp_chunk_token_align(4)
+    try:
+        assert get_packed_seq_align_size(tp_size=1, cp_size=2) == 16
+        assert get_packed_seq_align_size(tp_size=2, cp_size=2) == 16
+        assert get_packed_seq_align_size(tp_size=8, cp_size=2) == 32
+        assert get_packed_seq_align_size(tp_size=4, cp_size=1) == 4  # no CP: unchanged
+    finally:
+        packing_utils.set_cp_chunk_token_align(1)
+
+
 def test_packed_alignment_adds_fp8_local_rank_multiple():
     assert get_packed_seq_align_size(tp_size=4, cp_size=1, fp8_enabled=True) == 512
     assert get_packed_seq_align_size(tp_size=1, cp_size=2, fp8_enabled=True) == 32

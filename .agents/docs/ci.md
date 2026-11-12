@@ -14,7 +14,7 @@ survives only where it names a real thing (the `skyrl_train` package, the
 |---|---|---|---|
 | `SkyRL-CPU` | `cpu_skyrl.yaml` | — | pre-commit, `tests/train`, `tests/backends/skyrl_train` (CPU), `tests/tinker`, `tests/utils`, `skyrl-gym` |
 | `SkyRL-GPU` | `gpu_skyrl.yaml` | `anyscale_gpu_ci_skyrl.yaml` / `gpu_ci_run_skyrl.sh` | `tests/backends/skyrl_train/gpu/gpu_ci` |
-| `SkyRL-GPU-Megatron` | `gpu_skyrl_megatron.yaml` | `anyscale_gpu_ci_skyrl_megatron.yaml` / `gpu_ci_run_skyrl_megatron.sh` | the `megatron` marker |
+| `SkyRL-GPU-Megatron` | `gpu_skyrl_megatron.yaml` | `anyscale_gpu_ci_skyrl_megatron.yaml` / `gpu_ci_run_skyrl_megatron.sh` | the `megatron` marker, split between `megatron/` and the other GPU CI paths |
 | `Megatron-Model-GPU-CI` | `gpu_skyrl_megatron_models.yaml` | `anyscale_gpu_ci_skyrl_megatron_models.yaml` / `gpu_ci_run_skyrl_megatron_models.sh` | the `megatron_models` marker |
 | `H100-GPU-CI` | `gpu_ci_h100.yaml` | `anyscale_gpu_ci_h100.yaml` / `gpu_ci_run_h100.sh` | H100-only suites |
 | `Tinker-SkyRL-Backend-GPU` | `tinker_skyrl_backend_gpu.yaml` | `anyscale_tinker_skyrl_backend_gpu.yaml` / `gpu_ci_run_tinker_skyrl_backend.sh` | `tests/tinker/skyrl_train` |

@@ -4,10 +4,60 @@ import argparse
 import json
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from cloudpathlib import AnyPath
 from pydantic import BaseModel, ConfigDict, Field
+
+
+def flatten_backend_config(backend_config: dict) -> dict[str, Any]:
+    """Flatten nested mapping values in ``backend_config`` into dot-separated keys.
+
+    ``SkyRLTrainConfig.from_cli_overrides`` reads ``{"trainer.placement": {"colocate_all": False}}``
+    the same as ``{"trainer.placement.colocate_all": False}``. This returns the second form, so key
+    lookups see both spellings. Non-mapping values and empty mappings are kept as they are.
+    """
+    flat = {}
+    for key, value in backend_config.items():
+        if isinstance(value, dict) and value:
+            for sub_key, sub_value in flatten_backend_config(value).items():
+                flat[f"{key}.{sub_key}"] = sub_value
+        else:
+            flat[key] = value
+    return flat
+
+
+def check_backend_config(
+    backend_config_values: dict[str, Any],
+    server_values: dict[str, tuple[Any, str]],
+    unused_keys: dict[str, str] | None = None,
+) -> None:
+    """Reject ``backend_config`` keys the server sets itself to another value, or never uses.
+
+    Args:
+        backend_config_values: The flattened ``backend_config`` (see ``flatten_backend_config``).
+        server_values: Key to (the value the server sets, what sets it).
+        unused_keys: Key or key prefix to why no ``backend_config`` value for it is used.
+
+    Raises:
+        ValueError: Listing every offending key, so they can be fixed in one restart.
+    """
+    problems = []
+    for key, value in sorted(backend_config_values.items()):
+        unused = next(
+            (reason for prefix, reason in (unused_keys or {}).items() if key == prefix or key.startswith(prefix + ".")),
+            None,
+        )
+        if unused is not None:
+            problems.append(f"{key}={value!r}: {unused}")
+        elif key in server_values and value != server_values[key][0]:
+            server_value, reason = server_values[key]
+            problems.append(f"{key}={value!r}: {reason} ({server_value!r})")
+    if problems:
+        raise ValueError(
+            "--backend-config sets keys the Tinker server sets itself or does not use:\n"
+            + "\n".join(f"  {problem}" for problem in problems)
+        )
 
 
 class EngineConfig(BaseModel):

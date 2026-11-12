@@ -26,7 +26,7 @@ import re
 import time
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -49,7 +49,7 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt
-from skyrl.train.utils.rate_limiter import RateLimiterConfig, create_rate_limiter
+from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 from ..harbor.trial_metrics import TrialAttempts, trial_metrics
 from .compose import TrialOutcome, compose, split
@@ -155,14 +155,6 @@ class HarborSkycapGenerator(GeneratorInterface):
         kwargs.pop("collect_rollout_details", None)
         self.include_images = include_images
         self._rate_limiter = create_rate_limiter(getattr(generator_cfg, "rate_limit", None))
-        if remote_sandboxes(self._template) and not max_concurrency(getattr(generator_cfg, "rate_limit", None)):
-            # A provider's sandboxes count against an account quota others share, and every trial of a batch
-            # (eval: the whole eval set) would start one at once.
-            raise ValueError(
-                f"harbor_trial_config.environment runs sandboxes remotely ({environment_name(self._template)}): "
-                "cap how many run at once with generator.rate_limit.enabled=true and "
-                "generator.rate_limit.max_concurrency=<n>"
-            )
 
     async def close(self) -> None:
         """Close the pool's HTTP session. The generator can't generate afterwards."""
@@ -365,6 +357,8 @@ class HarborSkycapGenerator(GeneratorInterface):
             for provider in ("OPENAI", "HOSTED_VLLM"):
                 env[f"{provider}_API_BASE"] = base_url
                 env[f"{provider}_API_KEY"] = key
+            # Codex and Harbor's other OpenAI-SDK-style agents read OPENAI_BASE_URL, not the LiteLLM names above.
+            env["OPENAI_BASE_URL"] = base_url
             env["MSWEA_API_KEY"] = key
         kwargs = config["agent"]["kwargs"]
         kwargs["api_base"] = base_url
@@ -386,34 +380,10 @@ def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
     # As Harbor picks the agent (AgentFactory.create_agent_from_config): a known name wins over an import path.
     name, import_path = agent.get("name"), agent.get("import_path")
     if name is not None and name in AgentName.values():
-        cls = AgentFactory._AGENT_MAP.get(AgentName(name))
+        cls = AgentFactory.get_agent_class(AgentName(name))
     elif import_path:
         module, _, attribute = import_path.partition(":")
         cls = getattr(importlib.import_module(module), attribute)
     else:
         return False
     return isinstance(cls, type) and issubclass(cls, BaseInstalledAgent)
-
-
-#: Harbor environments whose sandboxes run on this machine or cluster, not in a provider's account.
-LOCAL_ENVIRONMENTS = frozenset({"docker"})
-
-
-def environment_name(template: Dict[str, Any]) -> str:
-    """The trial's environment, as Harbor picks it: an import path over a type, Docker by default."""
-    environment = template.get("environment") or {}
-    return environment.get("import_path") or str(environment.get("type") or "docker")
-
-
-def remote_sandboxes(template: Dict[str, Any]) -> bool:
-    """Whether the trial's sandboxes run remotely (Daytona, Modal, ...)."""
-    return environment_name(template) not in LOCAL_ENVIRONMENTS
-
-
-def max_concurrency(rate_limit: Any) -> Optional[int]:
-    """``generator.rate_limit``'s cap on trials in flight, or None when it sets none."""
-    if isinstance(rate_limit, Mapping):
-        rate_limit = RateLimiterConfig(**rate_limit)
-    if rate_limit is None or not rate_limit.enabled:
-        return None
-    return rate_limit.max_concurrency

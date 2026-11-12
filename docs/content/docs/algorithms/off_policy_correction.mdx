@@ -283,14 +283,16 @@ Here $\pi^S_\theta$ and $\tilde q$ are the trainer and the sampler renormalized 
 | `cispo` with `cispo_anchor: rollout` | $\text{clamp}(r, 1-\epsilon_l, 1+\epsilon_h)$; truncated IS with `cispo_eps_clip_low: 1.0` |
 | `dppo` | $r$ inside DPPO's trust region, which depends on the advantage's sign |
 
-A loss weighted by $\pi_\theta / \pi_{\text{old}}$ (`regular`, `dual_clip`, `gspo`, `sapo`, `cispo` with `cispo_anchor: old`) is rejected: $\pi_{\text{old}}$ comes from the trainer itself, so that ratio never sees the training-inference mismatch.
+A loss weighted by $\pi_\theta / \pi_{\text{old}}$ (`regular`, `dual_clip`, `gspo`, `sapo`, `cispo` with `cispo_anchor: old`) does not qualify: $\pi_{\text{old}}$ comes from the trainer itself, so that ratio never sees the training-inference mismatch.
+
+`enable_score_centering` defaults to `null`, which turns score centering on whenever sample-support replay is on and the configuration qualifies, and leaves it off otherwise. The default `policy_loss_type`, `dppo`, qualifies, so enabling replay is enough. Set `enable_score_centering: false` to run replay without it, or `true` to raise an error when the configuration does not qualify.
 
 ```yaml
 trainer:
   algorithm:
-    policy_loss_type: rollout_is  # or reinforce, dppo, cispo with cispo_anchor: rollout
+    policy_loss_type: dppo  # the default; or rollout_is, reinforce, cispo with cispo_anchor: rollout
     enable_sample_support_replay: true
-    enable_score_centering: true
+    enable_score_centering: null  # the default: on here because replay is on and the loss qualifies
 generator:
   inference_engine:
     enable_return_sample_support_set: true
@@ -298,7 +300,7 @@ generator:
     top_k: 64  # must exceed the top-p nucleus
 ```
 
-Score centering rejects `tis_ratio_type` and the `token_mask_is_threshold_*` masks, which weight or drop only the sampled token by $\pi_{\text{old}} / \mu$; the loss's own $f$ is the importance correction instead. Sequence and outlier masks apply to both terms but are approximate, and they turn the skipped old-logprob forward pass back on.
+Score centering does not compose with `tis_ratio_type` (or the deprecated `use_tis`) or the `token_mask_is_threshold_*` masks, which weight or drop only the sampled token by $\pi_{\text{old}} / \mu$; the loss's own $f$ is the importance correction instead. With any of them set, the default leaves score centering off and an explicit `true` raises. Sequence and outlier masks apply to both terms but are approximate, and they turn the skipped old-logprob forward pass back on.
 
 Metrics, under `policy/`: `score_centering/term_abs_mean` (magnitude of the centering term), `score_centering/support_tv_mean` (total variation between trainer and sampler over the support), and `score_centering/sampler_row_mass_min` (the sampler mass captured on a row, below 1 when the capture missed part of the support).
 

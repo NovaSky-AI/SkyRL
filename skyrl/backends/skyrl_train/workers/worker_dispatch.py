@@ -475,17 +475,21 @@ class WorkerDispatch:
         self._save_memory_snapshot(model, "optim_step")
         return grad_norms[0]
 
-    def set_lr(self, model: str, learning_rate: float, model_id: Optional[str] = None) -> None:
-        """Set learning rate for model's optimizer.
+    def set_optimizer_hparams(self, model: str, adam_params, model_id: Optional[str] = None) -> None:
+        """Apply the request's AdamParams to the model's optimizer on all workers.
 
-        This directly updates the optimizer's param_groups on all workers,
-        bypassing the scheduler. Useful for external learning rate schedules.
+        lr, betas, eps and weight_decay are written into the optimizer's param groups
+        (replacing the scheduler-managed lr), and grad_clip_norm becomes the per-step
+        clip. Directly updates the param_groups, bypassing the scheduler; useful for
+        external optimization schedules (e.g. from Tinker).
         """
         self._ensure_on_gpu(model, need_optimizer=True, need_model=False)
         self.ensure_active_adapter(model, model_id)
         deadline.ray_get(
-            self._actor_groups[model].async_run_ray_method("pass_through", "set_lr", learning_rate=learning_rate),
-            "set_lr",
+            self._actor_groups[model].async_run_ray_method(
+                "pass_through", "set_optimizer_hparams", adam_params=adam_params
+            ),
+            "set_optimizer_hparams",
         )
 
     def set_algorithm_config(self, model: str, **kwargs) -> None:
@@ -572,6 +576,59 @@ class WorkerDispatch:
             raise
         except Exception as e:
             logger.warning(f"[profiler] dump_profiler_summary dispatch for {model} failed: {e}")
+            return None
+
+    def get_device_name(self, model: str) -> str:
+        """Returns the CUDA device name of ``model``'s first worker, or ``""`` if the call fails."""
+        actor = self._actor_groups[model]._actor_handlers[0]
+        try:
+            return deadline.ray_get(actor.get_device_name.remote(), "get_device_name")
+        except deadline.StepTimeoutError:
+            raise
+        except Exception as e:
+            logger.warning(f"[mfu] get_device_name dispatch for {model} failed: {e}")
+            return ""
+
+    def pop_train_compute_seconds(self, model: str) -> Optional[float]:
+        """Returns the slowest worker's seconds in ``forward_backward`` and ``optim_step``.
+
+        Counts time since the previous call and resets every worker's count. Returns None when the
+        backend doesn't track it or the call fails; this is telemetry.
+        """
+        if model not in self._actor_groups:
+            return None
+        refs = self._actor_groups[model].async_run_ray_method("pass_through", "pop_train_compute_seconds")
+        try:
+            seconds = [s for s in deadline.ray_get(refs, "pop_train_compute_seconds") if s is not None]
+        except deadline.StepTimeoutError:
+            raise
+        except Exception as e:
+            logger.warning(f"[mfu] pop_train_compute_seconds dispatch for {model} failed: {e}")
+            return None
+        return max(seconds) if seconds else None
+
+    def model_flops(
+        self, model: str, num_seqs: int, seqlen_sum: int, seqlen_squared_sum: int
+    ) -> Optional[Dict[str, float]]:
+        """Returns the forward + backward model FLOPs of a batch with these per-document statistics.
+
+        Every rank holds the same model config, so only the first worker is asked. Returns None
+        when the backend can't estimate FLOPs or the call fails; this is telemetry.
+        """
+        if model not in self._actor_groups:
+            return None
+        actor = self._actor_groups[model]._actor_handlers[0]
+        try:
+            return deadline.ray_get(
+                actor.model_flops.remote(
+                    num_seqs=num_seqs, seqlen_sum=seqlen_sum, seqlen_squared_sum=seqlen_squared_sum
+                ),
+                "model_flops",
+            )
+        except deadline.StepTimeoutError:
+            raise
+        except Exception as e:
+            logger.warning(f"[mfu] model_flops dispatch for {model} failed: {e}")
             return None
 
     def _save_memory_snapshot(self, model: str, tag: str) -> None:

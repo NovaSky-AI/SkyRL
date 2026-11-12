@@ -239,6 +239,13 @@ class SFTConfig(BaseConfig):
     ckpt_interval: int = 0  # <= 0 -> no checkpointing
     enable_ray_gpu_monitor: bool = True
     """Enable background Ray GPU/RAM metrics collection and logging to wandb."""
+    log_mfu: bool = True
+    """Log model FLOPs utilization (MFU) metrics each step.
+
+    Logs ``train/mfu``, ``train/mfu_e2e``, ``train/model_tflops_per_gpu``, ``train/flops_per_token``
+    and, under full activation recompute, ``train/hfu_est``. Megatron only; not logged for LoRA or
+    with active MTP heads, and the utilization ratios are not logged for FP8 training or on GPUs
+    without a known peak."""
     max_ckpts_to_keep: int = -1
     """-1 to keep all checkpoints, N to keep only the last N."""
     resume_from: str = ""  # "" = no resume, "latest" = latest checkpoint, or path to global_step_N dir
@@ -611,6 +618,12 @@ def validate_sft_cfg(cfg: SFTConfig) -> None:
             f"found sequence_parallel_size={cfg.sequence_parallel_size}, ulysses style sequence "
             f"parallel is not supported for megatron"
         )
+        if cfg.log_mfu:
+            from skyrl.train.utils.mfu import mfu_support
+
+            mfu_warning = mfu_support(cfg.strategy, cfg.megatron_config, cfg.model.lora.rank).warning
+            if mfu_warning:
+                logger.warning(mfu_warning)
 
     if cfg.megatron_config.optimizer_offload_to_disk.dir is not None:
         from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
@@ -697,6 +710,7 @@ def build_skyrl_config_for_sft(sft_cfg: SFTConfig) -> SkyRLTrainConfig:
 
     # Logging & checkpointing
     cfg.trainer.logger = sft_cfg.logger
+    cfg.trainer.log_mfu = sft_cfg.log_mfu
     cfg.trainer.project_name = sft_cfg.project_name
     cfg.trainer.run_name = sft_cfg.run_name
     cfg.trainer.tags = sft_cfg.tags

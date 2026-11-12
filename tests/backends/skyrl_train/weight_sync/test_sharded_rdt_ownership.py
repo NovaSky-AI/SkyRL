@@ -65,7 +65,7 @@ class TestPpLocalOwnership:
         src._owned_group_idx = []
         src._pp_geometry = lambda: (pp_size, my_pp)  # type: ignore[method-assign]
         src._exchange_pp_names = lambda mine: gathered  # type: ignore[method-assign]
-        src._meta = src._assemble_pp_metadata([])
+        src.__dict__["metadata"] = src._assemble_pp_metadata([])
         return src
 
     def test_metadata_is_the_whole_model_group_major_on_every_stage(self):
@@ -82,7 +82,7 @@ class TestPpLocalOwnership:
             "model.norm.weight",
         ]
         for my_pp in (0, 1):
-            meta = self._source(2, my_pp, [stage0, stage1]).metadata()
+            meta = self._source(2, my_pp, [stage0, stage1]).metadata
             assert [m.name for m in meta] == expected
             assert [tuple(m.shape) for m in meta] == [(8, 4), (4, 4), (4, 4), (4,)]
         # ... and each stage claims exactly the names it produced.
@@ -94,6 +94,22 @@ class TestPpLocalOwnership:
             "model.layers.1.w",
             "model.norm.weight",
         ]
+
+    def test_assembled_metadata_keeps_each_names_wire_dtype(self):
+        """fp32 parameters (an MoE router) cross the RDT wire in fp32, as on the push
+        backends: the stages exchange each name's dtype with its shape, so every stage
+        declares the same per-name dtypes."""
+        stage0 = [
+            ("model.embed_tokens.weight", [8, 4], "bfloat16"),
+            ("model.layers.0.mlp.gate.weight", [2, 4], "float32"),
+        ]
+        stage1 = [
+            ("model.layers.1.mlp.gate.e_score_correction_bias", [2], "float32"),
+            ("model.norm.weight", [4], "bfloat16"),
+        ]
+        for my_pp in (0, 1):
+            meta = self._source(2, my_pp, [stage0, stage1]).metadata
+            assert [m.dtype for m in meta] == [torch.bfloat16, torch.float32, torch.float32, torch.bfloat16]
 
     def test_metadata_is_group_contiguous_even_when_a_stage_holds_both_ends(self):
         """The assembled order must satisfy the engine's group-contiguity check —
@@ -115,7 +131,7 @@ class TestPpLocalOwnership:
         per_stage = []
         for my_pp in (0, 1):
             src = self._source(2, my_pp, [stage0, stage1])
-            names = [m.name for m in src.metadata()]
+            names = [m.name for m in src.metadata]
             assert [n for g in layerwise_groups(names) for n in g] == names
             per_stage.append(names)
         assert per_stage[0] == per_stage[1]
@@ -142,7 +158,7 @@ class TestPpLocalOwnership:
         # Re-asking is still None: a demoted source holds everything.
         assert src.held_names() is None
         # Metadata is still the whole model, so the digest check still passes.
-        assert [m.name for m in src.metadata()] == [
+        assert [m.name for m in src.metadata] == [
             "model.embed_tokens.weight",
             "model.layers.0.w",
             "model.layers.1.w",
@@ -156,7 +172,7 @@ class TestPpLocalOwnership:
         the consumers two plan entries for one tensor — and mark its group shared."""
         tied = ("model.embed_tokens.weight", [8, 4])
         src = self._source(2, 0, [[tied, ("model.layers.0.w", [4, 4])], [tied]])
-        assert [m.name for m in src.metadata()] == ["model.embed_tokens.weight", "model.layers.0.w"]
+        assert [m.name for m in src.metadata] == ["model.embed_tokens.weight", "model.layers.0.w"]
         assert src._group_stages[0] == {0, 1}
         assert src.held_names() is None
 
@@ -261,7 +277,7 @@ class TestExpertOwnership:
 
     def test_stamps_are_expert_index_over_n_local_and_minus_one_elsewhere(self):
         src = self._stub(ep_size=2, my_ep_rank=1)
-        src._meta = self._meta_of(
+        src.__dict__["metadata"] = self._meta_of(
             ["embed.weight"]
             + [f"model.layers.0.mlp.experts.{e}.gate_proj.weight" for e in range(4)]
             + ["model.layers.0.input_layernorm.weight", "lm_head.weight"]
@@ -272,7 +288,7 @@ class TestExpertOwnership:
 
     def test_an_expert_count_not_divisible_by_ep_size_raises(self):
         src = self._stub(ep_size=2)
-        src._meta = self._meta_of([f"model.layers.0.mlp.experts.{e}.up_proj.weight" for e in range(3)])
+        src.__dict__["metadata"] = self._meta_of([f"model.layers.0.mlp.experts.{e}.up_proj.weight" for e in range(3)])
         with pytest.raises(RuntimeError, match="not divisible"):
             src._name_owner()
 
@@ -376,7 +392,7 @@ class TestHeldNamesComposition:
         src._layer_geom = {}
         src._phase = {}
         src._phase_prefix = ""
-        src._meta = [ParamMeta(n, torch.bfloat16, (2, 2)) for n in names]
+        src.__dict__["metadata"] = [ParamMeta(n, torch.bfloat16, (2, 2)) for n in names]
         if owned is not None:
             src._owned_group_idx = owned
             src._group_stages = []
@@ -449,6 +465,42 @@ class TestStampedYieldValidation:
     def test_unstamped_sources_are_never_checked(self):
         e = self._engine(None)
         e._validate_held_yields(0, ["anything"], [None])
+
+
+class TestYieldDtypeValidation:
+    """The consumers carve each packed slice by the dtype in the sender's
+    metadata, so a yielded tensor in another dtype must fail at the gather loop,
+    and ranks whose metadata differs only in a dtype must fail the digest check."""
+
+    @staticmethod
+    def _engine(dtypes):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
+            ParamMeta,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_trainer import (
+            SkyRLShardedRDTTrainerWeightTransferEngine,
+        )
+
+        e = SkyRLShardedRDTTrainerWeightTransferEngine.__new__(SkyRLShardedRDTTrainerWeightTransferEngine)
+        e._meta = [ParamMeta(f"w{i}", dt, (2,)) for i, dt in enumerate(dtypes)]
+        e._group_dtypes = [list(dtypes)]
+        return e
+
+    def test_matching_dtypes_pass(self):
+        e = self._engine([torch.bfloat16, torch.float32, torch.bfloat16])
+        e._validate_yield_dtypes(0, ["w0", "w1", "w2"], [torch.zeros(2, dtype=torch.bfloat16), torch.zeros(2), None])
+
+    def test_a_dtype_other_than_the_declared_one_raises(self):
+        e = self._engine([torch.bfloat16, torch.float32])
+        with pytest.raises(RuntimeError, match="metadata declares torch.float32"):
+            e._validate_yield_dtypes(
+                0, ["w0", "w1"], [torch.zeros(2, dtype=torch.bfloat16), torch.zeros(2, dtype=torch.bfloat16)]
+            )
+
+    def test_the_metadata_digest_covers_dtypes(self):
+        bf16 = self._engine([torch.bfloat16, torch.bfloat16])._meta_digest()
+        fp32 = self._engine([torch.bfloat16, torch.float32])._meta_digest()
+        assert bf16 != fp32
 
 
 @pytest.mark.megatron

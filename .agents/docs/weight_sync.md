@@ -99,20 +99,41 @@ disagree.
 ### Weight sources
 
 `sources.py` implements exactly vLLM's two-channel contract, and the two channels must
-agree element for element — `metadata()` declares what iteration will yield, and the
+agree element for element — `metadata` declares what `iter_full()` will yield, and the
 engine sizes the worker's receive buffers and cuts its packed chunk boundaries from it.
+Since vLLM 0.33, `metadata` must be a `functools.cached_property` (`WeightSource`
+rejects anything else at class definition) and iteration is `iter_full()`. A source whose
+metadata changes between rounds (the LoRA adapter) drops the cached value itself.
+
+vLLM 0.33's NCCL and IPC `trainer_init` read `source.metadata` for ownership checks. For a
+Megatron source that would be a full dry export at init, possibly against an offloaded
+model, so `build_trainer_engine` seeds the cached value empty for that call: metadata is
+first computed at the first send. The checks are vacuous for SkyRL (every rank owns every
+parameter). `sharded_rdt` reads real metadata at init, to plan the pulls.
+
+vLLM 0.33's NCCL engine also skips the names when a round's metadata equals the last one's,
+and the worker then looks the old update info up by `self.model`. SkyRL's receivers swap
+`self.model` for a per-round proxy, so that lookup would miss and the broadcast would hang:
+`SkyrlNCCLTrainerWeightTransferEngine.send_weights` resets `_sent_meta` so the names always
+ship, and the receive mixin clears vLLM's update-info cache after every round so no proxy
+(or the LoRA adapter copy it stages) outlives its round.
 `NCCLTrainerWeightTransferEngine._checked_iter` enforces that at runtime and names the
 first divergent parameter; the Megatron GPU test
 (`gpu_ci/megatron/test_megatron_weight_source.py`) is the regression check that gets
 there first.
 
 - `FsdpWeightSource` — `state_dict()` for metadata (FSDP2 `DTensor.shape` is already the
-  global shape, so declaring costs no collective); iteration all-gathers via
+  global shape, so declaring costs no collective); `iter_full()` all-gathers via
   `materialize_full_tensor`. `weight_prefix` handles syncing a CausalLM backbone into a
   vLLM multimodal namespace.
 - `MegatronWeightSource` — `bridge.export_hf_weights(conversion_tasks=None)`, a lazy
-  generator in HF-canonical order that gathers TP/PP/EP internally. `metadata()` must
+  generator in HF-canonical order that gathers TP/PP/EP internally. `metadata` must
   materialize once to learn shapes, so it runs a dry export and caches.
+  Tensors go out in the inference dtype except fp32 and integer ones (`sources.wire_dtype`):
+  parameters the trainer keeps in fp32 (MoE router expert bias, DeepSeek-V4 mHC weights and
+  attention sinks) and integer tables keep their dtype, so vLLM routes as the trainer does.
+  `MegatronStackedWeightSource` (sharded RDT) applies the same rule, and its PP-local
+  metadata exchange carries each name's dtype so every stage declares the same ones.
 - `LoraAdapterWeightSource` / `MegatronLoraAdapterSource` — a PEFT adapter rather than the
   model, for `lora.sync_mode=memory` (see *Targets* below). The one source that must be
   **prepared before the send**: the dedupe decides which keys exist, so one export has to
@@ -128,7 +149,25 @@ metadata is derived from that same serialized stream, so the trainer engine's bu
 layout remains identical to the tensors sent on the wire.
 
 The inference launch path supplies vLLM's FP8 dummy-load configuration, including the
-model-specific ignored layers. The receiver reload proxy recognizes the compact batched
+model-specific base exclude list. That quantization config is built entirely by SkyRL; a
+user-supplied `engine_init_kwargs.hf_overrides.quantization_config` raises an error.
+
+`generator.inference_engine.fp8_weight_sync_exclude_modules` (HF module-name globs) keeps
+more modules in the model dtype. `resolve_user_provided_exclude_list` expands it against
+the spec's `fp8_modules` (one name per FP8 tensor, as exported minus `.weight`); the driver
+calls it for the engine (`engine_exclude_list`, the spec's `base_exclude_list` plus the
+user's modules) and each trainer rank calls it for the sender
+(`SerializedFp8Config.user_provided_exclude_list`), on the same config, so the two cannot
+disagree. A pattern that matches nothing is rejected before engine init, and so is excluding
+only some of a layer's routed experts, which vLLM runs at one precision without rejecting the
+split; vLLM itself rejects excluding part of a fused module. Excluded routed experts go out
+in BF16 under their checkpoint names (Qwen3.5's stacked tensors, GLM-5's per-expert ones)
+through the model's own loader. The Megatron side has its
+own, independent knobs (`fp8_exclude_modules`, `num_layers_at_{start,end}_in_bf16`,
+`te_precision_config_file` on `MegatronConfig`); nothing checks the two sides against each
+other. See `fp8/models/README.md`.
+
+The receiver reload proxy recognizes the compact batched
 MoE FP8 tensors before forwarding ordinary weights to `model.load_weights`; this keeps
 the compact expert representation intact for both NCCL and IPC reloads. FP8 serialization
 is incompatible with the delta and sharded-RDT transfer backends.
@@ -372,7 +411,7 @@ change arrives for free):
 Three source flavors, chosen by `make_megatron_weight_source` / `make_fsdp_weight_source`:
 
 - `RdtFsdpWeightSource` — the shared FSDP source re-ordered **group-major**, so
-  `layerwise_groups` partitions `metadata()` exactly. The push backends do not care about
+  `layerwise_groups` partitions `metadata` exactly. The push backends do not care about
   order (any permutation transfers identically as long as the two channels agree), which
   is why only RDT pays for the reorder.
 - `MegatronStackedWeightSource` — PP-local and EP-local, gathering experts at stack
@@ -623,6 +662,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | `DeltaWeightTransferEngine` (receive side) | GPU `test_delta_weight_sync_e2e.py` only — it runs inside the vLLM worker |
 | Who pauses / resets the prefix cache | `test_prefix_cache_reset.py` **and** `distributed/test_worker_dispatch.py` |
 | `DeltaWeightSyncConfig` defaults or validation | `tests/train/test_config.py` |
+| Serialized FP8 (`fp8/` specs, exclusions, wire formats) | `tests/backends/skyrl_train/weight_sync/fp8/` (CPU; `test_fp8_exclusions_vllm.py` runs SkyRL's exclude list through vLLM's matching and needs the vllm extra) **and** GPU `megatron/test_megatron_models.py -m b200 -k mxfp8` (or `-m h100 -k full_fp8` on Hopper) |
 
 ## vLLM version coupling
 

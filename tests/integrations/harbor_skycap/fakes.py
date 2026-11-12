@@ -193,8 +193,12 @@ class FakeTrial:
         script = str(self.config["task"]["path"])
         kwargs = self.config["agent"]["kwargs"]
         # As the agent finds its endpoint: an installed one in the sandbox's environment, Terminus-2 in its kwargs.
+        # Harbor's Codex reads only OPENAI_BASE_URL (it writes it into Codex's config.toml) and ignores api_base.
         env = self.config["agent"].get("env") or {}
-        base_url = env.get("OPENAI_API_BASE") or kwargs["api_base"]
+        if self.config["agent"]["name"] == "codex":
+            base_url = env.get("OPENAI_BASE_URL")
+        else:
+            base_url = env.get("OPENAI_API_BASE") or kwargs["api_base"]
         # And its key, as an OpenAI client sends it: from the environment, or Terminus-2's llm_kwargs.
         api_key = env.get("OPENAI_API_KEY") or kwargs.get("llm_kwargs", {}).get("api_key")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}

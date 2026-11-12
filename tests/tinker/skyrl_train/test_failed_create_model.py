@@ -21,8 +21,10 @@ from skyrl.tinker import types  # noqa: E402
 
 
 def _backend() -> SkyRLTrainBackend:
+    overrides = MegatronBackendOverrides()
     backend = object.__new__(SkyRLTrainBackend)
-    backend._cfg = _build_skyrl_train_config("Qwen/Qwen3-0.6B", MegatronBackendOverrides())
+    backend.config = overrides  # _build_critic reads backend_config (model_extra) for the critic's LoRA alpha
+    backend._cfg = _build_skyrl_train_config("Qwen/Qwen3-0.6B", overrides)
     backend._colocate_pg = Mock()
     backend._tokenizer = Mock()
     backend._inference_engine_client = None
