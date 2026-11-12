@@ -384,9 +384,17 @@ class CompressedSparseAttention2(MegatronModule):
         attention_bias=None,
         packed_seq_params=None,
         csa2_state: Optional[CSA2State] = None,
+        boundary_hidden=None,
+        boundary_kv=None,
     ):
         assert attention_mask is None, "DeepSeek-V4.1 attention uses an implicit causal mask"
         assert packed_seq_params is None, "packed sequences are not supported for DeepSeek-V4.1 attention"
+        # megatron-core's DSv4 hybrid attention (since ed9c2c8c) passes the left-boundary rows a THD context-parallel
+        # rank borrows from its neighbour. They are only set under THD context parallelism, which this path does not
+        # support (packed sequences are rejected above), so they are always None here.
+        assert (
+            boundary_hidden is None and boundary_kv is None
+        ), "context-parallel boundary rows are not supported for DeepSeek-V4.1 attention"
         sq, b, _, _ = query.size()
         kv = key.squeeze(-2)
         if FAKE_QUANT_KV == "vllm":
