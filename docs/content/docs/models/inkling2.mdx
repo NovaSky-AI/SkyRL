@@ -1,0 +1,141 @@
+---
+title: "Inkling2"
+---
+
+| Model | Full FT | LoRA | MXFP8 | Min. hardware |
+|---|---|---|---|---|
+| [Inkling-2-Small](https://huggingface.co/thinkingmachines/Inkling-2-Small) | ✅ (4x8 B200) | ✅ (4x8 B200) | MXFP8 rollouts | 4x8 B200 |
+| [Inkling-2-Small-MXFP8](https://huggingface.co/thinkingmachines/Inkling-2-Small-MXFP8) | ✅ (4x8 B200) | ✅ (4x8 B200) | MXFP8 rollouts | 4x8 B200 |
+
+SkyRL has Day 0 support for [Inkling2](https://huggingface.co/thinkingmachines/Inkling-2-Small), Thinking Machines'
+~594B-parameter MoE (~17B active): full fine-tuning and LoRA, with BF16 or MXFP8 rollouts. The examples run DAPO on
+DAPO-Math-17K and evaluate on AIME24 and AIME25.
+
+<Callout type="warn">
+Inkling2 support lives on the [`inkling2-support`](https://github.com/erictang000/SkyRL/tree/inkling2-support) branch
+([#2730](https://github.com/NovaSky-AI/SkyRL/pull/2730)) until a vLLM release ships the model. The branch pins vLLM to a
+[build of the Inkling2 vLLM branch](https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/vllm-inkling2-b6efe5297-cu13torch2.14)
+(torch 2.14, CUDA 13, x86_64), which replaces SkyRL's vLLM for every model in that environment.
+</Callout>
+
+## The model
+
+- **Attention:** 48 layers of sliding-window attention (window 1024) with a global attention layer every sixth layer,
+  all with a learned relative-position bias.
+- **Block attention residuals:** each sub-layer reads a learned mixture of earlier block outputs instead of a single
+  residual stream.
+- **Short convolutions** on the attention and MLP paths.
+- **MoE:** 384 routed experts, top-8, sigmoid router with a selection-only bias.
+- **Precision:** the releases ship the routed experts in NVFP4 (`Inkling-2-Small`) or MXFP8 (`Inkling-2-Small-MXFP8`). Megatron trains them in BF16 (dequantized on
+  import), and vLLM serves them in BF16 or MXFP8, quantized from the synced BF16 weights.
+
+## Setup
+
+The examples run on 4 nodes of 8x B200 connected with InfiniBand, launched from the head node of a Ray cluster that
+spans them. Check out the branch:
+
+```bash
+git clone -b inkling2-support https://github.com/erictang000/SkyRL.git && cd SkyRL
+```
+
+The scripts are in
+[`examples/train/models/thinkingmachines/inkling2/`](https://github.com/erictang000/SkyRL/tree/inkling2-support/examples/train/models/thinkingmachines/inkling2),
+and all commands run from the repo root. `uv run` installs the pinned vLLM build.
+
+**Model and data.** Download both to the same path on every node (node-local storage or a shared filesystem):
+
+```bash
+# NVFP4 routed experts, ~390 GB (or thinkingmachines/Inkling-2-Small-MXFP8, ~620 GB)
+hf download thinkingmachines/Inkling-2-Small --local-dir /path/to/models/Inkling-2-Small
+
+# writes dapo-math-17k-cleaned.parquet, aime-2024-cleaned.parquet and aime-2025-cleaned.parquet
+DATA_DIR=$HOME/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+```
+
+The scripts read `MODEL_PATH` (default `thinkingmachines/Inkling-2-Small`) and `DATA_DIR` (default `$HOME/data/dapo`).
+Either release works as is: Megatron and vLLM dequantize the routed experts to BF16 as they load, and the release's own
+chat template is used.
+
+## Configurations
+
+| Configuration | Hardware | Placement | Script |
+|---|---|---|---|
+| Full FT (MXFP8 or BF16 rollouts) | 4x8 B200 | colocated | [`run_dapo_inkling2_fullft_colocated.sh`](https://github.com/erictang000/SkyRL/blob/inkling2-support/examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_fullft_colocated.sh) |
+| LoRA | 4x8 B200 | colocated | [`run_dapo_inkling2_lora_colocated.sh`](https://github.com/erictang000/SkyRL/blob/inkling2-support/examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_lora_colocated.sh) |
+
+Both scripts share these settings:
+
+- GRPO advantages, token-mean loss and the DAPO overlong penalty over the last 2,048 tokens of a 4,096-token response
+  budget
+- 128 prompts x 8 responses per step in mini-batches of 32
+- reasoning effort `0.1` (Inkling2's chat template takes a `reasoning_effort` between 0 and 1; the scripts pass it via
+  `generator.chat_template_kwargs`)
+- eval on AIME24 and AIME25 every 5 steps, four samples per problem
+
+### Full FT
+
+LR `1e-6`. Megatron (TP2 with sequence parallelism, EP32) and four vLLM engines (TP8) share all 32 GPUs and take turns:
+vLLM sleeps while Megatron trains, and Megatron is offloaded while vLLM generates.
+
+```bash
+MODEL_PATH=/path/to/models/Inkling-2-Small \
+  OPTIMIZER_STATE_DIR=/local/nvme/skyrl_optimizer_state \
+  bash examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_fullft_colocated.sh
+```
+
+- **Optimizer state off the GPU.** The FP32 master weights and Adam moments (~138 GiB per GPU) stream through the GPU in
+  chunks during each optimizer step. `OPTIMIZER_STORAGE=host` (default) keeps as much as fits in page-locked RAM and the
+  rest in files under `OPTIMIZER_STATE_DIR`, which should be a fast node-local disk.
+- **Bounded-memory weight sync.** The woken engines hold ~141 GiB per GPU, so the sync exports from the offloaded
+  Megatron params and sends each vLLM worker only its own experts.
+- **MXFP8 or BF16 rollouts.** With `ROLLOUT_EXPERTS=mxfp8` (default) vLLM quantizes the synced BF16 experts to MXFP8
+  as they load; `ROLLOUT_EXPERTS=bf16` serves them in BF16 (slower generation, smaller rollout/train gap).
+- **REINFORCE with R3, sample-support replay and score centering** (all on by default): vLLM returns each token's
+  experts and the trainer routes through them; rollouts sample from top-p 0.95 within top-k 64 and the trainer scores the
+  same support; and score centering subtracts each token's expected score under the sampler, cancelling the drift the
+  remaining rollout/train mismatch adds. This is the "MXFP8 + score centering + top-p" run in the results.
+
+### LoRA
+
+Rank-128, alpha-32 adapters on all linear layers, keeping the base model frozen, trained with clip-higher
+(0.2 / 0.28). The routed experts use rank 16
+(rank / top-k), with a separate adapter per expert (`SHARE_EXPERT_ADAPTERS=false`). LR `2e-5`. Megatron (TP2, EP32) and
+four vLLM engines (TP8) share all 32 GPUs, as in full FT; only the adapters are synced, in memory. Megatron's frozen base
+weights are offloaded to node-local disk (`SKYRL_FROZEN_OFFLOAD_DIR`) while vLLM generates.
+
+```bash
+MODEL_PATH=/path/to/models/Inkling-2-Small \
+  bash examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_lora_colocated.sh
+```
+
+## Results
+
+Inkling-2-Small on DAPO-Math-17K at reasoning effort 0.1 with the length penalty, 50 steps. Bold lines are EMA-smoothed,
+faint lines raw.
+
+**Full FT (BF16 rollouts) and LoRA.** The LoRA curve is rank 128 (experts at rank 16), the script's default, not rank 32.
+Both raise the train reward from ~0.46 to ~0.70, and the rollout/trainer logprob gap stays around 0.014-0.018.
+
+![Inkling-2-Small DAPO-Math-17K: reward and rollout/trainer logprob gap for full fine-tuning (BF16) and LoRA (rank 128)](/images/models/inkling2/inkling2_small_dapo_math_17k_reward_and_logprob_diff.png)
+
+**MXFP8 rollouts.** MXFP8 alone reaches the same reward, but its logprob gap starts at ~0.022 and grows past 0.03.
+Score centering with top-p sampling cuts the gap roughly in half (0.011-0.017) and learns slightly faster.
+
+![Inkling-2-Small DAPO-Math-17K with MXFP8 rollouts: reward and rollout/trainer logprob gap, with and without score centering and top-p](/images/models/inkling2/inkling2_small_dapo_math_17k_mxfp8_reward_and_logprob_diff.png)
+
+## Known limitations
+
+- No pipeline or context parallelism in Megatron.
+- The rollout/train gap still grows over long runs; consider adding an off-policy correction (TIS or masking) beyond
+  ~50 steps.
+
+## How it works
+
+- **Megatron-Bridge.** SkyRL adds an Inkling2 bridge with custom megatron-core modules for the block attention
+  residuals, the relative-bias attention (FlexAttention), the short convolutions and the softcapped SiTU-GLU experts,
+  checked against a plain PyTorch reference.
+- **vLLM.** A `vllm.general_plugins` entry point serves the model through SkyRL's `Inkling2ForRL`, which takes the BF16
+  weights the trainer syncs (in any subset, in place, so CUDA graphs stay valid) and serves the experts in BF16 or MXFP8.
+- **Weight sync.** Both scripts sync over CUDA IPC on the shared GPUs. Full FT exports from the offloaded Megatron
+  params and sends each vLLM worker only its local experts; LoRA sends only the adapters, each worker's slice of the
+  expert adapters.

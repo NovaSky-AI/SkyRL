@@ -12,6 +12,7 @@ The table below lists the model families we have tested on SkyRL. Each family ha
 | [Beam](/docs/models/beam) | 501B-A23B | ✅ | ✅ | MXFP8 | 2x8 B200 | ✅ |
 | [GLM-5.3](/docs/models/glm) | 753B | ✅ | ✅ | MXFP8, FP8 rollouts | 4x8 B300 | ✅ |
 | [GLM-5.3-Flash](/docs/models/glm) | 313B-A17B | ✅ | ✅ | | 1x8 B300 | ✅ |
+| [Inkling2](/docs/models/inkling2) | ~594B MoE (Inkling-2-Small) | ✅ | ✅ | MXFP8 rollouts | 4x8 B200 | ✅ ([#2730](https://github.com/NovaSky-AI/SkyRL/pull/2730), until vLLM ships the model) |
 | [Kimi K2.7](/docs/models/kimi) | 1T | ❌ | ✅ | INT4 QAT only | 2x8 B300 | ✅ |
 | [Kimi K2.5/K2.6](/docs/models/kimi) | 1T | ❌ | ✅ | INT4 QAT only | 2x8 B300 | Same arch as K2.7, should work |
 | [Nemotron-3.5](/docs/models/nemotron) | Lightning-30B-A3B | ✅ | | | 1x4 H100 | ✅ |
