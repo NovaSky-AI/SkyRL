@@ -13,6 +13,7 @@ served model: Codex's fallback metadata with ``apply_patch`` on.
 
 import asyncio
 import functools
+import hashlib
 import json
 import re
 import shlex
@@ -90,9 +91,13 @@ def base_instructions(version: Optional[str]) -> str:
     url = PROMPT_URL.format(ref=f"rust-v{version}" if version else "main")
     try:
         with urllib.request.urlopen(url, timeout=60) as response:
-            return without_update_plan_instructions(response.read().decode())
+            instructions = without_update_plan_instructions(response.read().decode())
     except OSError as error:
         raise RuntimeError(f"SkycapCodex couldn't fetch Codex's instructions from {url}: {error}") from error
+    # Enough to tell runs apart; each trial's agent logs keep the full text in model_catalog.json.
+    digest = hashlib.sha256(instructions.encode()).hexdigest()
+    logger.info(f"SkycapCodex: Codex's instructions from {url}, {len(instructions)} characters, sha256 {digest}")
+    return instructions
 
 
 def catalog_entry(slug: str, instructions: str) -> dict[str, Any]:
