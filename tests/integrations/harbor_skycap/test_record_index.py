@@ -32,6 +32,7 @@ from examples.train_integrations.harbor_skycap.record_index import (  # noqa: E4
     RecordLog,
     SkycapRecordIndex,
 )
+from skycap import CapturePool  # noqa: E402
 from skycap import record as skycap_record  # noqa: E402
 from skyrl.train.utils.callbacks import CallbackInput  # noqa: E402
 from tests.integrations.harbor_skycap import (
@@ -135,7 +136,7 @@ async def make_generator(skycap):
         url = (service or skycap).url
         made.append(
             HarborSkycapGenerator(
-                generator_cfg(), harbor_cfg(), [url], SimpleNamespace(weight_version=7), records=records
+                generator_cfg(), harbor_cfg(), CapturePool([url]), SimpleNamespace(weight_version=7), records=records
             )
         )
         return made[-1]

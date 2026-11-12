@@ -13,6 +13,7 @@ from skyrl.train.generators.base import StoredRolloutGroup  # noqa: E402
 from skyrl.train.generators.skycap_store import (  # noqa: E402
     SERVER_DIED_METRIC,
     SampleCache,
+    SkycapServers,
     StoredCapturePool,
     StoredPools,
 )
@@ -39,6 +40,17 @@ def test_a_group_s_samples_wait_however_long_its_slowest_trial_takes() -> None:
         cache.put(f"sibling-{i}", ["y"])
 
     assert cache.take("early") == ["x"]
+
+
+def test_the_servers_clients_pair_each_url_with_its_own_actor() -> None:
+    servers = SkycapServers(actors=["actor-a", "actor-b"], urls=["http://a:1", "http://b:2"], placement_group=None)
+
+    assert servers.http_pool().urls == servers.urls
+    stored = servers.stored_pools()
+    assert [(pool.urls, pool.actor) for pool in stored.pools] == [
+        (["http://a:1"], "actor-a"),
+        (["http://b:2"], "actor-b"),
+    ]
 
 
 def _pool(url: str) -> SimpleNamespace:

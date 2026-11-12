@@ -53,7 +53,6 @@ from skyrl.train.generators.skycap_store import (
     CapturedFinish,
     StoredCapturePool,
     StoredPools,
-    compose_stored_group,
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
@@ -107,20 +106,21 @@ class HarborSkycapGenerator(GeneratorInterface):
         self,
         generator_cfg: Any,
         harbor_cfg: Dict[str, Any],
-        capture_urls: List[str],
+        pool: CapturePool,
         inference_engine_client: Any = None,
         train_paths: str = "all",
         records: Optional[RecordLog] = None,
         include_images: bool = False,
         check_first_batch: bool = True,
-        servers: Any = None,
+        stored_pools: Optional[StoredPools] = None,
         support_id_bits: Optional[int] = None,
     ) -> None:
         """
         Args:
             generator_cfg: the run's generator config.
             harbor_cfg: Harbor's ``TrialConfig`` template.
-            capture_urls: the skycap servers to spread trajectories over.
+            pool: the client ``generate()`` spreads trajectories over, bringing their samples back here
+                (``SkycapServers.http_pool()``).
             inference_engine_client: read for its ``weight_version``, which keys the prefix-cache salt.
             train_paths: the skycap path rule every trajectory is finished with: ``all``, ``final``, or a custom
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
@@ -128,8 +128,9 @@ class HarborSkycapGenerator(GeneratorInterface):
             include_images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
             check_first_batch: raise when not one trajectory of the first ``generate`` or ``generate_to_ray``
                 call has anything to train (``skycap.check_first_batch``).
-            servers: the ``SkycapServers`` behind ``capture_urls``. With them, each group is
-                finished and composed on its server and stays in that node's object store.
+            stored_pools: the same servers' actor clients (``SkycapServers.stored_pools()``). With them,
+                ``generate_to_ray`` finishes and composes each group on one server and leaves it in that
+                node's object store.
             support_id_bits: the policy vocabulary's id width (``support_id_bits(vocab_size)``), at
                 which a stored group's sample-support member ids are packed.
         """
@@ -148,14 +149,9 @@ class HarborSkycapGenerator(GeneratorInterface):
             )
         self.generator_cfg = generator_cfg
         self._routed_experts = bool(getattr(generator_cfg.inference_engine, "enable_return_routed_experts", False))
-        self.capture_urls = list(capture_urls)
-        self.pool = CapturePool(self.capture_urls)
-        self.servers = servers
+        self.pool = pool
+        self.stored_pools = stored_pools
         self.support_id_bits = support_id_bits
-        # One pool per server actor; a stored group's trials all use one of them, chosen round-robin.
-        self.stored_pools = StoredPools(
-            [StoredCapturePool(url, servers.actor_for(url)) for url in self.capture_urls] if servers is not None else []
-        )
         self.inference_engine_client = inference_engine_client
         self.records = records
         served = generator_cfg.inference_engine.served_model_name
@@ -183,8 +179,8 @@ class HarborSkycapGenerator(GeneratorInterface):
     async def close(self) -> None:
         """Close the pools' HTTP sessions. The generator can't generate afterwards."""
         await self.pool.close()
-        for pool in self.stored_pools.pools:
-            await pool.close()
+        if self.stored_pools is not None:
+            await self.stored_pools.close()
 
     def _cache_salt(self) -> Optional[str]:
         if not getattr(self.generator_cfg, "use_cache_salt", False):
@@ -202,7 +198,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         return output
 
     async def generate_to_ray(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> StoredRolloutGroup:
-        if not self.stored_pools.pools:
+        if self.stored_pools is None:
             return await super().generate_to_ray(input_batch, disable_tqdm=disable_tqdm)
         if self.include_images:
             raise ValueError("a stored group carries no vision features: skycap.include_images needs generate()")
@@ -216,13 +212,11 @@ class HarborSkycapGenerator(GeneratorInterface):
             outcomes, metrics = await self._trials(input_batch, pool, finished, disable_tqdm)
         except BaseException:
             # Nothing will be composed: drop the samples the server cached for this group.
-            pool.actor.discard.remote(finished)
+            pool.discard(finished)
             raise
         composed = {o.capture_id for o in outcomes}
         discard = [trajectory_id for trajectory_id in finished if trajectory_id not in composed]
-        group = await compose_stored_group(
-            pool.actor, len(outcomes), outcomes, discard, self._compose_options(), self.support_id_bits
-        )
+        group = await pool.compose_group(outcomes, discard, self._compose_options(), self.support_id_bits)
         group.group_fields["rollout_metrics"].update(metrics)
         return group
 

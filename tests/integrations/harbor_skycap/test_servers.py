@@ -69,7 +69,7 @@ async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_pat
         FakeTrial.configs = []
         monkeypatch.setattr(harbor_generator, "Trial", FakeTrial)
         gen = harbor_generator.HarborSkycapGenerator(
-            generator_cfg(), harbor_cfg(), servers.urls, SimpleNamespace(weight_version=1)
+            generator_cfg(), harbor_cfg(), servers.http_pool(), SimpleNamespace(weight_version=1)
         )
         out = await gen.generate(batch("linear", repetitions=4), disable_tqdm=True)
         assert sum(out["loss_masks"][0]) > 0
@@ -116,7 +116,7 @@ async def test_each_server_exposes_its_harness_routes_to_agents_in_sandboxes(loc
         agent = harbor_cfg()
         agent["agent"]["name"] = "mini-swe-agent"
         gen = harbor_generator.HarborSkycapGenerator(
-            generator_cfg(), agent, servers.urls, SimpleNamespace(weight_version=1)
+            generator_cfg(), agent, servers.http_pool(), SimpleNamespace(weight_version=1)
         )
         out = await gen.generate(batch("linear", repetitions=4), disable_tqdm=True)
         assert sum(out["loss_masks"][0]) > 0
@@ -189,11 +189,11 @@ async def stored(local_ray, tmp_path, monkeypatch):
             harbor_generator.HarborSkycapGenerator(
                 generator_cfg(**cfg),
                 harbor_cfg(),
-                servers.urls,
+                servers.http_pool(),
                 SimpleNamespace(weight_version=1),
                 train_paths=train_paths,
                 records=records,
-                servers=servers,
+                stored_pools=servers.stored_pools(),
                 support_id_bits=support_id_bits,
                 check_first_batch=check_first_batch,
             )

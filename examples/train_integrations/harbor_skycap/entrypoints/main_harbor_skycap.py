@@ -214,13 +214,13 @@ class HarborSkycapExp(HarborExp):
         self.generator = HarborSkycapGenerator(
             generator_cfg=cfg.generator,
             harbor_cfg=cfg.harbor_trial_config,
-            capture_urls=self.skycap.urls,
+            pool=self.skycap.http_pool(),
             inference_engine_client=inference_engine_client,
             train_paths=cfg.skycap.train_paths,
             records=self.records,
             include_images=cfg.skycap.include_images,
             check_first_batch=cfg.skycap.check_first_batch,
-            servers=self.skycap,
+            stored_pools=self.skycap.stored_pools(),
             support_id_bits=(
                 support_id_bits(
                     AutoConfig.from_pretrained(cfg.trainer.policy.model.path, trust_remote_code=True)

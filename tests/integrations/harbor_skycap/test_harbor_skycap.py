@@ -28,7 +28,7 @@ from examples.train_integrations.harbor_skycap.compose import (  # noqa: E402
 from examples.train_integrations.harbor_skycap.harbor_generator import (
     HarborSkycapGenerator,  # noqa: E402
 )
-from skycap import CaptureService, Sample, record  # noqa: E402
+from skycap import CapturePool, CaptureService, Sample, record  # noqa: E402
 from skycap.graph import MessageGraph  # noqa: E402
 from skycap.paths import Row, final_path  # noqa: E402
 from skycap.tokens.engine import EngineError  # noqa: E402
@@ -172,7 +172,7 @@ async def generator(skycap):
             HarborSkycapGenerator(
                 generator_cfg(**cfg),
                 harbor_cfg(),
-                [skycap.url],
+                CapturePool([skycap.url]),
                 SimpleNamespace(weight_version=7),
                 train_paths=train_paths,
                 check_first_batch=check_first_batch,
@@ -560,17 +560,17 @@ async def test_with_r3_a_trial_without_routes_is_retried_then_masked(generator, 
 
 def test_the_generator_refuses_configs_it_cannot_serve() -> None:
     with pytest.raises(ValueError, match="step_wise_trajectories"):
-        HarborSkycapGenerator(generator_cfg(step_wise_trajectories=False), {}, ["http://x"])
+        HarborSkycapGenerator(generator_cfg(step_wise_trajectories=False), {}, CapturePool(["http://x"]))
     with pytest.raises(ValueError, match="merge_stepwise_output"):
-        HarborSkycapGenerator(generator_cfg(merge_stepwise_output=True), {}, ["http://x"])
+        HarborSkycapGenerator(generator_cfg(merge_stepwise_output=True), {}, CapturePool(["http://x"]))
     with pytest.raises(ValueError, match="served_model_name"):
         HarborSkycapGenerator(
-            generator_cfg(inference_engine=SimpleNamespace(served_model_name="a/b")), {}, ["http://x"]
+            generator_cfg(inference_engine=SimpleNamespace(served_model_name="a/b")), {}, CapturePool(["http://x"])
         )
     with pytest.raises(ValueError, match="pkg.module:function"):
-        HarborSkycapGenerator(generator_cfg(), {}, ["http://x"], train_paths="longest")
+        HarborSkycapGenerator(generator_cfg(), {}, CapturePool(["http://x"]), train_paths="longest")
     with pytest.raises(ModuleNotFoundError):
-        HarborSkycapGenerator(generator_cfg(), {}, ["http://x"], train_paths="nowhere_skycap_test:rule")
+        HarborSkycapGenerator(generator_cfg(), {}, CapturePool(["http://x"]), train_paths="nowhere_skycap_test:rule")
 
 
 def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(monkeypatch) -> None:
@@ -621,7 +621,7 @@ async def test_with_score_centering_support_carries_the_sampler_logprob_of_each_
     )
     service.start()
     generator = HarborSkycapGenerator(
-        generator_cfg(), harbor_cfg(), [service.url], SimpleNamespace(weight_version=7), train_paths="all"
+        generator_cfg(), harbor_cfg(), CapturePool([service.url]), SimpleNamespace(weight_version=7), train_paths="all"
     )
     try:
         out = await generator.generate(batch("linear"), disable_tqdm=True)

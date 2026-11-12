@@ -102,6 +102,29 @@ class StoredCapturePool(CapturePool):
             trajectory.id, annotations, paths=trajectory.paths, timeout=self.finish_timeout
         )
 
+    def discard(self, trajectory_ids: List[str]) -> None:
+        """Drop finished trajectories' cached samples without waiting; for a group that won't be composed."""
+        self.actor.discard.remote(trajectory_ids)
+
+    async def compose_group(
+        self,
+        outcomes: List[Any],
+        discard: List[str],
+        compose_options: Dict[str, Any],
+        support_id_bits: Optional[int] = None,
+    ) -> StoredRolloutGroup:
+        """The group the server composes from its cached samples (``StoredCaptureServer.compose_group``).
+
+        Its payloads stay on the server's node; the caller owns them, so they outlive the actor as long
+        as the node does.
+        """
+        refs = self.actor.compose_group.options(num_returns=len(outcomes) + 1).remote(
+            outcomes, discard, compose_options, support_id_bits
+        )
+        group: StoredRolloutGroup = await refs[0]
+        group.attach_payloads(refs[1:])
+        return group
+
 
 #: Times a group ran again because its server actor died; summed over a step's groups.
 SERVER_DIED_METRIC = "generate/errors/server_died"
@@ -119,6 +142,10 @@ class StoredPools:
         self.pools = list(pools)
         self._next = 0
         self._dead: set = set()
+
+    async def close(self) -> None:
+        for pool in self.pools:
+            await pool.close()
 
     def next(self) -> StoredCapturePool:
         for _ in range(len(self.pools)):
@@ -154,24 +181,12 @@ def stored_group_returns(output: GeneratorOutput, *, support_id_bits: Optional[i
     return (group, *payloads)
 
 
-async def compose_stored_group(actor: Any, num_trajectories: int, *args: Any) -> StoredRolloutGroup:
-    """Call ``actor.compose_group(*args)`` and attach the returned payloads, which stay on the actor's node.
-
-    The caller owns every returned object, so a payload outlives the actor that produced it as long
-    as its node does.
-    """
-    refs = actor.compose_group.options(num_returns=num_trajectories + 1).remote(*args)
-    group: StoredRolloutGroup = await refs[0]
-    group.attach_payloads(refs[1:])
-    return group
-
-
 class StoredCaptureServer(ABC):
     """One skycap server whose finished captures stay in its process until their group is composed.
 
     ``finish_trajectory`` finishes a capture here and returns the integration's ``checks`` on its
     samples; ``compose_group`` composes a group from the kept samples and returns its rows as separate
-    results (``compose_stored_group``). An integration subclasses it as a Ray actor, threaded
+    results (``StoredCapturePool.compose_group``). An integration subclasses it as a Ray actor, threaded
     (``max_concurrency``) so many rollouts finish at once, each waiting on the server's own loop.
     """
 
@@ -216,7 +231,7 @@ class StoredCaptureServer(ABC):
         compose_options: Dict[str, Any],
         support_id_bits: Optional[int] = None,
     ) -> Tuple[Any, ...]:
-        """Compose a group from the samples cached here; see ``compose_stored_group``.
+        """Compose a group from the samples cached here; see ``StoredCapturePool.compose_group``.
 
         ``outcomes`` carry everything but samples; each names the trajectory to take them from in
         ``capture_id``. ``discard`` lists the group's other finished trajectories (retried attempts).
@@ -231,7 +246,7 @@ class StoredCaptureServer(ABC):
 
 @dataclass
 class SkycapServers:
-    """A running pool of server actors, one per placement-group bundle. ``urls`` is what a generator is given."""
+    """A running pool of server actors, one per placement-group bundle, and the clients a generator uses."""
 
     actors: List[Any]
     urls: List[str]
@@ -239,8 +254,15 @@ class SkycapServers:
     stop_timeout: float = 600.0
     _stopped: bool = field(default=False, repr=False)
 
-    def actor_for(self, url: str) -> Any:
-        return self.actors[self.urls.index(url)]
+    def http_pool(self, *, timeout: float = 60.0) -> CapturePool:
+        """A client that spreads trajectories over every server and brings their samples back over HTTP."""
+        return CapturePool(self.urls, timeout=timeout)
+
+    def stored_pools(self, *, timeout: float = 60.0) -> StoredPools:
+        """A client per server actor, which finishes and composes a group on that server (``StoredPools.run``)."""
+        return StoredPools(
+            [StoredCapturePool(url, actor, timeout=timeout) for url, actor in zip(self.urls, self.actors)]
+        )
 
     def stop(self) -> None:
         """Stop every server, writing the trajectories still in memory, then kill the actors. Idempotent."""
