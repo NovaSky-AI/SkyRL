@@ -43,6 +43,10 @@ jobs:
         )
       )
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [megatron_dir, other]
     # GitHub-hosted runners cap a job at 6h; the Anyscale run timeout below (21000s)
     # leaves ~10 min of that for checkout, setup and submission.
     timeout-minutes: 360
@@ -89,10 +93,12 @@ jobs:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
           ANYSCALE_HOST: https://console.anyscale.com
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          MEGATRON_CI_SHARD: ${{ matrix.shard }}
         run: |
           envsubst < ci/anyscale_gpu_ci_skyrl_megatron.yaml > ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml
+          sed -i "s|^entrypoint:.*|entrypoint: bash ci/gpu_ci_run_skyrl_megatron.sh $MEGATRON_CI_SHARD|" ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          JOB_NAME="skyrl-gpu-ci-megatron-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
+          JOB_NAME="skyrl-gpu-ci-megatron-${MEGATRON_CI_SHARD}-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
           bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml "$JOB_NAME" 21000
           rm -f ci/anyscale_gpu_ci_skyrl_megatron_envsubst.yaml
       # Cancelling the run stops the runner, not the cluster. GitHub still runs
