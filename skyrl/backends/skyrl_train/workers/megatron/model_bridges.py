@@ -8,10 +8,6 @@ All registrations are guarded by a top-level ``try/except ImportError`` so that
 the rest of the codebase still works in CPU-only (no megatron-bridge) environments.
 """
 
-import logging
-
-logger = logging.getLogger(__name__)
-
 try:
     from megatron.bridge.models.conversion.mapping_registry import (
         MegatronMappingRegistry,
@@ -24,7 +20,6 @@ try:
     from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
     from megatron.bridge.models.qwen.qwen35_bridge import Qwen35Bridge, Qwen35MoEBridge
     from megatron.core.models.gpt.gpt_model import GPTModel
-    from megatron.core.utils import unwrap_model
 
     # DeepSeek-V4.1-Flash (deepseek_v41, text only) -> HybridModel. Importing registers the bridge, the
     # transformers config class and the V4.1 hybrid-model hooks.
@@ -254,58 +249,6 @@ try:
                 mapping.hf_param = _prefix_hf_param(mapping.hf_param, "language_model.")
             return MegatronMappingRegistry(*mapping_list)
 
-    # ------------------------------------------------------------------
-    # Drop unmapped (None) conversion tasks for *every* bridge.
-    #
-    # `build_conversion_tasks` is typed `List[None | WeightConversionTask]`: it
-    # leaves a None slot for any Megatron parameter its mapping registry has no
-    # entry for ("Skip tasks with no mapping found"). Upstream's consumers only
-    # guard `task.megatron_module is None`, not `task is None`, so a None slot
-    # raises `AttributeError: 'NoneType' object has no attribute
-    # 'megatron_module'` in `load_weights_hf_to_megatron`.
-    #
-    # Skipping is what upstream intends for an unmapped parameter -- the
-    # neighbouring `megatron_module is None` branch does exactly that -- so
-    # filtering here is faithful, and it replaces the per-bridge workaround
-    # `GLM47FlashBridge` has carried since megatron-bridge 0.3.1.
-    #
-    # The dropped names are logged once per process: an unmapped parameter is
-    # expected for Megatron-internal state, but would be a real bug for a weight
-    # that ought to come from the HF checkpoint.
-    # ------------------------------------------------------------------
-    _orig_build_conversion_tasks = MegatronModelBridge.build_conversion_tasks
-
-    def _unmapped_param_names(self, tasks, megatron_model):
-        """Recover the Megatron parameter names behind the None slots in ``tasks``.
-
-        Mirrors how ``build_conversion_tasks`` indexes its task list, so the
-        warning can name the parameters rather than just count them.
-        """
-        names = self._megatron_global_param_names_all_pp_ranks(megatron_model)
-        model_config = unwrap_model(megatron_model)[0].config
-        if self._share_embeddings_and_output_weights(model_config):
-            names = [name for name in names if "output_layer" not in name]
-        return [names[i] if i < len(names) else f"<index {i}>" for i, task in enumerate(tasks) if task is None]
-
-    def _build_conversion_tasks_dropping_unmapped(self, hf_pretrained, megatron_model, *args, **kwargs):
-        tasks = _orig_build_conversion_tasks(self, hf_pretrained, megatron_model, *args, **kwargs)
-        if None not in tasks:
-            return tasks
-
-        kept = [task for task in tasks if task is not None]
-        if not getattr(type(self), "_skyrl_logged_unmapped", False):
-            type(self)._skyrl_logged_unmapped = True
-            try:
-                dropped = _unmapped_param_names(self, tasks, megatron_model)
-            except Exception:  # never let diagnostics break weight loading
-                dropped = [f"<index {i}>" for i, task in enumerate(tasks) if task is None]
-            logger.warning(
-                f"{type(self).__name__}: dropping {len(dropped)} of {len(tasks)} conversion "
-                f"tasks with no entry in the mapping registry: {sorted(set(dropped))}"
-            )
-        return kept
-
-    MegatronModelBridge.build_conversion_tasks = _build_conversion_tasks_dropping_unmapped
     # VL arch -> sentinel ...ForCausalLM key registered above. The ForCausalLM
     # suffix passes AutoBridge's filter; not being a real transformers class makes
     # dispatch fall back to the string key -> our bridge.
