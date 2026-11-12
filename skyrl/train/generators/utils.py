@@ -92,6 +92,47 @@ def _validate_template_file_path(file_path: str) -> str:
 
 
 CUSTOM_CHAT_TEMPLATES = {
+    # Inkling2 (text only): the checkpoint ships no chat template; this renders what its renderer
+    # does. Blocks are ``<|message_<role>|><|content_text|>...<|end_message|>``; a ``Thinking effort
+    # level: <e>`` system block (``reasoning_effort`` chat-template kwarg, default 0.9) precedes the
+    # first non-system message; there is no generation prompt -- the model writes its own
+    # ``<|message_model|>`` blocks and ends its turn with ``<|content_model_end_sampling|>``.
+    # Assistant content is the model's raw output (its blocks); plain text is wrapped in one.
+    "inkling2": (
+        "{%- set effort = (reasoning_effort if reasoning_effort is defined and reasoning_effort is not none "
+        "else 0.9) | float | round(2) -%}"
+        "{%- set effort_text = (effort | int) | string if effort == (effort | int) else effort | string -%}"
+        "{%- set ns = namespace(effort_written=false) -%}"
+        "{%- for message in messages -%}"
+        "{%- if message['role'] in ('system', 'developer') -%}"
+        "{{ '<|message_system|><|content_text|>' + message['content'] + '<|end_message|>' }}"
+        "{%- else -%}"
+        "{%- if not ns.effort_written -%}"
+        "{{ '<|message_system|><|content_text|>Thinking effort level: ' + effort_text + '<|end_message|>' }}"
+        "{%- set ns.effort_written = true -%}"
+        "{%- endif -%}"
+        "{%- if message['role'] == 'user' -%}"
+        "{{ '<|message_user|><|content_text|>' + message['content'] + '<|end_message|>' }}"
+        "{%- elif message['role'] == 'tool' -%}"
+        "{{ '<|message_tool|><|content_text|>' + message['content'] + '<|end_message|>' }}"
+        "{%- elif message['role'] == 'assistant' -%}"
+        "{% generation %}"
+        "{%- if message['content'].startswith('<|message_model|>') -%}"
+        "{{ message['content'] }}"
+        "{%- else -%}"
+        "{{ '<|message_model|><|content_text|>' + message['content'] + '<|end_message|>' }}"
+        "{%- endif -%}"
+        "{%- if not message['content'].endswith('<|content_model_end_sampling|>') -%}"
+        "{{ '<|content_model_end_sampling|>' }}"
+        "{%- endif -%}"
+        "{% endgeneration %}"
+        "{%- endif -%}"
+        "{%- endif -%}"
+        "{%- endfor -%}"
+        "{%- if not ns.effort_written -%}"
+        "{{ '<|message_system|><|content_text|>Thinking effort level: ' + effort_text + '<|end_message|>' }}"
+        "{%- endif -%}"
+    ),
     # chat template for qwen3 that preserves thinking tokens
     "qwen3_with_thinking": (
         "{% for message in messages %}"
