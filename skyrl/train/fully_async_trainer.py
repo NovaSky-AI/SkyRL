@@ -447,7 +447,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             "mini_batch_size <= num_parallel_generation_workers <= mini_batch_size * (max_staleness_steps + 1). Got: "
             f"{self.mini_batch_size=}, {self.num_parallel_generation_workers=}, {self.max_staleness_steps=}"
         )
-        # TODO(Charlie): we can support it, just multi-turn partial rollout but synchronous.
         assert not self.colocate_all, "colocate_all is not supported for async training yet."
 
     async def _before_training_step(self) -> None:
