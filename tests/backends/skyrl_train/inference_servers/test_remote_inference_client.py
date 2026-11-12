@@ -1889,3 +1889,18 @@ class TestFinishSession:
             await client.finish_session("traj-unreachable")
         finally:
             await client.teardown()
+
+
+def test_session_sticky_direct_routing(monkeypatch):
+    """SKYRL_SESSION_STICKY_DIRECT=1 sends every request of a session to one server; otherwise the router."""
+    servers = ["http://s0", "http://s1", "http://s2", "http://s3"]
+    gen = RemoteGenerateClient(proxy_url="http://router", server_urls=servers)
+    assert gen._data_url_for_session("abc") == "http://router"
+    monkeypatch.setenv("SKYRL_SESSION_STICKY_DIRECT", "1")
+    assert gen._data_url_for_session(None) == "http://router"
+    picks = {s: gen._data_url_for_session(s) for s in (f"session-{i}" for i in range(64))}
+    assert all(gen._data_url_for_session(s) == url for s, url in picks.items())
+    assert set(picks.values()) == set(servers)
+    assert RemoteGenerateClient(proxy_url="http://router", server_urls=servers[:1])._data_url_for_session("a") == (
+        "http://router"
+    )
