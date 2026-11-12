@@ -246,3 +246,10 @@ def test_rejects_sample_full_batch():
     cfg.trainer.algorithm.zero_variance_filter = True
     with pytest.raises(AssertionError, match="sample_full_batch"):
         _partial_trainer(MagicMock(), cfg=cfg)
+
+
+def test_rejects_update_ref_every_epoch():
+    cfg = _partial_cfg()
+    cfg.trainer.update_ref_every_epoch = True
+    with pytest.raises(AssertionError, match="update_ref_every_epoch"):
+        _partial_trainer(MagicMock(), cfg=cfg)

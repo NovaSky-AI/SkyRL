@@ -10,13 +10,15 @@ have finished, the step runs in this order:
 3. The inference engines wake with the new weights.
 4. The paused requests continue from the tokens they generated before the cut.
 
-``trainer.fully_async.max_staleness_steps`` selects when a finished group frees its slot. With ``0``, a
-finished group holds its slot until the step that trains on it. Each step then cuts the fraction
+``trainer.fully_async.max_staleness_steps`` selects when a finished group frees its slot. A finished
+group holds its slot until the step that trains on it when
+``policy_mini_batch_size * (max_staleness_steps + 1) <= num_parallel_generation_workers``; ``0`` always
+gives this rule. Each step then cuts the fraction
 ``1 - policy_mini_batch_size / num_parallel_generation_workers`` of the in-flight groups, and the mean
 staleness is about ``num_parallel_generation_workers / policy_mini_batch_size - 1`` steps. With a larger
-value, a finished group frees its slot at once, as in the fully-async trainer. The inference engines
-stay full, each cut hits about ``num_parallel_generation_workers`` groups, and the mean staleness is
-about one step higher. See ``_PartialRolloutAdmissionController``.
+``max_staleness_steps``, a finished group frees its slot at once, as in the fully-async trainer. The
+inference engines stay full, each cut hits about ``num_parallel_generation_workers`` groups, and the
+mean staleness is about one step higher. See ``_PartialRolloutAdmissionController``.
 
 Compared with the fully-async trainer, there is no GPU split and no generation during training. A
 mini-batch is at most a few cuts behind the current policy. Compared with the synchronous trainer,
@@ -98,6 +100,11 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
             "trainer.fully_async.num_parallel_generation_workers must be >= policy_mini_batch_size "
             "(equal means no partial rollout: every step waits for all its groups). Got: "
             f"{self.num_parallel_generation_workers=}, {self.mini_batch_size=}"
+        )
+        assert not self.cfg.trainer.update_ref_every_epoch, (
+            "PartialRolloutRayPPOTrainer does not support trainer.update_ref_every_epoch=true. The update at "
+            "the end of an epoch loads the reference model while the inference engines are awake and hold "
+            "the GPU memory."
         )
         assert not self.sample_full_batch, (
             "PartialRolloutRayPPOTrainer does not support trainer.fully_async.sample_full_batch=true. When an "

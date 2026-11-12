@@ -340,10 +340,14 @@ Set `generator.inference_engine.router_init_kwargs.policy=sticky_least_loaded`. 
 
 The trainer sets no limit on the number of cuts that one group survives: it cuts and resumes a group until the group finishes. The step logs `partial_rollout/groups_cut`, the number of groups in flight at the cut.
 
-`trainer.fully_async.max_staleness_steps` selects when a finished group frees its slot:
+`trainer.fully_async.max_staleness_steps` selects when a finished group frees its slot. At most `max(num_parallel_generation_workers, policy_mini_batch_size * (max_staleness_steps + 1))` groups are not yet trained on.
 
-- `0`: a finished group holds its slot until the step that trains on it. At most `num_parallel_generation_workers` groups are not yet trained on. The number of generating groups falls during each generation phase. The mean staleness is about `num_parallel_generation_workers / policy_mini_batch_size - 1` steps. The example script sets it.
-- `1` or more: a finished group frees its slot at once, as in the fully-async trainer. The inference engines stay at `num_parallel_generation_workers` generating groups. At most `max(num_parallel_generation_workers, policy_mini_batch_size * (max_staleness_steps + 1))` groups are not yet trained on. Each cut hits about `num_parallel_generation_workers` groups, so the mean staleness is about one step higher. The default of `max_staleness_steps` is 4, so set `0` explicitly for the first rule.
+- Hold slot, when `policy_mini_batch_size * (max_staleness_steps + 1) <= num_parallel_generation_workers` (always true for `0`): a finished group holds its slot until the step that trains on it. The number of generating groups falls during each generation phase. The mean staleness is about `num_parallel_generation_workers / policy_mini_batch_size - 1` steps. The example script sets `0`.
+- Free slot, when `policy_mini_batch_size * (max_staleness_steps + 1) > num_parallel_generation_workers`: a finished group frees its slot at once, as in the fully-async trainer. The inference engines stay at `num_parallel_generation_workers` generating groups. Each cut hits about `num_parallel_generation_workers` groups, so the mean staleness is about one step higher. The default of `max_staleness_steps` is 4.
+
+Example: with 64 groups in flight and a mini-batch of 32, `max_staleness_steps=1` is still hold slot (32 x 2 = 64); `2` or more is free slot. The trainer logs the rule in use at startup.
+
+The trainer does not support `trainer.fully_async.sample_full_batch=true` or `trainer.update_ref_every_epoch=true`. Both run a checkpoint or a model load at the end of an epoch while the inference engines are awake.
 
 `trainer.fully_async.clear_kv_cache_on_weight_sync` selects what happens to the key-value (KV) cache of the paused requests:
 
