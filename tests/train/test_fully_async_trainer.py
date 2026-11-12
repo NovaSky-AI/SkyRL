@@ -304,9 +304,9 @@ def test_should_keep_group_token_level_rewards():
 
 
 def test_subclass_hooks_run_in_order_around_the_step(monkeypatch):
-    """A subclass sees its hooks in this order per step: before training, training, checkpoint (when
-    ``checkpoint_before_weight_sync`` is set), weight sync. ``_after_training_loop`` runs once, before the
-    final checkpoint."""
+    """A subclass sees its hooks in this order per step: before training, training, after training,
+    weight sync. A subclass can write the checkpoint in ``_after_training_step``, before the weight
+    sync. ``_after_training_loop`` runs once, before the final checkpoint."""
     from unittest.mock import MagicMock
 
     from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
@@ -320,7 +320,12 @@ def test_subclass_hooks_run_in_order_around_the_step(monkeypatch):
     order = []
 
     class _Hooked(FullyAsyncRayPPOTrainer):
-        checkpoint_before_weight_sync = True
+        async def _after_training_step(self, force_save: bool, is_epoch_end: bool) -> None:
+            # Write the checkpoint before the weight sync, not after eval.
+            await super()._save_step_checkpoints(force_save, is_epoch_end)
+
+        async def _save_step_checkpoints(self, force_save: bool, is_epoch_end: bool) -> None:
+            return
 
         def _validate_placement_and_capacity(self) -> None:
             order.append("validate")
@@ -399,37 +404,3 @@ def test_subclass_hooks_run_in_order_around_the_step(monkeypatch):
         "after_loop",
         "ckpt",
     ], order
-
-
-def test_checkpoint_before_weight_sync_rejects_sample_full_batch():
-    """An exhausted epoch saves its checkpoint with no training step before it, so a subclass that
-    needs the engines asleep for the checkpoint cannot use ``sample_full_batch``."""
-    from unittest.mock import MagicMock
-
-    from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
-    from tests.train.test_rl_callbacks import DummyDataset, _build_test_cfg
-
-    class _CheckpointsWhileEnginesSleep(FullyAsyncRayPPOTrainer):
-        checkpoint_before_weight_sync = True
-
-    cfg = _build_test_cfg()
-    cfg.trainer.fully_async.enabled = True
-    cfg.trainer.fully_async.num_parallel_generation_workers = cfg.trainer.train_batch_size
-    cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
-    cfg.trainer.algorithm.policy_loss_type = "rollout_is"
-    cfg.generator.batched = False
-    cfg.trainer.fully_async.sample_full_batch = True
-    cfg.trainer.algorithm.zero_variance_filter = True
-    tokenizer = MagicMock()
-    tokenizer.pad_token_id = 0
-    tokenizer.eos_token_id = 2
-    with pytest.raises(AssertionError, match="checkpoint_before_weight_sync"):
-        _CheckpointsWhileEnginesSleep(
-            cfg=cfg,
-            tracker=MagicMock(),
-            tokenizer=tokenizer,
-            train_dataset=DummyDataset(size=4),
-            eval_dataset=DummyDataset(size=2),
-            inference_engine_client=None,
-            generator=MagicMock(),
-        )
