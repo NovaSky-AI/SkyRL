@@ -8,7 +8,7 @@ set -x
 #   export WANDB_API_KEY=<key>
 #   MODEL_PATH=/path/to/Qwen3.8-Flash-Next bash examples/train/qwen3_8_flash_next/run_dapo_qwen3_8_flash_next_lora_sync_4node.sh
 #
-# Per-setting reasoning (parallelism, adapter-only sync, vLLM memory, NVLS, frozen modules) lives
+# Per-setting reasoning (parallelism, vLLM memory, NVLS, frozen modules) lives
 # in run_gsm8k_qwen3_8_flash_next_lora_4node.sh. What differs here: the stock DAPO 2k prompt / 8k
 # response budget, which runs the QSA indexer in its sparse regime (sequences past
 # indexer_budget + compress_ratio - 1 = 2051 tokens), and rollout router replay (R3).
@@ -49,6 +49,12 @@ MEGATRON_CP="${MEGATRON_CP:-1}"
 MEGATRON_EP="${MEGATRON_EP:-16}"
 MEGATRON_ETP="${MEGATRON_ETP:-1}"
 
+# Chunks per MoE layer call during training. Each chunk repeats the routing, the expert all-to-all
+# and the kernel launches. Measured on 2 x 8 B200 (EP16) with this 2k/8k budget, at equal response
+# lengths: 1 chunk instead of 8 cut policy_train from 205 s to 61 s and fwd_logprobs from 68 s to
+# 21 s, for +4 GB peak (43.0 GB allocated). Raise it only to save memory.
+MLP_CHUNKS_FOR_TRAINING="${MLP_CHUNKS_FOR_TRAINING:-1}"
+
 MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=8192
 INFERENCE_ENGINE_MAX_MODEL_LEN=10752         # prompt + response + chat-template headroom
@@ -80,6 +86,15 @@ EVAL_TOP_P=0.7
 # LoRA needs a much larger LR than full FT: at 1e-5 / 3e-5 the per-step update was ~1e-4 nats/token
 # and runs stayed flat; 3e-4 with alpha 32 learns (held-out AIME 0.45 -> 0.85 in 10 steps).
 LR="${LR:-3e-4}"
+
+# Rollout weights. With MERGE_LORA=true the trainer sends merged weights to vLLM on every sync, and
+# vLLM decodes without the adapter kernels (40% of the decode GPU time with the unmerged adapter).
+# Measured on 2 x 8 B200 (2 engines x TP8), merged against adapter-only: generate 175 s -> 96 s,
+# sync_weights 8 s -> 28 s, RL step 269 s -> 208 s; held-out AIME avg@12 0.47 -> 0.84 in 10 steps.
+# vLLM holds 48 GiB of weights per GPU (38 GiB adapter-only), which fits on B200 at TP8. Merged
+# sync needs lora.sync_mode=disk. For adapter-only sync, set MERGE_LORA=false LORA_SYNC_MODE=memory.
+MERGE_LORA="${MERGE_LORA:-true}"
+LORA_SYNC_MODE="${LORA_SYNC_MODE:-disk}"
 
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 # vLLM's custom all-reduce registers CUDA-graph buffers over CUDA IPC, which fails on sleep mode's cumem
@@ -124,11 +139,11 @@ uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"}
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="full" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method="uniform" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=1 \
-  trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=8 \
+  trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=$MLP_CHUNKS_FOR_TRAINING \
   trainer.policy.model.lora.rank=16 \
   trainer.policy.model.lora.alpha=32 \
-  trainer.policy.model.lora.sync_mode=memory \
-  trainer.policy.megatron_config.lora_config.merge_lora=false \
+  trainer.policy.model.lora.sync_mode=$LORA_SYNC_MODE \
+  trainer.policy.megatron_config.lora_config.merge_lora=$MERGE_LORA \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
