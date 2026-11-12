@@ -19,11 +19,16 @@ set -x
 : "${SIM_STEP_SECONDS:=5}"
 : "${SIM_WEIGHT_SYNC_SECONDS:=0}"
 : "${N_SAMPLES_PER_PROMPT:=2}"
+: "${SAMPLING_CONCURRENCY_ENABLED:=false}"
+: "${SAMPLING_CONCURRENCY_POLICY:=engine_load}"
+: "${SAMPLING_CONCURRENCY_INITIAL_LIMIT:=8}"
+: "${SAMPLING_CONCURRENCY_MIN_LIMIT:=1}"
+: "${SAMPLING_CONCURRENCY_MAX_LIMIT:=64}"
 
 RUN_NAME="${RUN_NAME:-gsm8k-sim-qwen0.5b}"
 ENFORCE_EAGER=false
 
-uv run --isolated --extra fsdp \
+uv run --isolated --extra fsdp --extra ray \
   -m examples.train.fully_async.main_fully_async_sim \
   data.train_data="['$DATA_DIR/train.parquet']" \
   data.val_data="['$DATA_DIR/validation.parquet']" \
@@ -61,6 +66,11 @@ uv run --isolated --extra fsdp \
   generator.batched=false \
   environment.env_class=gsm8k \
   generator.n_samples_per_prompt=$N_SAMPLES_PER_PROMPT \
+  generator.sampling_concurrency.enabled=$SAMPLING_CONCURRENCY_ENABLED \
+  generator.sampling_concurrency.policy=$SAMPLING_CONCURRENCY_POLICY \
+  generator.sampling_concurrency.initial_limit=$SAMPLING_CONCURRENCY_INITIAL_LIMIT \
+  generator.sampling_concurrency.min_limit=$SAMPLING_CONCURRENCY_MIN_LIMIT \
+  generator.sampling_concurrency.max_limit=$SAMPLING_CONCURRENCY_MAX_LIMIT \
   trainer.logger="$LOGGER" \
   trainer.project_name="gsm8k-sim-test" \
   trainer.run_name=${RUN_NAME} \

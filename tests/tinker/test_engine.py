@@ -1,10 +1,13 @@
+import asyncio
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from cloudpathlib import AnyPath
-from sqlmodel import Session, SQLModel
+from sqlmodel import Session, SQLModel, select
 
 from skyrl.tinker import types
 from skyrl.tinker.config import EngineConfig
@@ -13,6 +16,10 @@ from skyrl.tinker.engine import (
     TinkerEngine,
     prepare_model_pass_batch,
     prepare_sample_batch,
+)
+from skyrl.utils.adaptive_concurrency import (
+    FixedConcurrencyPolicy,
+    SamplingConcurrencyController,
 )
 
 BASE_MODEL = "trl-internal-testing/tiny-Qwen3ForCausalLM"
@@ -331,6 +338,9 @@ def scheduling_engine():
     engine.db_engine = create_engine("sqlite:///:memory:", echo=False)
     enable_sqlite_wal(engine.db_engine)
     SQLModel.metadata.create_all(engine.db_engine)
+    engine.sampling_concurrency_controller = None
+    engine._forwarding_client = None
+    engine._external_samples = {}
     return engine
 
 
@@ -556,6 +566,106 @@ def test_find_batchable_sample_keeps_one_checkpoint_per_model(scheduling_engine)
     assert batchable[str(request_ids[0])][1].checkpoint_id == "ckpt_1"
 
 
+def test_internal_sample_dispatch_records_ownership(scheduling_engine):
+    engine = scheduling_engine
+    engine.config = EngineConfig(base_model=BASE_MODEL, backend="fsdp")
+    request_ids = add_futures(
+        engine,
+        [(types.RequestType.SAMPLE, "model_a", sample_payload("ckpt"))],
+    )
+
+    with Session(engine.db_engine) as session:
+        requests = engine.find_batchable_sample(session)
+        engine.dispatch_sample_requests(session, requests)
+
+    with Session(engine.db_engine) as session:
+        assert session.get(FutureDB, request_ids[0]).status == RequestStatus.DISPATCHED
+
+
+def test_external_samples_remain_pending_outside_the_service_window(scheduling_engine):
+    engine = scheduling_engine
+    engine._forwarding_client = object()
+    engine.sampling_concurrency_controller = SamplingConcurrencyController(
+        policy=FixedConcurrencyPolicy(), initial_limit=1
+    )
+    request_ids = add_futures(
+        engine,
+        [
+            (types.RequestType.EXTERNAL, "model_a", sample_payload("ckpt")),
+            (types.RequestType.EXTERNAL, "model_b", sample_payload("ckpt")),
+        ],
+    )
+
+    with Session(engine.db_engine) as session:
+        requests = engine.find_dispatchable_external_samples(session)
+        engine.dispatch_external_samples(session, requests)
+
+    assert set(requests) == {str(request_ids[0])}
+    with Session(engine.db_engine) as session:
+        statuses = {row.request_id: row.status for row in session.exec(select(FutureDB)).all()}
+    assert statuses == {
+        request_ids[0]: RequestStatus.DISPATCHED,
+        request_ids[1]: RequestStatus.PENDING,
+    }
+
+
+def test_engine_restart_requeues_dispatched_samples(scheduling_engine):
+    engine = scheduling_engine
+    request_ids = add_futures(
+        engine,
+        [
+            (types.RequestType.SAMPLE, "internal", sample_payload("ckpt")),
+            (types.RequestType.EXTERNAL, "external", sample_payload("ckpt")),
+            (types.RequestType.FORWARD, "training", forward_backward_payload()),
+        ],
+    )
+    with Session(engine.db_engine) as session:
+        session.exec(
+            FutureDB.__table__.update()
+            .where(FutureDB.request_id.in_(request_ids))
+            .values(status=RequestStatus.DISPATCHED)
+        )
+        session.commit()
+
+    engine._recover_dispatched_samples()
+
+    with Session(engine.db_engine) as session:
+        statuses = {row.request_id: row.status for row in session.exec(select(FutureDB)).all()}
+    assert statuses == {
+        request_ids[0]: RequestStatus.PENDING,
+        request_ids[1]: RequestStatus.PENDING,
+        request_ids[2]: RequestStatus.DISPATCHED,
+    }
+
+
+@pytest.mark.asyncio
+async def test_external_sample_task_crash_requeues_dispatched_request(scheduling_engine):
+    class CrashingForwardingClient:
+        async def call_and_store_result(self, *args, **kwargs):
+            raise RuntimeError("completion write failed")
+
+    engine = scheduling_engine
+    engine._forwarding_client = CrashingForwardingClient()
+    engine._forwarding_loop = asyncio.get_running_loop()
+    request_id = add_futures(
+        engine,
+        [(types.RequestType.EXTERNAL, "model_a", sample_payload("ckpt"))],
+    )[0]
+    with Session(engine.db_engine) as session:
+        requests = engine.find_dispatchable_external_samples(session)
+        engine.dispatch_external_samples(session, requests)
+
+    engine._submit_external_sample(str(request_id), "model_a", requests[str(request_id)][1])
+
+    for _ in range(100):
+        await asyncio.sleep(0.01)
+        with Session(engine.db_engine) as session:
+            if session.get(FutureDB, request_id).status == RequestStatus.PENDING:
+                break
+    else:
+        pytest.fail("crashed external sample was not returned to PENDING")
+
+
 def test_payload_lookup_is_chunked(scheduling_engine):
     """A backlog larger than the per-statement id chunk must still resolve fully."""
     from skyrl.tinker.engine import _MAX_IDS_PER_QUERY
@@ -573,12 +683,6 @@ def test_payload_lookup_is_chunked(scheduling_engine):
 # ---------------------------------------------------------------------------
 # Continuous sampling (per-request future completion; drain before blocking ops)
 # ---------------------------------------------------------------------------
-
-import asyncio  # noqa: E402
-import threading  # noqa: E402
-import time  # noqa: E402
-
-from sqlmodel import select  # noqa: E402
 
 
 class _FakeContinuousBackend:
@@ -680,7 +784,7 @@ def test_continuous_sampling_completes_futures_independently(continuous_engine):
     engine.process_pending_requests_once()
 
     assert _wait_for(lambda: _future_status(engine, rid_fast) == RequestStatus.COMPLETED, timeout=3.0)
-    assert _future_status(engine, rid_slow) == RequestStatus.PENDING
+    assert _future_status(engine, rid_slow) == RequestStatus.DISPATCHED
     assert engine._sampler.inflight_count() == 1
 
     # Re-running the scheduler must not double-admit the in-flight request.

@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import DateTime, Text, UniqueConstraint, event
+from sqlalchemy import DateTime, Text, UniqueConstraint, event, text
 from sqlalchemy.engine import url as sqlalchemy_url
 from sqlmodel import JSON, Field, SQLModel
 
@@ -58,10 +58,26 @@ def get_async_database_url(db_url: str) -> str:
     return async_url.render_as_string(hide_password=False)
 
 
+async def upgrade_request_status_schema(connection) -> None:
+    """Add enum values that ``create_all`` cannot add to an existing Postgres type.
+
+    Tinker initializes its schema with ``SQLModel.metadata.create_all`` instead
+    of running Alembic at API startup. PostgreSQL stores ``RequestStatus``
+    as a native enum, and ``create_all`` intentionally leaves an existing enum
+    untouched. Keep this small migration next to schema initialization so an
+    existing deployment can persist newly-dispatched requests before the engine
+    starts consuming them.
+    """
+
+    if connection.dialect.name == "postgresql":
+        await connection.execute(text("ALTER TYPE requeststatus ADD VALUE IF NOT EXISTS 'DISPATCHED'"))
+
+
 class RequestStatus(str, Enum):
     """Status of a request."""
 
     PENDING = "pending"
+    DISPATCHED = "dispatched"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -157,11 +173,11 @@ class SamplingSessionDB(SQLModel, table=True):
 
 
 class EngineStateDB(SQLModel, table=True):
-    """Engine→API handoff for the inference engine the backend stands up.
+    """Durable endpoint state for the inference engine the backend stands up.
 
     Singleton row (``singleton_id=1``). Written by the backend when a new
-    inference client is built (or torn down) and read by the API's
-    forwarding client to resolve the vLLM proxy URL.
+    inference client is built (or torn down) and read by TinkerEngine's
+    forwarding lane to resolve the vLLM proxy URL.
     """
 
     __tablename__ = "engine_state"

@@ -1,7 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import httpx
 from cloudpathlib import AnyPath
@@ -14,9 +13,6 @@ from skyrl.tinker.config import EngineConfig
 from skyrl.tinker.db_models import FutureDB, RequestStatus
 from skyrl.utils.log import logger
 from skyrl.utils.storage import download_and_unpack
-
-if TYPE_CHECKING:
-    from skyrl.tinker.api import SampleRequest
 
 
 def _extract_checkpoint_sync(checkpoint_path: AnyPath, target_dir: Path) -> None:
@@ -41,9 +37,6 @@ def _extract_checkpoint_sync(checkpoint_path: AnyPath, target_dir: Path) -> None
 class ExternalInferenceClient:
     """Client for calling external inference engines (e.g., vLLM)."""
 
-    # TODO: make `external_future_store` required and remove the FutureDB
-    # write-back path in `call_and_store_result` — every production
-    # construction (api.py lifespan) already passes a store.
     def __init__(self, engine_config: EngineConfig, db_engine, external_future_store=None):
         self.base_url = f"{engine_config.external_inference_url}/v1"
         self.api_key = engine_config.external_inference_api_key
@@ -81,10 +74,12 @@ class ExternalInferenceClient:
             await self.external_future_store.complete(request_id, result, status)
             return
 
-        # TODO: remove this FutureDB write-back once `external_future_store`
-        # is required (see __init__).
+        # Engine-owned dispatch persists completion under the original future ID.
         async with AsyncSession(self.db_engine) as session:
             future = await session.get(FutureDB, request_id)
+            if future is None:
+                logger.warning("FutureDB row %s missing on completion write; skipping", request_id)
+                return
             # `result_data` is a text column holding pre-serialized JSON.
             future.result_data = result.model_dump_json()
             future.status = status
@@ -93,7 +88,7 @@ class ExternalInferenceClient:
 
     async def _forward_to_engine(
         self,
-        request: "SampleRequest",
+        request,
         model_id: str,
         checkpoint_id: str,
         http_client: httpx.AsyncClient,
@@ -107,7 +102,7 @@ class ExternalInferenceClient:
 
         For base model sampling (no LoRA), the request is sent directly using the base model name.
         """
-        model_input = request.prompt.to_types()
+        model_input = request.prompt.to_types() if hasattr(request.prompt, "to_types") else request.prompt
         prompt_tokens = render_model_input([model_input])[0].prompt_ids
 
         if base_model:

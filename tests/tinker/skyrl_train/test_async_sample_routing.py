@@ -3,22 +3,21 @@
 
 GPU-gated: requires at least one CUDA device. Spins up a real Tinker API
 server with the SkyRL-Train Megatron backend in non-colocated mode so the
-API process forwards sample requests directly to vLLM via the new path,
-bypassing the engine subprocess's serial scheduling loop.
+TinkerEngine dispatches durable sample requests directly to vLLM without
+blocking its serial training loop.
 
 Coverage:
   - test_engine_state_published: after ``save_weights_for_sampler``, the
     engine's vLLM proxy URL is written to ``EngineStateDB``.
-  - test_sample_uses_external_path: an issued sample resolves successfully
-    without writing any ``FutureDB`` row — external sample futures live
-    purely in the API process's in-memory store.
+  - test_sample_uses_external_path: an issued sample creates a future of
+    type ``EXTERNAL`` and resolves successfully.
   - test_sample_concurrent_with_training_is_fast: the central
     parallelism test. While a long-running stream of ``forward_backward``
     + ``optim_step`` calls is in flight, a sample request resolves in
     much less time than the training stream takes, demonstrating that
     sample latency is no longer bounded by training-step duration.
   - test_concurrent_samples_per_adapter: many concurrent samples across
-    two adapters all resolve via the forwarding client's connection pool
+    two adapters all resolve via the engine's forwarding client
     and per-adapter (``model=<model_id>``) routing on vLLM.
 
 Run:
@@ -59,8 +58,8 @@ TINKER_API_KEY = "tml-dummy"
 TEST_PORT = 8019
 
 # Tiny config — same shape as test_multi_lora_megatron's BACKEND_CONFIG.
-# Non-colocated is required: that's what triggers the API to install
-# SkyRLTrainInferenceForwardingClient in the lifespan. merge_lora=False makes
+# Non-colocated is required: that's what makes TinkerEngine install a
+# SkyRLTrainInferenceForwardingClient. merge_lora=False makes
 # vLLM serve LoRA adapters by tenant name, which is the contract the
 # forwarding client relies on (model=<model_id>).
 BACKEND_CONFIG = {
@@ -213,12 +212,10 @@ def test_engine_state_published(server_db_path):
 
 
 def test_sample_uses_external_path(server_db_path):
-    """A sample issued through the SDK resolves without writing any FutureDB row.
+    """A sample issued through the SDK creates a FutureDB row of type EXTERNAL.
 
-    This is the "test" half of the design: the API hoists the sample off
-    the engine's serial loop and into the API process's in-memory store, so
-    the sample never touches the database. A regression that re-routes
-    samples through the DB path would leave a new EXTERNAL row behind.
+    The API durably enqueues this request; TinkerEngine owns its dispatch
+    outside the engine's serial training loop.
     """
     proc, db_path, _ = server_db_path
     sc = tinker.ServiceClient(base_url=f"http://0.0.0.0:{TEST_PORT}/", api_key=TINKER_API_KEY)
@@ -237,15 +234,10 @@ def test_sample_uses_external_path(server_db_path):
     ).result()
     assert len(out.sequences) == 1
 
-    # The result was delivered (asserted above), so if the store path were
-    # inactive the fallback DB row would already be terminal — give any stray
-    # write a moment to land, then require that none appeared.
+    # The result was delivered, so the durable row is already terminal.
     time.sleep(2)
     new_future_ids = _read_external_future_ids(db_path) - future_ids_before
-    assert not new_future_ids, (
-        f"expected no new EXTERNAL FutureDB rows after the sample call, found {new_future_ids}; "
-        "samples should resolve purely from the in-memory store"
-    )
+    assert new_future_ids, "expected an EXTERNAL FutureDB row for the sample call"
 
 
 def test_sample_concurrent_with_training_is_fast(server_db_path):
@@ -343,7 +335,7 @@ def test_sample_concurrent_with_training_is_fast(server_db_path):
 def test_concurrent_samples_per_adapter(server_db_path):
     """Issue several concurrent samples across two adapters; all resolve.
 
-    Exercises the forwarding client's httpx connection pool and confirms
+    Exercises the engine's forwarding path and confirms
     that requests route to the correct adapter via ``model=<model_id>``
     (each Tinker model_id maps to a LoRA registered on vLLM under the
     same name during save_weights_for_sampler).
