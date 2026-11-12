@@ -236,3 +236,13 @@ def test_cache_clear_requires_prefix_caching():
     cfg.generator.inference_engine.enable_prefix_caching = False
     with pytest.raises(AssertionError, match="enable_prefix_caching"):
         _partial_trainer(MagicMock(), cfg=cfg)
+
+
+def test_rejects_sample_full_batch():
+    """An exhausted epoch saves its checkpoint with no training step before it, so the inference
+    engines are awake during that save."""
+    cfg = _partial_cfg()
+    cfg.trainer.fully_async.sample_full_batch = True
+    cfg.trainer.algorithm.zero_variance_filter = True
+    with pytest.raises(AssertionError, match="sample_full_batch"):
+        _partial_trainer(MagicMock(), cfg=cfg)

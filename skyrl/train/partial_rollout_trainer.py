@@ -74,9 +74,6 @@ class _PartialRolloutAdmissionController(_AsyncStalenessManager):
 class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
     """The colocated partial-rollout trainer. See the module docstring."""
 
-    # The checkpoint loads the policy back to the GPUs. It must run while the inference engines sleep.
-    checkpoint_before_weight_sync = True
-
     def _generation_buffer_maxsize(self) -> int:
         # The admission controller allows this many groups that are not yet trained on. All of them
         # can finish before the training loop drains the buffer.
@@ -101,6 +98,11 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
             "trainer.fully_async.num_parallel_generation_workers must be >= policy_mini_batch_size "
             "(equal means no partial rollout: every step waits for all its groups). Got: "
             f"{self.num_parallel_generation_workers=}, {self.mini_batch_size=}"
+        )
+        assert not self.sample_full_batch, (
+            "PartialRolloutRayPPOTrainer does not support trainer.fully_async.sample_full_batch=true. When an "
+            "epoch runs out of prompts mid mini-batch, the loop saves the end-of-epoch checkpoint with no "
+            "training step before it, so the inference engines are awake and hold the GPU memory."
         )
         if self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync:
             assert self.cfg.generator.inference_engine.enable_prefix_caching, (
@@ -134,6 +136,15 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
         # sync wakes the engines and resumes the paused requests (`WorkerDispatch.save_weights_for_sampler`).
         offload_kv = not self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync
         await self.inference_engine_client.sleep_with_frozen_requests(offload_kv=offload_kv)
+
+    async def _after_training_step(self, force_save: bool, is_epoch_end: bool) -> None:
+        # The checkpoint loads the policy back to the GPUs. Write it here, while the inference engines
+        # sleep, and not after eval, when they are awake.
+        await super()._save_step_checkpoints(force_save, is_epoch_end)
+
+    async def _save_step_checkpoints(self, force_save: bool, is_epoch_end: bool) -> None:
+        # `_after_training_step` already wrote the checkpoint of this step.
+        return
 
     async def _after_training_loop(self) -> None:
         await self.inference_engine_client.sleep()
