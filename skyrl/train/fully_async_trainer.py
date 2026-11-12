@@ -379,6 +379,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 "trainer.fully_async.sample_full_batch=True requires trainer.algorithm.zero_variance_filter=True "
                 "(it is the async-native equivalent of dynamic_sampling='filter')."
             )
+            assert not self.checkpoint_before_weight_sync, (
+                "trainer.fully_async.sample_full_batch=True is not supported by a trainer that sets "
+                "checkpoint_before_weight_sync. When an epoch runs out of prompts mid mini-batch, the loop "
+                "saves the end-of-epoch checkpoint with no training step, so the inference engines are awake."
+            )
         assert (
             not self.cfg.generator.batched
         ), "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
@@ -410,7 +415,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     """Write the step's checkpoint before the weight sync instead of after eval.
 
     A subclass whose inference engines share the GPUs with training sets this flag, so that the
-    checkpoint runs while the engines sleep."""
+    checkpoint runs while the engines sleep. The flag does not support ``sample_full_batch``: the
+    checkpoint of an exhausted epoch runs with no training step before it, and ``__init__`` rejects
+    that combination."""
 
     def _generation_buffer_maxsize(self) -> int:
         """Return the largest number of finished groups the buffer holds.
@@ -425,8 +432,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _build_admission_controller(self) -> _AsyncStalenessManager:
         """Return the controller that decides when a generation worker may submit the next group.
 
-        The default bounds staleness: a group is trained at most ``max_staleness_steps`` steps after
-        it was scheduled. A subclass returns a controller with its own admission rule."""
+        The default bounds the number of groups admitted ahead of training with
+        ``max_staleness_steps``. It does not bound the age of one group: a slow group can train
+        later than that. A subclass returns a controller with its own admission rule. The loop calls
+        the public methods of ``_AsyncStalenessManager`` on the controller, so subclass that class
+        and override ``_compute_capacity_unlocked``."""
         return _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
             mini_batch_size=self.mini_batch_size,
