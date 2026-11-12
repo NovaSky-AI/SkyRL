@@ -23,10 +23,11 @@ def test_the_held_out_tasks_stay_the_same_whatever_the_run_trains_on() -> None:
     "kwargs, error",
     [
         (dict(num_eval=10, num_train=91), "91 training tasks requested, but only 90"),
+        (dict(num_eval=10, num_train=0), "no training tasks"),
         (dict(num_eval=101, num_train=0), "only 100 tasks"),
         (dict(num_eval=10, num_train=0, train_names=["nope"]), "no such tasks: nope"),
     ],
-    ids=["too-many-train", "too-many-eval", "unknown-name"],
+    ids=["too-many-train", "no-train", "too-many-eval", "unknown-name"],
 )
 def test_a_split_that_cannot_be_made_is_refused(kwargs, error) -> None:
     with pytest.raises(ValueError, match=error):
@@ -34,7 +35,7 @@ def test_a_split_that_cannot_be_made_is_refused(kwargs, error) -> None:
 
 
 def test_named_training_tasks_may_not_be_held_out() -> None:
-    _, held_out = split(NAMES, num_eval=10, num_train=0, seed=0)
+    _, held_out = split(NAMES, num_eval=10, num_train=1, seed=0)
     elsewhere = next(name for name in NAMES if name not in held_out)
 
     assert split(NAMES, num_eval=10, num_train=0, seed=0, train_names=[elsewhere]) == ([elsewhere], held_out)

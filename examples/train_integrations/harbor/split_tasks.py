@@ -46,6 +46,8 @@ def split(
                 "with SPLIT_SEED or EVAL_TASKS."
             )
         return list(train_names), held_out
+    if num_train < 1:
+        raise ValueError(f"no training tasks: --train (NUM_TASKS in the recipe) must be at least 1, got {num_train}")
     train = order[num_eval : num_eval + num_train]
     if len(train) < num_train:
         raise ValueError(
