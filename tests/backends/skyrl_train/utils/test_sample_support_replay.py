@@ -5,6 +5,7 @@ import threading
 import types
 from collections import Counter
 from typing import List, Tuple
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -40,6 +41,7 @@ from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     score_centering_loss_inputs,
 )
 from skyrl.train.config import AlgorithmConfig, CISPOConfig, DPPOConfig
+from skyrl.train.fused_lm_head import FusedLmHeadBackend
 from tests.backends.skyrl_train.sample_support_helpers import ragged_support
 
 VOCAB = 11
@@ -58,6 +60,15 @@ def _from_grid(support_ids):
     """CSR support and row ids for a ``[..., top_k]`` grid, one row per position; negative entries are absent."""
     support = ragged_support([support_ids.reshape(-1, support_ids.shape[-1])])
     return support, torch.arange(support.num_rows).reshape(support_ids.shape[:-1])
+
+
+def test_candidate_autotune_key_uses_coarse_occupancy_regimes():
+    pytest.importorskip("triton")
+    from skyrl.backends.skyrl_train.distributed.megatron.fused_sample_support_triton import (
+        _autotune_pair_regime,
+    )
+
+    assert [_autotune_pair_regime(size) for size in (1, 255, 256, 4095, 4096, 1_000_000)] == [0, 0, 1, 1, 2, 2]
 
 
 def _reference_support_logprobs(logits, sampled_ids, support_ids):
@@ -769,9 +780,9 @@ def test_only_multi_member_rows_reach_the_projection(monkeypatch):
     widths: List[int] = []
     original = sample_support_replay._project_candidate_pairs
 
-    def spy(hidden, row_ids, token_ids, weight, temperature, chunk_size):
+    def spy(hidden, row_ids, token_ids, weight, temperature, chunk_size, fused_backend):
         widths.append(int(token_ids.numel()))
-        return original(hidden, row_ids, token_ids, weight, temperature, chunk_size)
+        return original(hidden, row_ids, token_ids, weight, temperature, chunk_size, fused_backend)
 
     monkeypatch.setattr(sample_support_replay, "_project_candidate_pairs", spy)
     hidden = torch.randn(1, 5, 3, dtype=torch.float64)
@@ -789,6 +800,130 @@ def test_only_multi_member_rows_reach_the_projection(monkeypatch):
     assert widths == [5]
     assert ragged.valid_mask.tolist() == [[False, True, False, True, True]]
     assert float(ragged.logprobs[0, 3]) == 0.0
+
+
+@pytest.mark.parametrize("backend", [FusedLmHeadBackend.TRITON, FusedLmHeadBackend.TRITON_BLOCK_SPARSE])
+def test_fused_candidate_backend_rejects_cpu_execution(backend):
+    hidden = torch.randn(1, 5, 3, dtype=torch.float64, requires_grad=True)
+    weight = torch.randn(VOCAB, 3, dtype=torch.float64, requires_grad=True)
+    with pytest.raises((ImportError, RuntimeError), match="triton|CUDA"):
+        sample_support_scores(
+            hidden,
+            CSR_UNIT_SAMPLED,
+            CSR_UNIT_SUPPORT,
+            CSR_UNIT_ROW_IDS,
+            lm_head_weight=weight,
+            fused_backend=backend,
+            **CSR_UNIT_KWARGS,
+        )
+
+
+@pytest.mark.parametrize("backend", [FusedLmHeadBackend.TRITON, FusedLmHeadBackend.TRITON_BLOCK_SPARSE])
+@pytest.mark.parametrize("requires_grad", [False, True])
+def test_fused_candidate_backend_propagates_triton_errors(monkeypatch, backend, requires_grad):
+    module_name = "skyrl.backends.skyrl_train.distributed.megatron.fused_sample_support_triton"
+    hidden = torch.randn(2, 3, requires_grad=requires_grad)
+    weight = torch.randn(VOCAB, 3)
+    ids = torch.tensor([0, 1])
+    monkeypatch.setitem(sys.modules, module_name, None)
+    with pytest.raises(ModuleNotFoundError, match="fused_sample_support_triton"):
+        sample_support_replay._project_candidate_pairs(hidden, ids, ids, weight, 1.0, 2, backend)
+
+    module = types.ModuleType(module_name)
+    module.candidate_projection = Mock(side_effect=RuntimeError("unsupported target"))
+    monkeypatch.setitem(sys.modules, module_name, module)
+    with pytest.raises(RuntimeError, match="unsupported target"):
+        sample_support_replay._project_candidate_pairs(hidden, ids, ids, weight, 1.0, 2, backend)
+
+
+@pytest.mark.parametrize("backend", [FusedLmHeadBackend.TRITON, FusedLmHeadBackend.TRITON_BLOCK_SPARSE])
+@pytest.mark.parametrize("requires_grad", [False, True])
+@pytest.mark.parametrize("entropy_requires_grad", [False, True])
+def test_candidate_backend_dispatch_matches_torch(monkeypatch, backend, requires_grad, entropy_requires_grad):
+    calls = []
+
+    def project(hidden, weight, row_ids, token_ids, temperature):
+        calls.append((row_ids.clone(), token_ids.clone()))
+        return ((hidden[row_ids].to(weight.dtype) * weight[token_ids]).sum(-1) / temperature).float()
+
+    monkeypatch.setattr(sample_support_replay, "_triton_candidate_projection", project)
+    torch.manual_seed(19)
+    hidden = torch.randn(1, 3, 5)
+    weight = torch.randn(VOCAB, 5)
+    sampled = torch.tensor([[2, 4, 0]])
+    support, row_ids = _from_grid(
+        torch.tensor([[[2, 3, -1], [4, -1, -1], [-1, -1, -1]]], dtype=SAMPLE_SUPPORT_TORCH_DTYPE)
+    )
+
+    def run(selected_backend):
+        h = hidden.clone().requires_grad_(requires_grad)
+        w = weight.clone().requires_grad_(requires_grad)
+        scores = sample_support_scores(
+            h,
+            sampled,
+            support,
+            row_ids,
+            vocab_start_index=0,
+            vocab_end_index=VOCAB,
+            tp_group=None,
+            lm_head_weight=w,
+            temperature=0.7,
+            chunk_size=2,
+            fused_backend=selected_backend,
+            compute_entropy=True,
+            entropy_requires_grad=entropy_requires_grad,
+        )
+        if requires_grad:
+            loss = scores.logprobs.sum()
+            if entropy_requires_grad:
+                loss = loss + scores.entropy.sum()
+            loss.backward()
+        return scores, h.grad, w.grad
+
+    actual = run(backend)
+    # Only the two-member row reaches the projection.
+    assert calls[0][0].tolist() == [0, 0]
+    assert calls[0][1].tolist() == [2, 3]
+    expected = run(FusedLmHeadBackend.TORCH)
+    torch.testing.assert_close(actual[0].logprobs, expected[0].logprobs)
+    torch.testing.assert_close(actual[0].entropy, expected[0].entropy)
+    torch.testing.assert_close(actual[0].valid_mask, expected[0].valid_mask)
+    if requires_grad:
+        torch.testing.assert_close(actual[1], expected[1])
+        torch.testing.assert_close(actual[2], expected[2])
+
+
+@pytest.mark.parametrize("backend", [FusedLmHeadBackend.TRITON, FusedLmHeadBackend.TRITON_BLOCK_SPARSE])
+def test_aligned_support_forwards_candidate_backend(monkeypatch, backend):
+    sequences, _, loss_mask, num_actions, logits = _batch_tensors(JOIN_LENGTHS)
+    scorer = Mock(wraps=sample_support_scores)
+    monkeypatch.setattr(sample_support_replay, "sample_support_scores", scorer)
+    compute_sample_support_scores(
+        logits,
+        sequences,
+        loss_mask,
+        ragged_support(_support(JOIN_LENGTHS)),
+        num_actions,
+        packed=False,
+        metadata_layout=_layout(JOIN_LENGTHS),
+        fused_backend=backend,
+        **DENSE_SCORER_KWARGS,
+    )
+    assert scorer.call_args.kwargs["fused_backend"] == backend
+
+
+def test_torch_candidate_backend_does_not_import_triton(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules, "skyrl.backends.skyrl_train.distributed.megatron.fused_sample_support_triton", None
+    )
+    hidden = torch.randn(2, 3, requires_grad=True)
+    weight = torch.randn(VOCAB, 3, requires_grad=True)
+    ids = torch.tensor([0, 1])
+    actual = sample_support_replay._project_candidate_pairs(hidden, ids, ids, weight, 1.0, 2, FusedLmHeadBackend.TORCH)
+    expected = (hidden * weight[:2]).sum(-1)
+    torch.testing.assert_close(actual, expected)
+    actual.sum().backward()
+    torch.testing.assert_close(hidden.grad, weight[:2])
 
 
 def test_two_positions_naming_one_support_row_are_refused():
