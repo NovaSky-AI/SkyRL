@@ -49,6 +49,12 @@ MEGATRON_CP="${MEGATRON_CP:-1}"
 MEGATRON_EP="${MEGATRON_EP:-16}"
 MEGATRON_ETP="${MEGATRON_ETP:-1}"
 
+# Chunks per MoE layer call during training. Each chunk repeats the routing, the expert all-to-all
+# and the kernel launches. Measured on 2 x 8 B200 (EP16) with this 2k/8k budget, together with
+# megatron_config.empty_cuda_cache=false: 1 chunk instead of 8 cut policy_train from 163 s to 60 s
+# and fwd_logprobs from 51 s to 21 s, for +4 GB peak (43.5 GB allocated). Raise it only to save memory.
+MLP_CHUNKS_FOR_TRAINING="${MLP_CHUNKS_FOR_TRAINING:-1}"
+
 MAX_PROMPT_LENGTH=2048
 MAX_RESPONSE_LENGTH=8192
 INFERENCE_ENGINE_MAX_MODEL_LEN=10752         # prompt + response + chat-template headroom
@@ -124,7 +130,7 @@ uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"}
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="full" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method="uniform" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=1 \
-  trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=8 \
+  trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=$MLP_CHUNKS_FOR_TRAINING \
   trainer.policy.model.lora.rank=16 \
   trainer.policy.model.lora.alpha=32 \
   trainer.policy.model.lora.sync_mode=memory \

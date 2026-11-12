@@ -61,6 +61,13 @@ MEGATRON_PP="${MEGATRON_PP:-1}"
 MEGATRON_CP="${MEGATRON_CP:-8}"
 MEGATRON_EP="${MEGATRON_EP:-16}"
 MEGATRON_ETP="${MEGATRON_ETP:-1}"
+
+# Chunks per MoE layer call during training. Each chunk repeats the routing, the expert all-to-all
+# and the kernel launches. Measured on 2 x 8 B200 (CP8, EP16), 1 chunk against 8: at 66K-token
+# sequences policy_train 12.2 s -> 6.5 s for +3.6 GB peak; at 250K the time is about equal and the
+# peak is +16 GB (89 GB allocated). Raise it only to save memory.
+MLP_CHUNKS_FOR_TRAINING="${MLP_CHUNKS_FOR_TRAINING:-1}"
+
 if [ "$MEGATRON_CP" -gt 1 ] && [ -z "$QSA_CUDNN_WHEEL" ]; then
   echo "QSA_CUDNN_WHEEL must point at the cudnn-frontend wheel when MEGATRON_CP > 1 (split-K cuDNN QSA)." >&2
   exit 1
@@ -143,7 +150,7 @@ uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"}
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_granularity="full" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_method="uniform" \
   trainer.policy.megatron_config.transformer_config_kwargs.recompute_num_layers=1 \
-  trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=8 \
+  trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=$MLP_CHUNKS_FOR_TRAINING \
   trainer.policy.model.lora.rank=16 \
   trainer.policy.model.lora.alpha=32 \
   trainer.policy.model.lora.sync_mode=memory \
