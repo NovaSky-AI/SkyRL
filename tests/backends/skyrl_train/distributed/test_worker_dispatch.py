@@ -277,8 +277,7 @@ class TestSaveWeights:
 
     @pytest.mark.asyncio
     async def test_broadcast_does_not_block_event_loop(self):
-        """The broadcast blocks on ``ray.get``. A timeout armed by a coroutine sharing the
-        loop (a fully-async generator's HTTP request) must not expire because of it."""
+        """A coroutine sharing the loop must run before the blocking broadcast finishes."""
         dispatch = self._nccl_dispatch(lambda *args, **kwargs: time.sleep(0.5))
 
         sync = asyncio.create_task(dispatch.save_weights_for_sampler())
