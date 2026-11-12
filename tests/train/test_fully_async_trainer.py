@@ -400,3 +400,37 @@ def test_subclass_hooks_run_in_order_around_the_step(monkeypatch):
         "after_loop",
         "ckpt",
     ], order
+
+
+def test_checkpoint_before_weight_sync_rejects_sample_full_batch():
+    """An exhausted epoch saves its checkpoint with no training step and no weight sync before it."""
+    from unittest.mock import MagicMock
+
+    from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
+    from tests.train.test_rl_callbacks import DummyDataset, _build_test_cfg
+
+    class _CheckpointsBeforeWeightSync(FullyAsyncRayPPOTrainer):
+        def _checkpoint_before_weight_sync(self) -> bool:
+            return True
+
+    cfg = _build_test_cfg()
+    cfg.trainer.fully_async.enabled = True
+    cfg.trainer.fully_async.num_parallel_generation_workers = cfg.trainer.train_batch_size
+    cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
+    cfg.trainer.algorithm.policy_loss_type = "rollout_is"
+    cfg.generator.batched = False
+    cfg.trainer.fully_async.sample_full_batch = True
+    cfg.trainer.algorithm.zero_variance_filter = True
+    tokenizer = MagicMock()
+    tokenizer.pad_token_id = 0
+    tokenizer.eos_token_id = 2
+    with pytest.raises(AssertionError, match="_checkpoint_before_weight_sync"):
+        _CheckpointsBeforeWeightSync(
+            cfg=cfg,
+            tracker=MagicMock(),
+            tokenizer=tokenizer,
+            train_dataset=DummyDataset(size=4),
+            eval_dataset=DummyDataset(size=2),
+            inference_engine_client=None,
+            generator=MagicMock(),
+        )
