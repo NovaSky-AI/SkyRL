@@ -16,9 +16,10 @@ A subclass changes how generation and training share the GPUs through these hook
 - `_build_admission_controller`: the controller that admits generation groups into flight.
 - `_validate_placement_and_capacity`: the checks on `colocate_all` and `num_parallel_generation_workers`.
 - `_before_training_step`: runs after the mini-batch is collected and before training.
+- `_after_training_step`: runs after training and before the weight sync.
 - `_sync_weights_after_training_step`: pushes the new weights to the inference engines.
+- `_save_step_checkpoints`: writes the step's checkpoint. The loop calls it after eval.
 - `_after_training_loop`: runs after the last epoch and before the final checkpoint.
-- `checkpoint_before_weight_sync`: writes the step's checkpoint before the weight sync instead of after eval.
 """
 
 import asyncio
@@ -379,11 +380,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 "trainer.fully_async.sample_full_batch=True requires trainer.algorithm.zero_variance_filter=True "
                 "(it is the async-native equivalent of dynamic_sampling='filter')."
             )
-            assert not self.checkpoint_before_weight_sync, (
-                "trainer.fully_async.sample_full_batch=True is not supported by a trainer that sets "
-                "checkpoint_before_weight_sync. When an epoch runs out of prompts mid mini-batch, the loop "
-                "saves the end-of-epoch checkpoint with no training step, so the inference engines are awake."
-            )
         assert (
             not self.cfg.generator.batched
         ), "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
@@ -410,14 +406,6 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     # ------------------------------------------------------------------
     # Hooks. The module docstring lists them. The defaults are the fully-async behavior.
     # ------------------------------------------------------------------
-
-    checkpoint_before_weight_sync: bool = False
-    """Write the step's checkpoint before the weight sync instead of after eval.
-
-    A subclass whose inference engines share the GPUs with training sets this flag, so that the
-    checkpoint runs while the engines sleep. The flag does not support ``sample_full_batch``: the
-    checkpoint of an exhausted epoch runs with no training step before it, and ``__init__`` rejects
-    that combination."""
 
     def _generation_buffer_maxsize(self) -> int:
         """Return the largest number of finished groups the buffer holds.
@@ -467,6 +455,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         The default does nothing: generation runs on its own GPUs while training runs."""
 
+    async def _after_training_step(self, force_save: bool, is_epoch_end: bool) -> None:
+        """Run after the training step and before the weight sync. The default does nothing.
+
+        ``force_save`` and ``is_epoch_end`` are the arguments that the loop passes to
+        ``_save_step_checkpoints`` after eval. A subclass that must write the checkpoint before the
+        weight sync writes it here and overrides ``_save_step_checkpoints`` to do nothing."""
+
     async def _sync_weights_after_training_step(self) -> None:
         """Push the new weights to the inference engines.
 
@@ -484,7 +479,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Run after the last epoch and before the final checkpoint. The default does nothing."""
 
     async def _save_step_checkpoints(self, force_save: bool, is_epoch_end: bool) -> None:
-        """Write the step's checkpoint and its Hugging Face (HF) export.
+        """Write the step's checkpoint and its Hugging Face (HF) export. The loop calls this after eval.
 
         The loop writes each one at its interval, at the last step of the epoch, or when a callback
         requested a save."""
@@ -719,8 +714,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         # A training step completed: count it for this epoch's bookkeeping.
                         trained_steps_this_epoch += 1
                         is_epoch_end = trained_steps_this_epoch == self.num_steps_per_epoch
-                        if self.checkpoint_before_weight_sync:
-                            await self._save_step_checkpoints(force_save, is_epoch_end)
+                        await self._after_training_step(force_save, is_epoch_end)
 
                         # 4. After training: pause generation, sync weights, resume.
                         await self._sync_weights_after_training_step()
@@ -747,8 +741,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         self._fire("on_eval_end", metrics=eval_metrics)
 
                     # 7. Checkpointing. At interval, at the last step of each epoch, and when a callback asks.
-                    if not self.checkpoint_before_weight_sync:
-                        await self._save_step_checkpoints(force_save, is_epoch_end)
+                    await self._save_step_checkpoints(force_save, is_epoch_end)
 
                     log_payload = {**self.all_metrics, **{"timing/" + k: v for k, v in self.all_timings.items()}}
                     if self._ray_gpu_monitor is not None:
