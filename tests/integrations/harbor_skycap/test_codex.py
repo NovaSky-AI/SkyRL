@@ -99,8 +99,9 @@ def test_without_a_trajectory_url_codex_is_refused(tmp_path) -> None:
 
 
 # -- the model catalog ---------------------------------------------------------------------
-#: Codex 0.154.0's own cases for the edit it makes to its instructions while update_plan is off
-#: (codex-rs/core/src/context/update_plan_instructions_tests.rs): the instructions, then what Codex sends.
+#: Copied from Codex's unit tests for the edit it makes to its instructions while update_plan is off
+#: (codex-rs/core/src/context/update_plan_instructions_tests.rs at rust-v0.154.0): the instructions, then what
+#: Codex sends.
 UPDATE_PLAN_CASES = [
     (
         "Before.\n\n## Planning\nYou have access to an `update_plan` tool which tracks steps.\n\n### Examples\nKeep "
@@ -121,6 +122,7 @@ UPDATE_PLAN_CASES = [
         "Keep working.\n- Explain discoveries.\n\nCompletion:\nVerify the result.\n",
     ),
 ]
+# The first case also stands in for prompt.md in the run tests below.
 PROMPT, INSTRUCTIONS = UPDATE_PLAN_CASES[0]
 
 
