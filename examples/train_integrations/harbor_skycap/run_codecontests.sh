@@ -25,7 +25,8 @@
 #                              default when a key is found, else the console
 #   SANDBOX=daytona|modal      where Harbor runs each trial's sandbox (default daytona)
 #   STRATEGY=fsdp|megatron     the training backend (default fsdp); megatron takes MEGATRON_TP,
-#                              MEGATRON_PP, MEGATRON_EP and MEGATRON_ETP, and OPTIMIZER_OFFLOAD=1
+#                              MEGATRON_PP, MEGATRON_EP (default 1; e.g. 8 for an MoE such as
+#                              Qwen3-30B-A3B on 8 GPUs) and MEGATRON_ETP, and OPTIMIZER_OFFLOAD=1
 #                              (the default) keeps the optimizer state on the CPU, which an MoE on
 #                              one node needs: expert parameters aren't sharded across data parallel
 #   R3=1                       rollout routing replay for an MoE model: vLLM returns each token's
@@ -70,7 +71,7 @@ DATASET="${DATASET:-open-thoughts/CodeContests}"
 STRATEGY="${STRATEGY:-fsdp}"
 MEGATRON_TP="${MEGATRON_TP:-1}"
 MEGATRON_PP="${MEGATRON_PP:-1}"
-MEGATRON_EP="${MEGATRON_EP:-8}"
+MEGATRON_EP="${MEGATRON_EP:-1}"
 MEGATRON_ETP="${MEGATRON_ETP:-1}"
 R3="${R3:-0}"
 OPTIMIZER_OFFLOAD="${OPTIMIZER_OFFLOAD:-1}"
