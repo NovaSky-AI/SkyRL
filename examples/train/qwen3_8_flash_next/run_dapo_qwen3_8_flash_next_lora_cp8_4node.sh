@@ -8,7 +8,7 @@ set -x
 #   export WANDB_API_KEY=<key>
 #   MODEL_PATH=/path/to/Qwen3.8-Flash-Next bash examples/train/qwen3_8_flash_next/run_dapo_qwen3_8_flash_next_lora_cp8_4node.sh
 #
-# Per-setting reasoning (parallelism, adapter-only sync, vLLM memory, NVLS, frozen modules) lives
+# Per-setting reasoning (parallelism, vLLM memory, NVLS, frozen modules) lives
 # in run_gsm8k_qwen3_8_flash_next_lora_4node.sh. What differs here: the stock DAPO 2k prompt / 8k
 # response budget, which runs the QSA indexer in its sparse regime (sequences past
 # indexer_budget + compress_ratio - 1 = 2051 tokens), and rollout router replay (R3).
@@ -107,6 +107,16 @@ EVAL_TOP_P=0.7
 # and runs stayed flat; 3e-4 with alpha 32 learns (held-out AIME 0.45 -> 0.85 in 10 steps).
 LR="${LR:-3e-4}"
 
+# Rollout weights. With MERGE_LORA=true the trainer sends merged weights to vLLM on every sync, and
+# vLLM decodes without the adapter kernels. The merged sync takes ~28 s against ~9 s adapter-only,
+# and decode is ~1.9x faster, so merging pays when the longest response is past ~3.6K tokens.
+# Measured on 2 x 8 B200 with this 2k/64K budget (4 prompts x 8): RL step 866 s -> 510 s with a
+# response at the 64K cap, 290 s -> 205 s with a 24-29K longest response. With long prompts and
+# short responses merging loses (66K prompts, 1K responses: 33 s -> 47 s per step): set
+# MERGE_LORA=false LORA_SYNC_MODE=memory there. Merged sync needs lora.sync_mode=disk.
+MERGE_LORA="${MERGE_LORA:-true}"
+LORA_SYNC_MODE="${LORA_SYNC_MODE:-disk}"
+
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.6}"
 # vLLM's custom all-reduce registers CUDA-graph buffers over CUDA IPC, which fails on sleep mode's cumem
 # allocator (colocate_all=true, TP>1): every TP worker dies at engine start with
@@ -153,8 +163,8 @@ uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"}
   trainer.policy.megatron_config.transformer_config_kwargs.mlp_chunks_for_training=$MLP_CHUNKS_FOR_TRAINING \
   trainer.policy.model.lora.rank=16 \
   trainer.policy.model.lora.alpha=32 \
-  trainer.policy.model.lora.sync_mode=memory \
-  trainer.policy.megatron_config.lora_config.merge_lora=false \
+  trainer.policy.model.lora.sync_mode=$LORA_SYNC_MODE \
+  trainer.policy.megatron_config.lora_config.merge_lora=$MERGE_LORA \
   trainer.policy.optimizer_config.lr=$LR \
   trainer.policy.optimizer_config.max_grad_norm=1.0 \
   trainer.policy.optimizer_config.weight_decay=0.1 \
