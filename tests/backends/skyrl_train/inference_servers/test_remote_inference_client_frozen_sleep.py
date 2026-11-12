@@ -28,7 +28,11 @@ async def test_sleep_with_frozen_requests_pauses_in_keep_mode_then_sleeps_the_al
     await client.sleep_with_frozen_requests(offload_kv=offload_kv)
     assert calls == [
         ("/pause", None, {"mode": "keep", "clear_cache": "false"}),
-        ("/collective_rpc", {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": offload_kv}}, None),
+        (
+            "/collective_rpc",
+            {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": offload_kv, "offload_weights": False}},
+            None,
+        ),
     ]
     assert client.requests_frozen_asleep is True
     await client.resume_generation()
@@ -55,6 +59,6 @@ async def test_sleep_for_weight_sync_discards_the_weights_unless_asked():
     await client.sleep_for_weight_sync(offload_kv=True)
     assert calls[-1] == (
         "/collective_rpc",
-        {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": True}},
+        {"method": "skyrl_sleep_for_weight_sync", "kwargs": {"offload_kv": True, "offload_weights": False}},
         None,
     )

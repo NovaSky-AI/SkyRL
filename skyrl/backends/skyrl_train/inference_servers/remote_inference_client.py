@@ -1340,12 +1340,12 @@ class RemoteInferenceClient(InferenceEngineInterface):
         parameter again. ``offload_weights=True`` copies them to host memory instead, and
         the wake restores them. Set it when the sync sends LoRA adapters only.
         """
-        kwargs: Dict[str, Any] = {"offload_kv": offload_kv}
-        if offload_weights:
-            kwargs["offload_weights"] = True
         return await self._call_all_servers(
             "/collective_rpc",
-            {"method": "skyrl_sleep_for_weight_sync", "kwargs": kwargs},
+            {
+                "method": "skyrl_sleep_for_weight_sync",
+                "kwargs": {"offload_kv": offload_kv, "offload_weights": offload_weights},
+            },
         )
 
     @property
