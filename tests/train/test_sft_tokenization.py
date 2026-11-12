@@ -18,6 +18,7 @@ from skyrl.train.sft_trainer import (
     tokenize_chat_example,
     tokenize_sft_example,
 )
+from skyrl.utils.tok import get_tokenizer
 
 
 @pytest.fixture(scope="module")
@@ -34,6 +35,12 @@ def vlm_processor():
     if proc.tokenizer.pad_token is None:
         proc.tokenizer.pad_token = proc.tokenizer.eos_token
     return proc
+
+
+@pytest.fixture(scope="module")
+def qwen25_tokenizer():
+    tok = get_tokenizer("Qwen/Qwen2.5-0.5B-Instruct")
+    return tok
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +131,66 @@ def test_chat_truncation(tokenizer):
         assert len(result["input_ids"]) <= 32
         assert result["num_actions"] > 0
     # If the prompt alone fills the budget, result is None -- also acceptable
+
+
+def test_chat_truncation_prompt_fills_budget(qwen25_tokenizer):
+    """Returns None when truncation removes the complete assistant response."""
+    messages = [
+        {"role": "user", "content": "Tell me a story."},
+        {"role": "assistant", "content": "Once upon a time."},
+    ]
+    prompt_ids = qwen25_tokenizer.apply_chat_template(
+        messages[:-1],
+        add_generation_prompt=True,
+        tokenize=True,
+    )["input_ids"]
+
+    result = tokenize_chat_example(
+        {"messages": messages},
+        qwen25_tokenizer,
+        max_length=len(prompt_ids),
+    )
+
+    assert result is None
+
+
+def test_last_assistant_leading_newline_merge(qwen25_tokenizer):
+    """A merged prompt boundary token belongs to the assistant response."""
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "\nHello world"},
+    ]
+
+    result = tokenize_chat_example({"messages": messages}, qwen25_tokenizer)
+
+    assert result is not None
+    expected_response_ids = [271, 9707, 1879, 151645, 198]
+    assert result["num_actions"] == len(expected_response_ids) == 5
+    assert result["input_ids"][-result["num_actions"] :] == expected_response_ids
+    assert qwen25_tokenizer.decode(expected_response_ids) == "\n\nHello world<|im_end|>\n"
+
+
+def test_last_assistant_without_newline_merge(qwen25_tokenizer):
+    """A prefix-matching prompt keeps the existing response boundary."""
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello world"},
+    ]
+
+    prompt_ids = qwen25_tokenizer.apply_chat_template(messages[:-1], add_generation_prompt=True, tokenize=True)[
+        "input_ids"
+    ]
+    full_ids = qwen25_tokenizer.apply_chat_template(messages, add_generation_prompt=False, tokenize=True)["input_ids"]
+    assert full_ids[: len(prompt_ids)] == prompt_ids
+    prefix_num_actions = len(full_ids) - len(prompt_ids)
+
+    result = tokenize_chat_example({"messages": messages}, qwen25_tokenizer)
+
+    assert result is not None
+    assert result["num_actions"] == prefix_num_actions == 4
+    expected_response_ids = [9707, 1879, 151645, 198]
+    assert result["input_ids"][-result["num_actions"] :] == expected_response_ids
+    assert qwen25_tokenizer.decode(expected_response_ids) == "Hello world<|im_end|>\n"
 
 
 # NOTE: This test requires torchvision and thus torch - we use the vllm marker so that the test is run with the appropriate extras
