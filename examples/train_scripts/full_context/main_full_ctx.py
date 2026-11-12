@@ -27,6 +27,13 @@ class FullCtxTrainerConfig(TrainerConfig):
     # "repeat" (one token per batch), "random" (uniform ids), or "dataset" (tokenized train prompts).
     dummy_token_source: str = "repeat"
     dummy_seed: int = 0
+    # Multi-turn shape: each response is `dummy_num_turns` assistant spans separated by
+    # `dummy_observation_length`-token environment observations (loss-masked), within the drawn length.
+    dummy_num_turns: int = 1
+    dummy_observation_length: int = 0
+    # Synthetic rollout routes for R3 (`moe_enable_routing_replay`): uniform distinct top-k experts per
+    # token and layer, one row per token but the last (as the inference engine captures them).
+    dummy_routes: bool = False
     # Benchmark the trainer alone: no inference engines and no weight sync. Needs colocate_all=false.
     skip_inference_engines: bool = False
 
