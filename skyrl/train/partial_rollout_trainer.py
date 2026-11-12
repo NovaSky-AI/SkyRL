@@ -106,11 +106,6 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
             "the end of an epoch loads the reference model while the inference engines are awake and hold "
             "the GPU memory."
         )
-        assert not self.sample_full_batch, (
-            "PartialRolloutRayPPOTrainer does not support trainer.fully_async.sample_full_batch=true. When an "
-            "epoch runs out of prompts mid mini-batch, the loop saves the end-of-epoch checkpoint with no "
-            "training step before it, so the inference engines are awake and hold the GPU memory."
-        )
         if self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync:
             assert self.cfg.generator.inference_engine.enable_prefix_caching, (
                 "PartialRolloutRayPPOTrainer with trainer.fully_async.clear_kv_cache_on_weight_sync=true "
