@@ -57,6 +57,15 @@ from tests.backends.skyrl_train.gpu.utils import (
 
 # BF16 masters for the INT4-served Kimi row: the same slice, experts dequantized.
 KIMI_BF16_MASTERS = "eatang/Kimi-K2.5-2layer-BF16"
+# Inkling2's weights are not public: its rows run on a local BF16 slice
+# (examples/train/megatron/dequantize_inkling2.py) and are skipped without one. vLLM serves it
+# with the pinned Inkling2 vLLM build, through the plugin in patches/vllm/inkling2.
+INKLING2_SLICE = os.environ.get("INKLING2_SLICE_PATH", "inkling2-slice-not-set")
+INKLING2_MXFP8_EXCLUDE_MODULES = ("*.linear_sink", "*.weight_proj")
+_needs_inkling2 = pytest.mark.skipif(
+    not os.path.isdir(INKLING2_SLICE),
+    reason="needs INKLING2_SLICE_PATH (a local Inkling2 slice)",
+)
 # 4-layer slice of Qwen/Qwen3.8-Flash-Next (layers 0-3: GDN x3 + gated attention with the QSA
 # indexer, PLE on layer 1, no MTP) built by examples/train/qwen3_8_flash_next/make_slice.py. The
 # released ~51B-parameter PLE n-gram table is replaced by a small random one (ngram_vocab_size_base
@@ -142,6 +151,14 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         transformer_config_kwargs = dict(cfg.trainer.policy.megatron_config.transformer_config_kwargs or {})
         transformer_config_kwargs["cp_comm_type"] = "allgather"
         cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
+    if "inkling2" in model_name.lower():
+        # A VL checkpoint; only the language model is bridged (patches/megatron/inkling2).
+        cfg.trainer.remove_microbatch_padding = True
+        cfg.trainer.policy.language_model_only = True
+        cfg.trainer.ref.language_model_only = True
+        cfg.generator.inference_engine.language_model_only = True
+        # Lowest thinking effort: the default (0.9) reasons for longer than the generation budget.
+        cfg.generator.chat_template_kwargs = {"reasoning_effort": 0}
     if "qwen3.8-flash-next" in model_name.lower():
         # VL checkpoint; patches/megatron/qwen4_exp bridges the language model only, and PLE
         # needs packed (thd) sequences.
@@ -196,6 +213,7 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         or ("glm-4.7-flash" in model_name.lower())
         or ("glm-5.3-flash" in model_name.lower())
         or ("kimi-k2.5" in model_name.lower())
+        or ("inkling2" in model_name.lower())
         or ("qwen3.8-flash-next" in model_name.lower())
         or ("kimi-k3" in model_name.lower())
     )
@@ -316,6 +334,10 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         # colocated with the Megatron shard. The DSA indexer in vLLM needs DeepGEMM.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
+    if "inkling2" in model_name.lower():
+        # 1M default context, next to the colocated Megatron shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["gpu_memory_utilization"] = 0.5
     if "qwen3.8-flash-next" in model_name.lower():
         # 262k default context; the slice is ~11B params (4 x 512-expert MoE layers, the embedding
         # and LM head), colocated with the Megatron shard.
@@ -423,10 +445,10 @@ async def construct_training_input_from_generator_output(generator_output, token
 @pytest.mark.asyncio
 @pytest.mark.megatron_models
 @pytest.mark.parametrize(
-    "tp,pp,cp,ep,etp,inference_tp,num_gpus,model_name,vllm_threshold,megatron_threshold,fp8_mode,max_generate_length",
+    "tp,pp,cp,ep,etp,inference_tp,num_gpus,model_name,vllm_threshold,megatron_threshold,fp8_mode,max_generate_length,sync_from_offloaded",
     [
         pytest.param(
-            2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, None, None, id="qwen3-moe_tp2_ep2"
+            2, 1, 1, 2, 1, 2, 4, "eatang/qwen3-moe-tiny-random", 1e-1, 2e-1, None, None, False, id="qwen3-moe_tp2_ep2"
         ),
         pytest.param(
             1,
@@ -441,13 +463,14 @@ async def construct_training_input_from_generator_output(generator_output, token
             2e-1,
             None,
             None,
+            False,
             id="qwen3-moe_pp2_cp2",
         ),
         # Tiny random Beam (4 layers: sliding-window RoPE x3 + NoPE/SSMax full attention, dense +
         # 3 grouped-sigmoid MoE layers with an fp32 router, gated attention with per-head gate bias,
         # sandwich norms, final logit softcap). Megatron side is Megatron-Bridge's BeamBridge
         # (HybridModel), vLLM side is vLLM's BeamForCausalLM; both on the 4 x L4 CI mesh.
-        pytest.param(2, 1, 1, 2, 1, 2, 4, BEAM_TINY, 1e-1, 2e-1, None, None, id="beam-tiny_tp2_ep2"),
+        pytest.param(2, 1, 1, 2, 1, 2, 4, BEAM_TINY, 1e-1, 2e-1, None, None, False, id="beam-tiny_tp2_ep2"),
         pytest.param(
             2,
             1,
@@ -461,11 +484,12 @@ async def construct_training_input_from_generator_output(generator_output, token
             2e-1,
             None,
             None,
+            False,
             id="beam-tiny_tp2_ep2_fused_lm_head",
         ),
         # PP splits at Beam-layer (attention + MLP) boundaries; CP with sliding-window attention
         # runs cp_comm_type="a2a" (default_cp_comm_type_for_sliding_window).
-        pytest.param(1, 2, 2, 1, None, 2, 4, BEAM_TINY, 1e-1, 2e-1, None, None, id="beam-tiny_pp2_cp2"),
+        pytest.param(1, 2, 2, 1, None, 2, 4, BEAM_TINY, 1e-1, 2e-1, None, None, False, id="beam-tiny_pp2_cp2"),
         # GLM-4.7-Flash (~31B MoE, MLA) on 4xH100-80G. Mesh: TP=4 EP=4 ETP=1
         # -> DP=1, vLLM TP=4 colocated on the same GPUs, same layout as the
         # other large-MoE entries below.
@@ -482,6 +506,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             None,
             None,
+            False,
             id="glm-4.7-flash_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
@@ -511,6 +536,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             1e-1,
             None,
             None,
+            False,
             id="kimi-k2.5-2layer-int4-qat_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
@@ -540,6 +566,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             1e-1,
             None,
             None,
+            False,
             id="glm-5.3-flash-4layer_h100_tp2_ep4",
             marks=pytest.mark.h100,
         ),
@@ -582,6 +609,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             1e-1,
             None,
             2048,
+            False,
             id="glm-5.3-flash-4layer_h100_tp2_ep4_kpool_beyond_topk",
             marks=pytest.mark.h100,
         ),
@@ -604,6 +632,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             1e-1,
             None,
             None,
+            False,
             id="glm-5.3-flash-4layer_h100_tp2_cp2_ep4",
             marks=pytest.mark.h100,
         ),
@@ -620,8 +649,69 @@ async def construct_training_input_from_generator_output(generator_output, token
             1e-1,
             None,
             2048,
+            False,
             id="glm-5.3-flash-4layer_h100_tp2_cp2_ep4_kpool_beyond_topk",
             marks=pytest.mark.h100,
+        ),
+        # Inkling2, an 8-layer slice with 64 of the 384 experts (local and global attention,
+        # an attn-res block boundary at layer 6, NVFP4 experts dequantized to BF16; ~19B params).
+        # Megatron TP2 (sequence parallel) x EP4, vLLM TP4 (its experts shard over TP).
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            INKLING2_SLICE,
+            3e-1,
+            1e-1,
+            None,
+            None,
+            False,
+            id="inkling2-8layer-64exp_tp2_ep4",
+            marks=_needs_inkling2,
+        ),
+        # The same, syncing from the offloaded Megatron params
+        # (megatron_config.weight_sync_from_offloaded_params): the model is offloaded before the
+        # engine wakes its weights, and the export reads each param from its CPU copy.
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            INKLING2_SLICE,
+            3e-1,
+            1e-1,
+            None,
+            None,
+            True,
+            id="inkling2-8layer-64exp_tp2_ep4_sync_from_offloaded",
+            marks=_needs_inkling2,
+        ),
+        # The same with MXFP8 training (TE's native Blackwell recipe, BF16 primaries) and a BF16
+        # rollout: "mxfp8_compute" sets only the trainer's FP8 fields, so the sync still ships the
+        # BF16 primaries and the gap measures the trainer's FP8 GEMMs against a BF16 vLLM.
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            INKLING2_SLICE,
+            3e-1,
+            1e-1,
+            "mxfp8_compute",
+            None,
+            True,
+            id="inkling2-8layer-64exp_tp2_ep4_sync_from_offloaded_mxfp8_compute",
+            marks=[_needs_inkling2, pytest.mark.b200],
         ),
         # Kimi K3, 4-layer bf16 slice of the real checkpoint (KIMI_K3_4LAYER): KDA (dense MLP),
         # KDA (MoE) x2, NoPE-MLA with output gate (MoE); latent MoE with the first 128 of 896
@@ -648,6 +738,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             1e-1,
             None,
             None,
+            False,
             id="kimi-k3-4layer_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
@@ -664,6 +755,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             2e-1,
             None,
             None,
+            False,
             id="qwen3.5-moe_tp2_ep2",
             marks=pytest.mark.skip(reason="running into correctness issues for tiny qwen3.5"),
         ),
@@ -683,6 +775,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             None,
             None,
+            False,
             id="qwen3.5-0.8b-dense_tp2",
         ),
         # Nemotron-3.5-Lightning (30B MoE, bf16) on 4xH100-80G. Same
@@ -703,6 +796,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             None,
             None,
+            False,
             id="nemotron3.5-lightning_tp4_ep4_h100",
             marks=pytest.mark.h100,
         ),
@@ -723,6 +817,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             None,
             None,
+            False,
             id="qwen3.5-35b-a3b_h100_tp4_ep4",
             marks=pytest.mark.h100,
         ),
@@ -745,6 +840,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             1e-1,
             None,
             None,
+            False,
             id="qwen3.8-flash-next-4layer_h100_ep4",
             marks=pytest.mark.h100,
         ),
@@ -761,6 +857,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             1e-1,
             None,
             None,
+            False,
             id="qwen3.8-flash-next-4layer_h100_tp2_ep4",
             marks=pytest.mark.h100,
         ),
@@ -785,6 +882,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             "full_fp8",
             None,
+            False,
             id="qwen3.5-0.8b-dense_tp2_full_fp8",
             marks=pytest.mark.h100,
         ),
@@ -801,6 +899,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             "fp8_param",
             None,
+            False,
             id="qwen3.5-0.8b-dense_tp2_fp8_param",
             marks=pytest.mark.h100,
         ),
@@ -820,6 +919,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             "full_fp8",
             None,
+            False,
             id="qwen3.5-35b-a3b_h100_tp4_ep4_full_fp8",
             marks=pytest.mark.h100,
         ),
@@ -841,6 +941,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             "full_fp8_exclude",
             None,
+            False,
             id="qwen3.5-35b-a3b_h100_tp4_ep4_full_fp8_exclude",
             marks=pytest.mark.h100,
         ),
@@ -868,6 +969,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             "mxfp8",
             None,
+            False,
             id="qwen3.5-0.8b-dense_mxfp8",
             marks=pytest.mark.b200,
         ),
@@ -887,6 +989,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             "mxfp8_fp8kv",
             None,
+            False,
             id="qwen3.5-0.8b-dense_mxfp8_fp8kv",
             marks=pytest.mark.b200,
         ),
@@ -908,6 +1011,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             "mxfp8_exclude",
             None,
+            False,
             id="qwen3.5-0.8b-dense_mxfp8_exclude",
             marks=pytest.mark.b200,
         ),
@@ -926,6 +1030,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             "mxfp8_precision_file",
             None,
+            False,
             id="qwen3.5-0.8b-dense_mxfp8_precision_file",
             marks=pytest.mark.b200,
         ),
@@ -942,6 +1047,7 @@ async def construct_training_input_from_generator_output(generator_output, token
             5e-2,
             "mxfp8",
             None,
+            False,
             id="qwen3.5-35b-a3b_b200_tp1_ep8_mxfp8",
             marks=pytest.mark.b200,
         ),
@@ -960,6 +1066,7 @@ async def test_logprobs_matching_roundtrip(
     megatron_threshold,
     fp8_mode,
     max_generate_length,
+    sync_from_offloaded,
     tmp_path,
 ):
     """
@@ -972,6 +1079,10 @@ async def test_logprobs_matching_roundtrip(
         or "kimi-k3" in model_name.lower()
         or "qwen3.8-flash-next" in model_name.lower()
         or _is_beam(model_name)
+        # Inkling2's slice is a truncated model with a very flat next-token distribution: one
+        # greedy token flipped by run-to-run noise makes the rest of the pre/post-sync
+        # generations differ.
+        or "inkling2" in model_name.lower()
     )
     if _is_beam(model_name):
         create_beam_tiny(model_name)
@@ -1031,6 +1142,12 @@ async def test_logprobs_matching_roundtrip(
                 ]
             if fp8_mode == "fp8_param":
                 mcfg.ddp_config.fp8_param_gather = True
+            if fp8_mode == "mxfp8_compute" and "inkling2" in model_name.lower():
+                # MXFP8 needs every GEMM dim divisible by 32; Inkling2's per-head sink (heads / TP) and
+                # dynamic short-conv kernel projection (kv_heads * width / TP) are smaller.
+                mcfg = cfg.trainer.policy.megatron_config = dataclasses.replace(
+                    mcfg, fp8_exclude_modules=list(INKLING2_MXFP8_EXCLUDE_MODULES)
+                )
             # vLLM: FP8 rollout fed by the serialized weight sync
             # (_apply_serialized_fp8_weight_sync_defaults injects the
             # quantization method, load_format=dummy and the wire's
@@ -1038,14 +1155,16 @@ async def test_logprobs_matching_roundtrip(
             # explicitly: production resolves "auto" in validate_megatron_cfg,
             # which already ran inside get_test_actor_config before these fp8
             # fields were applied.
-            cfg.generator.inference_engine.fp8_weight_sync_mode = (
-                "mxfp8" if fp8_mode.startswith("mxfp8") else "blockwise"
-            )
-            # The validated FP8 production runs use the mp executor; with the
-            # ray executor, vLLM 0.23's ray_executor_v2 ignores
-            # VLLM_RAY_BUNDLE_INDICES, so multi-engine colocate (e.g. the 35B
-            # row's 4 x TP=1) stacks every engine's worker on GPU 0 and OOMs.
-            cfg.generator.inference_engine.distributed_executor_backend = "mp"
+            # "mxfp8_compute" trains in MXFP8 but keeps the BF16 rollout (no FP8 wire).
+            if fp8_mode != "mxfp8_compute":
+                cfg.generator.inference_engine.fp8_weight_sync_mode = (
+                    "mxfp8" if fp8_mode.startswith("mxfp8") else "blockwise"
+                )
+                # The validated FP8 production runs use the mp executor; with the
+                # ray executor, vLLM 0.23's ray_executor_v2 ignores
+                # VLLM_RAY_BUNDLE_INDICES, so multi-engine colocate (e.g. the 35B
+                # row's 4 x TP=1) stacks every engine's worker on GPU 0 and OOMs.
+                cfg.generator.inference_engine.distributed_executor_backend = "mp"
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         tokenizer.pad_token = tokenizer.eos_token
@@ -1163,7 +1282,7 @@ async def test_logprobs_matching_roundtrip(
             ), f"Logprob diff should be less than {megatron_threshold}, but is {logprobs_diff.mean().item():.6f}"
 
             # sync weights
-            policy.offload_to_cpu(offload_optimizer=True, offload_model=False)
+            policy.offload_to_cpu(offload_optimizer=True, offload_model=sync_from_offloaded)
             await client.wake_up(tags=["weights"])
             with Timer("sync_weights"):
                 ray.get(
@@ -1207,6 +1326,9 @@ async def test_logprobs_matching_roundtrip(
                         divergent += 1
                     diffs.extend(abs(x - y) for x, y in zip(l1[:n], l2[:n]))
                 assert diffs, "no common-prefix tokens between pre/post-sync generations"
+                # Near-tie flips leave some sequences intact; every one diverging means the synced
+                # model differs (a broken sync gave 80/80 after 2 common tokens in all).
+                assert divergent < len(ids_1), f"all {divergent} sequences diverged after the sync"
                 logprobs_diff = torch.tensor(diffs)
                 print(
                     f"vLLM resync common-prefix logprob diff mean: {logprobs_diff.mean().item():.6f}, "
