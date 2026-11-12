@@ -379,6 +379,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 "trainer.fully_async.sample_full_batch=True requires trainer.algorithm.zero_variance_filter=True "
                 "(it is the async-native equivalent of dynamic_sampling='filter')."
             )
+            assert not self._checkpoint_before_weight_sync(), (
+                "trainer.fully_async.sample_full_batch=True is not supported when _checkpoint_before_weight_sync "
+                "returns True. When an epoch runs out of prompts mid mini-batch, the loop saves the end-of-epoch "
+                "checkpoint with no training step before it, so that save does not run before a weight sync."
+            )
         assert (
             not self.cfg.generator.batched
         ), "batched is not supported for fully async training since a batched generate() call does not support pause/continue."
@@ -458,7 +463,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
         The default is ``False``: the checkpoint runs after eval, so the weight sync is not delayed
         while generation runs. A subclass whose inference engines share the GPUs returns ``True``,
-        so that the checkpoint runs while the engines sleep."""
+        so that the checkpoint runs while the engines sleep. ``True`` does not support
+        ``sample_full_batch``: the checkpoint of an exhausted epoch has no training step and no
+        weight sync before it, and ``__init__`` rejects that combination."""
         return False
 
     async def _sync_weights_after_training_step(self) -> None:
