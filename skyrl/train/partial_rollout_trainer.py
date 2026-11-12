@@ -144,12 +144,5 @@ class PartialRolloutRayPPOTrainer(FullyAsyncRayPPOTrainer):
         offload_kv = not self.cfg.trainer.fully_async.clear_kv_cache_on_weight_sync
         await self.inference_engine_client.sleep_with_frozen_requests(offload_kv=offload_kv)
 
-    async def _sync_weights_after_training_step(self, force_save: bool, is_epoch_end: bool) -> None:
-        # The checkpoint loads the policy back to the GPUs. Write it first, while the inference
-        # engines sleep. The loop's call after eval, when the engines are awake, then does nothing.
-        await self._save_step_checkpoints(force_save, is_epoch_end)
-        # The inherited weight sync wakes the engines and resumes the paused requests.
-        await super()._sync_weights_after_training_step(force_save, is_epoch_end)
-
     async def _after_training_loop(self) -> None:
         await self.inference_engine_client.sleep()
