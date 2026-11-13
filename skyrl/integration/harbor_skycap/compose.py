@@ -21,8 +21,6 @@ out or failed is masked whole, and a trial that hit the context limit trains
 with its reward unless overlong filtering is on. In eval (``mask_groups=False``)
 there is no group baseline to protect, so a trial that timed out or failed
 scores 0 on its own and the other trials of its instance keep their rewards.
-With ``mask_timeouts=False`` a trial that timed out is a failure, not a hole: it
-trains with reward 0 and masks nothing else.
 
 With ``include_images``, each row carries its path's ``pixel_values`` and ``image_grid_thw``, its images in
 placeholder order. A row without images (a masked rollout's placeholder) carries zero-row tensors, as the
@@ -131,7 +129,6 @@ def compose(
     *,
     overlong_filtering: bool,
     mask_groups: bool = True,
-    mask_timeouts: bool = True,
     top_k: int = -1,
     sample_support: bool = False,
     routed_experts: bool = False,
@@ -141,18 +138,18 @@ def compose(
 
     ``mask_groups`` masks every trial of an instance when one of them timed out or failed, so GRPO never
     computes a baseline from a group with holes in it; eval turns it off and scores each failed trial 0 alone.
-    ``mask_timeouts=False`` makes a timed-out trial a failure that trains with its reward (0) instead of a hole.
     ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
     still carries (empty) support rows, as every other batch will. ``routed_experts`` says the same
     of routes (R3); every trained row must then have them. ``include_images`` adds each row's vision features.
     """
-    masked_reasons = MASKED_STOP_REASONS if mask_timeouts else MASKED_STOP_REASONS - {"agent_timeout"}
     masked_instances = (
-        {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in masked_reasons} if mask_groups else set()
+        {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
+        if mask_groups
+        else set()
     )
 
     def is_masked(outcome: TrialOutcome) -> bool:
-        return outcome.trajectory_id.instance_id in masked_instances or outcome.stop_reason in masked_reasons
+        return outcome.trajectory_id.instance_id in masked_instances or outcome.stop_reason in MASKED_STOP_REASONS
 
     groups: List[List[_Row]] = []
     trained: List[TrialOutcome] = []
