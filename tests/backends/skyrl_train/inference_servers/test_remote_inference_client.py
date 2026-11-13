@@ -1076,6 +1076,29 @@ class TestPausedSeconds:
         client.pause.assert_awaited_with(mode=PauseMode.KEEP, clear_cache=False)
 
     @pytest.mark.asyncio
+    async def test_window_starting_mid_pause(self, monkeypatch):
+        """A window that opens mid-pause only counts the paused time inside the window."""
+        now = [100.0]
+        client = self._client_with_fake_clock(monkeypatch, now)
+        await client.pause_generation()
+        now[0] = 104.0
+        paused_at_start = client.paused_seconds()
+        now[0] = 106.0
+        await client.resume_generation()
+        now[0] = 120.0
+        assert client.paused_seconds() - paused_at_start == 2.0
+
+    def test_unpickled_client_is_not_paused(self, monkeypatch):
+        now = [100.0]
+        client = self._client_with_fake_clock(monkeypatch, now)
+        client._paused_since = 100.0
+        client._paused_seconds_total = 3.0
+        monkeypatch.undo()
+        restored = pickle.loads(pickle.dumps(client))
+        assert restored._paused_since is None
+        assert restored.paused_seconds() == 3.0
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("error", [RuntimeError("pause failed"), asyncio.CancelledError()])
     async def test_failed_pause_stops_clock(self, monkeypatch, error):
         now = [100.0]

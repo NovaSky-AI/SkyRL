@@ -1669,6 +1669,8 @@ class RemoteInferenceClient(InferenceEngineInterface):
         self.__dict__.update(state)
         self._gen_sem = None
         self._detok_sem = None
+        # A monotonic timestamp from another process is meaningless here.
+        self._paused_since = None
         self._sem_loop = None
 
     async def aclose(self) -> None:

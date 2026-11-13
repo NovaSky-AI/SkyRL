@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 from torchdata.stateful_dataloader import StatefulDataLoader
 
+import skyrl.train.fully_async_trainer as fully_async_trainer_module
 from skyrl.train.fully_async_trainer import (
     FullyAsyncRayPPOTrainer,
     GeneratedOutputGroup,
@@ -230,8 +231,6 @@ async def test_drain_next_group_raises_when_worker_fails_mid_drain():
 @pytest.mark.asyncio
 async def test_group_completion_time_excludes_engine_pause(monkeypatch):
     """A group in flight across a weight-sync pause reports wall-clock time minus the paused time."""
-    import skyrl.train.fully_async_trainer as fully_async_trainer_module
-
     now = [100.0]
     paused = [0.0]
     monkeypatch.setattr(fully_async_trainer_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
