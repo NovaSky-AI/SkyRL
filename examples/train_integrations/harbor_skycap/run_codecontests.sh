@@ -28,7 +28,7 @@
 #                              shuffled once, the first EVAL_TASKS held out, the next NUM_TASKS
 #                              trained on, so the held-out set doesn't move when NUM_TASKS does
 #   RUN_NAME                   the run's name and directory (default harbor-$GENERATOR-<uuid>, a
-#                              fresh run); the same name again resumes it
+#                              fresh run); the same name again resumes it, on the same split only
 #   OUTPUT_ROOT                where run directories go (default /mnt/cluster_storage/harbor/runs
 #                              when /mnt/cluster_storage exists, else /tmp/harbor/runs)
 #   CKPT_INTERVAL, MAX_CKPTS   steps between checkpoints and how many to keep (default 5, 5)

@@ -65,14 +65,18 @@ def test_relative_paths_make_links_that_resolve(tmp_path, monkeypatch) -> None:
     assert len(links) == 13 and all(link.is_dir() for link in links)
 
 
-def test_every_launch_rebuilds_the_run_directory_from_the_seed(tmp_path) -> None:
+def _launch_args(tmp_path):
     tasks_dir = tmp_path / "CodeContests"
     for name in NAMES:
-        (tasks_dir / name).mkdir(parents=True)
-    run_dir = tmp_path / "run"
+        (tasks_dir / name).mkdir(parents=True, exist_ok=True)
+    return tasks_dir, tmp_path / "run", ["--tasks-dir", str(tasks_dir), "--run-dir", str(tmp_path / "run")]
 
-    main(["--tasks-dir", str(tasks_dir), "--run-dir", str(run_dir), "--eval", "5", "--train", "20"])
-    main(["--tasks-dir", str(tasks_dir), "--run-dir", str(run_dir), "--eval", "5", "--train", "8"])
+
+def test_every_launch_rebuilds_the_run_directory_from_the_seed(tmp_path) -> None:
+    tasks_dir, run_dir, args = _launch_args(tmp_path)
+    main([*args, "--eval", "5", "--train", "8"])
+    (run_dir / "tasks" / "stale").symlink_to(tasks_dir / NAMES[0])
+    main([*args, "--eval", "5", "--train", "8"])
 
     train = (run_dir / "train_tasks.txt").read_text().split()
     held_out = (run_dir / "eval_tasks.txt").read_text().split()
@@ -80,3 +84,14 @@ def test_every_launch_rebuilds_the_run_directory_from_the_seed(tmp_path) -> None
     assert sorted(p.name for p in (run_dir / "tasks").iterdir()) == sorted(train)
     assert sorted(p.name for p in (run_dir / "eval_tasks").iterdir()) == sorted(held_out)
     assert (run_dir / "tasks" / train[0]).resolve() == (tasks_dir / train[0]).resolve()
+
+
+@pytest.mark.parametrize("change", [["--seed", "1"], ["--eval", "4"], ["--train", "9"]], ids=["seed", "eval", "train"])
+def test_a_relaunch_with_a_different_split_is_refused(tmp_path, change) -> None:
+    _, run_dir, args = _launch_args(tmp_path)
+    main([*args, "--eval", "5", "--train", "8"])
+    saved = (run_dir / "train_tasks.txt").read_text()
+
+    with pytest.raises(ValueError, match="already holds a different split"):
+        main([*args, "--eval", "5", "--train", "8", *change])
+    assert (run_dir / "train_tasks.txt").read_text() == saved
