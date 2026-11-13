@@ -338,3 +338,42 @@ def test_a_tool_call_delta_with_a_null_index_is_the_first_call() -> None:
 
 
 _JSON = {"Content-Type": "application/json"}
+
+
+async def test_finishing_in_process_answers_as_the_route_does(stack: Stack) -> None:
+    from skycap import CaptureError
+
+    created = await stack.create()
+    await client(created["base_url"]).chat.completions.create(model=MODEL, messages=[user("q")])
+    result = await stack.server.finish_trajectory(created["id"], {"reward": 1.0})
+    over_http = await stack.finish(created["id"], {"reward": 1.0})
+
+    assert over_http == {
+        "id": result.id,
+        "status": result.status,
+        "samples": [sample.to_json() for sample in result.samples],
+        "unbridged_calls": result.unbridged_calls,
+        "record": None,
+    }
+    with pytest.raises(CaptureError) as changed:
+        await stack.server.finish_trajectory(created["id"], {"reward": 0.0})
+    assert changed.value.status == 409
+    with pytest.raises(CaptureError) as unknown:
+        await stack.server.finish_trajectory("tr_missing")
+    assert unknown.value.status == 404
+
+
+async def test_finish_encodes_its_samples_off_the_event_loop(stack: Stack, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    from skycap.samples import Sample
+
+    encoded_on: list[threading.Thread] = []
+    to_json = Sample.to_json
+    monkeypatch.setattr(Sample, "to_json", lambda self: encoded_on.append(threading.current_thread()) or to_json(self))
+    created = await stack.create()
+    await client(created["base_url"]).chat.completions.create(model=MODEL, messages=[user("q")])
+    (sample,) = (await stack.finish(created["id"]))["samples"]
+
+    assert sample["targets"] == [1]
+    assert encoded_on and threading.current_thread() not in encoded_on

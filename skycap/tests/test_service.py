@@ -57,6 +57,29 @@ async def test_token_mode_is_built_from_options(tmp_path: Path) -> None:
     assert service.server.backend.describe()["use_raw_content"] is True
 
 
+@pytest.mark.parametrize("paths", ["all", "final"])
+async def test_a_service_finishes_a_trajectory_from_another_thread(tmp_path: Path, paths: str) -> None:
+    upstream = TestServer(MockOpenAI().app())
+    await upstream.start_server()
+    service = CaptureService(str(upstream.make_url("/v1")), api_key=API_KEY, record_dir=str(tmp_path), host="127.0.0.1")
+    url = await asyncio.to_thread(service.start)
+    try:
+        async with CapturePool([url]) as pool:
+            trajectory = await pool.create({"task": "t"})
+            await converse(client(trajectory.base_url), "q")
+            result = await asyncio.to_thread(service.finish, trajectory.id, {"reward": 1.0}, 10.0, paths=paths)
+            repeated = await trajectory.finish({"reward": 1.0}, paths=paths)
+    finally:
+        await asyncio.to_thread(service.stop)
+        await upstream.close()
+    assert result.status == repeated.status == "finished"
+    assert [s.to_json() for s in result.samples] == [s.to_json() for s in repeated.samples]
+    assert result.record is not None and result.record == repeated.record
+    document = record.read_document(tmp_path, trajectory.id)
+    assert document["annotations"] == {"reward": 1.0}
+    assert document["samples"]["paths"] == paths
+
+
 def test_bad_options_are_refused_before_anything_starts() -> None:
     with pytest.raises(ValueError, match="mode"):
         build_backend("http://x", mode="bytes")
