@@ -180,7 +180,7 @@ trained model**.
 
 By default `remove_microbatch_padding=true` packs multiple sequences per
 micro-batch (requires flash attention). The Megatron backend additionally
-supports **controller-level FFD bin-packing** across the global mini-batch with
+supports **controller-level MFFD bin-packing** across the global mini-batch with
 `use_sequence_packing=true`:
 
 ```bash
