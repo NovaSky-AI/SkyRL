@@ -41,6 +41,12 @@ jobs:
         )
       )
     runs-on: ubuntu-latest
+    # The full suite (~5.5 h on one 4xH100 node) overruns the 16200 s run timeout below, so it
+    # runs as two parallel shards; see ci/gpu_ci_run_h100.sh.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [models, other]
     defaults:
       run:
         shell: bash
@@ -83,10 +89,12 @@ jobs:
           ANYSCALE_CLI_TOKEN: ${{ secrets.ANYSCALE_CLI_TOKEN }}
           ANYSCALE_HOST: https://console.anyscale.com
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          H100_CI_SHARD: ${{ matrix.shard }}
         run: |
           envsubst < ci/anyscale_gpu_ci_h100.yaml > ci/anyscale_gpu_ci_h100_envsubst.yaml
+          sed -i "s|^entrypoint:.*|entrypoint: bash ci/gpu_ci_run_h100.sh $H100_CI_SHARD|" ci/anyscale_gpu_ci_h100_envsubst.yaml
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          JOB_NAME="skyrl-gpu-ci-h100-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
+          JOB_NAME="skyrl-gpu-ci-h100-${H100_CI_SHARD}-${COMMIT_SHA:0:7}-${{ github.run_id }}-${{ github.run_attempt }}"
           bash ci/submit_anyscale_job.sh ci/anyscale_gpu_ci_h100_envsubst.yaml "$JOB_NAME" 16200
           rm -f ci/anyscale_gpu_ci_h100_envsubst.yaml
       # Cancelling the run stops the runner, not the cluster. GitHub still runs
