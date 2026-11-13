@@ -13,6 +13,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
+from skyrl.backends.skyrl_train.fields import GeneratorInputKey, GeneratorOutputKey
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
@@ -82,27 +83,27 @@ def _rows_for_output(
     columns are the rows. Step-wise, each trajectory expands to one row per step, so rows are
     resolved through ``generator_output["trajectory_ids"]``.
     """
-    env_extras = generator_input["env_extras"]
+    env_extras = generator_input[GeneratorInputKey.ENV_EXTRAS]
     if env_extras is None:
-        env_extras = [{} for _ in range(len(generator_input["prompts"]))]
+        env_extras = [{} for _ in range(len(generator_input[GeneratorInputKey.PROMPTS]))]
     if not step_wise:
         return _EvalRows(
-            env_classes=list(generator_input["env_classes"]),
+            env_classes=list(generator_input[GeneratorInputKey.ENV_CLASSES]),
             env_extras=list(env_extras),
             uids=list(uids),
-            prompts=list(generator_input["prompts"]),
+            prompts=list(generator_input[GeneratorInputKey.PROMPTS]),
         )
     by_instance = {
         traj_id.instance_id: (env_class, env_extra, prompt)
         for traj_id, env_class, env_extra, prompt in zip(
-            generator_input["trajectory_ids"],
-            generator_input["env_classes"],
+            generator_input[GeneratorInputKey.TRAJECTORY_IDS],
+            generator_input[GeneratorInputKey.ENV_CLASSES],
             env_extras,
-            generator_input["prompts"],
+            generator_input[GeneratorInputKey.PROMPTS],
         )
     }
     rows = _EvalRows()
-    for traj_id in generator_output["trajectory_ids"]:
+    for traj_id in generator_output[GeneratorOutputKey.TRAJECTORY_IDS]:
         assert traj_id.instance_id in by_instance, f"Trajectory ID {traj_id.instance_id} not found in input"
         env_class, env_extra, prompt = by_instance[traj_id.instance_id]
         rows.env_classes.append(env_class)
@@ -128,7 +129,7 @@ def _scored_view(
     if not step_wise:
         return concat_generator_outputs, rows, None
 
-    is_last_step = concat_generator_outputs["is_last_step"]
+    is_last_step = concat_generator_outputs[GeneratorOutputKey.IS_LAST_STEP]
     keep = [i for i, last in enumerate(is_last_step) if last]
     view: Dict[str, list] = {}
     for key, value in concat_generator_outputs.items():
@@ -142,7 +143,7 @@ def _scored_view(
     # `eval_n_samples_per_prompt > 1` the repetitions of one prompt share `rows.uids` (the prompt
     # id, which is what pass@n groups by) but are separate trajectories with their own step counts.
     # Counted over every row, BEFORE the last-step filter; looked up per surviving last-step row.
-    trajectory_keys = [traj_id.to_string() for traj_id in concat_generator_outputs["trajectory_ids"]]
+    trajectory_keys = [traj_id.to_string() for traj_id in concat_generator_outputs[GeneratorOutputKey.TRAJECTORY_IDS]]
     step_counts = Counter(trajectory_keys)
     scored_rows = rows.select(keep)
     return view, scored_rows, [step_counts[trajectory_keys[i]] for i in keep]
@@ -204,18 +205,20 @@ async def evaluate(
         if vllm_metrics_scraper is not None:
             vllm_metrics_scraper.pause()
         eval_generate_time += time.monotonic() - gen_start
-        validate_generator_output(len(generator_input["prompts"]), generator_output, step_wise=step_wise)
+        validate_generator_output(
+            len(generator_input[GeneratorInputKey.PROMPTS]), generator_output, step_wise=step_wise
+        )
         generator_outputs.append(generator_output)
         rows.extend(_rows_for_output(generator_input, uids, generator_output, step_wise))
     concat_generator_outputs: GeneratorOutput = concatenate_generator_outputs(generator_outputs, step_wise=step_wise)
 
     if cfg.trainer.print_example_interval > 0:
-        vis = tokenizer.decode(generator_output["response_ids"][0])
+        vis = tokenizer.decode(generator_output[GeneratorOutputKey.RESPONSE_IDS][0])
         pretty_print_example(
             logger,
-            prompt=generator_input["prompts"][0],
+            prompt=generator_input[GeneratorInputKey.PROMPTS][0],
             response=vis,
-            reward=generator_output["rewards"][0],
+            reward=generator_output[GeneratorOutputKey.REWARDS][0],
         )
 
     # Metrics score one row per trajectory: every row when not step-wise, the last step of each
@@ -251,7 +254,7 @@ async def evaluate(
         }
     )
 
-    for key, value in concat_generator_outputs["rollout_metrics"].items():
+    for key, value in concat_generator_outputs[GeneratorOutputKey.ROLLOUT_METRICS].items():
         eval_metrics[f"eval/all/{key}"] = value
 
     # 4. Prepare dumping data. The dump keeps every row (every step when step-wise).

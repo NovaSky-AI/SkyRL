@@ -5,8 +5,8 @@ import pytest
 import ray
 import torch
 
+from skyrl.backends.skyrl_train.fields import PAYLOAD_KEYS
 from skyrl.backends.skyrl_train.rollout_shard import (
-    PAYLOAD_KEYS,
     StoredSampleSupport,
     support_id_bits,
 )

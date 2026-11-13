@@ -27,6 +27,7 @@ from loguru import logger
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
 )
+from skyrl.backends.skyrl_train.fields import BatchMetadataKey, TrainingField
 from skyrl.backends.skyrl_train.training_batch import TensorList, TrainingInputBatch
 
 from .bin_packing import make_seq_packer
@@ -60,8 +61,8 @@ class DefaultCollator:
         from skyrl.train.sft_trainer import collate_sft_batch
 
         batch = collate_sft_batch(examples, self.tokenizer)
-        total_nonpad = max(batch["loss_mask"].sum().item(), 1)
-        batch["loss_mask"] = batch["loss_mask"].float() / total_nonpad
+        total_nonpad = max(batch[TrainingField.LOSS_MASK].sum().item(), 1)
+        batch[TrainingField.LOSS_MASK] = batch[TrainingField.LOSS_MASK].float() / total_nonpad
         return batch
 
 
@@ -324,13 +325,13 @@ class PackedDataCollator:
         sub_seq_lengths = TensorList([torch.tensor(lens, dtype=torch.long) for lens in bin_subseq_lengths])
         batch = TrainingInputBatch(
             {
-                "sequences": sequences,
-                "attention_mask": attention_mask,
-                "loss_mask": loss_mask,
-                "sub_seq_lengths": sub_seq_lengths,
+                TrainingField.SEQUENCES: sequences,
+                TrainingField.ATTENTION_MASK: attention_mask,
+                TrainingField.LOSS_MASK: loss_mask,
+                TrainingField.SUB_SEQ_LENGTHS: sub_seq_lengths,
             }
         )
         batch.metadata = {
-            "response_length": max_packed_len - 1,
+            BatchMetadataKey.RESPONSE_LENGTH: max_packed_len - 1,
         }
         return batch

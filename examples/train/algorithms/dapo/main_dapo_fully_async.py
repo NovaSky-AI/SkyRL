@@ -3,18 +3,20 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo_fully
 """
 
 import sys
+from typing import List, Optional, Tuple
 
 import ray
 import torch
-from typing import List, Optional, Tuple
 
-from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
-from skyrl.train.utils import initialize_ray, validate_cfg
+from examples.train.algorithms.dapo.main_dapo import (
+    DAPOConfig,
+    apply_soft_overlong_punishment,
+)
+from skyrl.backends.skyrl_train.fields import GeneratorOutputKey
 from skyrl.train.entrypoints.main_base import BasePPOExp
-
+from skyrl.train.fully_async_trainer import FullyAsyncRayPPOTrainer
 from skyrl.train.generators.base import GeneratorOutput
-
-from examples.train.algorithms.dapo.main_dapo import DAPOConfig, apply_soft_overlong_punishment
+from skyrl.train.utils import initialize_ray, validate_cfg
 
 
 class FullyAsyncDAPOTrainer(FullyAsyncRayPPOTrainer):
@@ -48,9 +50,9 @@ class FullyAsyncDAPOTrainer(FullyAsyncRayPPOTrainer):
         ``apply_soft_overlong_punishment`` does not modify its input lists, so per-token reward lists shared
         between the trained output and the metrics output are penalized once per output.
         """
-        response_lengths = [len(response) for response in generator_output["response_ids"]]
-        generator_output["rewards"] = apply_soft_overlong_punishment(
-            generator_output["rewards"],
+        response_lengths = [len(response) for response in generator_output[GeneratorOutputKey.RESPONSE_IDS]]
+        generator_output[GeneratorOutputKey.REWARDS] = apply_soft_overlong_punishment(
+            generator_output[GeneratorOutputKey.REWARDS],
             response_lengths,
             self.cfg.generator.sampling_params.max_generate_length,
             self.cfg.trainer.algorithm.overlong_buffer_len,

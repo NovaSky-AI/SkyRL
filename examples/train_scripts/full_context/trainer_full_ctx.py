@@ -6,8 +6,9 @@ from typing import Dict, List
 import ray
 from loguru import logger
 
-from skyrl.train.trainer import RayPPOTrainer
+from skyrl.backends.skyrl_train.fields import BatchMetadataKey, GeneratorOutputKey
 from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
+from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.utils import Timer
 
 
@@ -104,10 +105,10 @@ class FullCtxTrainer(RayPPOTrainer):
                 uids.append(str(p))
         num_tokens = sum(len(p) + len(r) for p, r in zip(prompt_token_ids, response_ids))
         dummy_generator_output = {
-            "prompt_token_ids": prompt_token_ids,
-            "response_ids": response_ids,
-            "rewards": rewards,
-            "loss_masks": loss_masks,
+            GeneratorOutputKey.PROMPT_TOKEN_IDS: prompt_token_ids,
+            GeneratorOutputKey.RESPONSE_IDS: response_ids,
+            GeneratorOutputKey.REWARDS: rewards,
+            GeneratorOutputKey.LOSS_MASKS: loss_masks,
         }
         return dummy_generator_output, uids, num_tokens, sum(len(r) for r in response_ids)
 
@@ -183,7 +184,7 @@ class FullCtxTrainer(RayPPOTrainer):
                         # remove some unwanted keys
                         for key in ["rewards"]:
                             training_input.pop(key)
-                        training_input.metadata.pop("uids")
+                        training_input.metadata.pop(BatchMetadataKey.UIDS)
 
                     # 4. train policy/critic model
                     with Timer("train_critic_and_policy", self.all_timings):

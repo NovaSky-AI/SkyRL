@@ -66,6 +66,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.rank_microbatch import (
     HostMicrobatch,
     LossTensors,
 )
+from skyrl.backends.skyrl_train.fields import (
+    ForwardOutputKey,
+    TrainingField,
+)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
@@ -908,11 +912,11 @@ class MegatronWorker:
                 temperature=self.cfg.algorithm.temperature,
             )
 
-        output = TrainingOutputBatch({"output": log_probs.to("cpu")})
+        output = TrainingOutputBatch({ForwardOutputKey.OUTPUT: log_probs.to("cpu")})
         if use_token_batching:
             # The output is concatenated across microbatches: keep the real samples, in input order.
             output = self._reorder_megatron_forward_output(output, microbatch_iterator, mbs)
-        return output["output"]
+        return output[ForwardOutputKey.OUTPUT]
 
     def _reorder_megatron_forward_output(
         self, output: TrainingOutputBatch, microbatch_iterator: TokenBasedBatchIterator, padded_mbs: int
@@ -925,7 +929,7 @@ class MegatronWorker:
         if not mpu.is_pipeline_last_stage(ignore_virtual=True):
             return output
 
-        log_probs = output["output"]  # shape: [total_padded_samples, num_actions]
+        log_probs = output[ForwardOutputKey.OUTPUT]  # shape: [total_padded_samples, num_actions]
 
         # Split by padded_mbs, take only real samples, reorder
         all_log_probs = log_probs.split(padded_mbs, dim=0)
@@ -943,7 +947,7 @@ class MegatronWorker:
             for sample_idx, original_idx in enumerate(original_indices):
                 reordered[original_idx] = mb_log_probs[sample_idx]
 
-        result = TrainingOutputBatch({"output": reordered})
+        result = TrainingOutputBatch({ForwardOutputKey.OUTPUT: reordered})
         result.metadata = output.metadata
         return result
 
@@ -1016,8 +1020,8 @@ class MegatronWorker:
         Drop ``pixel_values`` from the batch on every pipeline stage except the first.
         Do this prior to moving to GPU to save memory
         """
-        if mpu.get_pipeline_model_parallel_rank() != 0 and data.get("pixel_values") is not None:
-            data["pixel_values"] = None
+        if mpu.get_pipeline_model_parallel_rank() != 0 and data.get(TrainingField.PIXEL_VALUES) is not None:
+            data[TrainingField.PIXEL_VALUES] = None
 
 
 def _counts_train_compute(method):
@@ -1313,8 +1317,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         for metrics in metrics_list:
             if metrics is None:
                 continue
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            if ForwardOutputKey.LOSS_FN_OUTPUTS in metrics:
+                all_loss_fn_outputs.extend(metrics.pop(ForwardOutputKey.LOSS_FN_OUTPUTS))
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
@@ -1500,7 +1504,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             if metrics is None:
                 loss_fn_output_batches.append([])
                 continue
-            loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
+            loss_fn_output_batches.append(metrics.pop(ForwardOutputKey.LOSS_FN_OUTPUTS, []))
             # Skip fully-padding microbatches: their metrics (clip_ratio=0, policy_entropy=0,
             # ...) are meaningless and would drag down the mean-reduced metrics. Summed
             # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but

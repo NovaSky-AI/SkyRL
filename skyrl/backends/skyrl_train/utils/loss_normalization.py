@@ -7,10 +7,8 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 
-from skyrl.backends.skyrl_train.training_batch import (
-    SUB_SEQ_LENGTHS,
-    TrainingInputBatch,
-)
+from skyrl.backends.skyrl_train.fields import TrainingField
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 
 
 @dataclass(frozen=True)
@@ -52,9 +50,9 @@ class MinibatchLossNormalization:
     ) -> "MinibatchLossNormalization":
         """Count ``data`` as one optimizer step, summing over ``dp_group`` when it is one DP shard."""
         sample_mask = data.real_sample_mask.to(torch.bool)
-        loss_mask = data["loss_mask"].to(torch.bool) & sample_mask[:, None]
-        attention_mask = data["attention_mask"].to(torch.bool) & sample_mask[:, None]
-        sub_seq_lengths = data.get(SUB_SEQ_LENGTHS)
+        loss_mask = data[TrainingField.LOSS_MASK].to(torch.bool) & sample_mask[:, None]
+        attention_mask = data[TrainingField.ATTENTION_MASK].to(torch.bool) & sample_mask[:, None]
+        sub_seq_lengths = data.get(TrainingField.SUB_SEQ_LENGTHS)
         if sub_seq_lengths is not None:
             real_rows = sample_mask.tolist()
             segment_lengths = [int(n) for row, real in zip(sub_seq_lengths, real_rows) if real for n in row.tolist()]

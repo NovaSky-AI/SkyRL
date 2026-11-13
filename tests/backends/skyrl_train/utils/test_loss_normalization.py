@@ -3,9 +3,8 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.backends.skyrl_train.training_batch import (
-    REAL_SAMPLE_MASK,
-    SUB_SEQ_LENGTHS,
     TensorList,
     TrainingInputBatch,
     pad_training_input_batch,
@@ -25,7 +24,7 @@ def make_batch():
             ),
             # Row 3 is a real filtered trajectory; row 4 is synthetic.
             "loss_mask": torch.tensor([[1, 1, 1, 1], [1, 0, 0, 0], [1, 1, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]),
-            REAL_SAMPLE_MASK: torch.tensor([True, True, True, True, False]),
+            TrainingField.REAL_SAMPLE_MASK: torch.tensor([True, True, True, True, False]),
         }
     )
 
@@ -70,14 +69,14 @@ def test_alignment_padding_does_not_change_sample_identity():
 
 def test_padding_batch_without_explicit_mask():
     batch = make_batch()[:4]
-    del batch[REAL_SAMPLE_MASK]
+    del batch[TrainingField.REAL_SAMPLE_MASK]
     assert pad_training_input_batch(batch, 2).real_sample_mask.tolist() == [True] * 4 + [False] * 2
 
 
 def test_empty_losses_are_finite_and_differentiable():
     batch = make_batch()
     batch["loss_mask"].zero_()
-    batch[REAL_SAMPLE_MASK].zero_()
+    batch[TrainingField.REAL_SAMPLE_MASK].zero_()
     normalization = MinibatchLossNormalization.from_batch(batch)
     values = torch.ones(5, 4, requires_grad=True)
     loss = normalization.token_mean_contribution(masked_mean(values, batch["loss_mask"]), batch["loss_mask"])
@@ -109,7 +108,7 @@ def test_mtp_token_counts_follow_segments():
     assert normalization.num_mtp_tokens(3) == 18 - 12
     with pytest.raises(ValueError, match="exceeds the shortest"):
         normalization.num_mtp_tokens(4)
-    batch[SUB_SEQ_LENGTHS] = TensorList(
+    batch[TrainingField.SUB_SEQ_LENGTHS] = TensorList(
         [torch.tensor([3, 3]), torch.tensor([5]), torch.tensor([4]), torch.tensor([3]), torch.tensor([1])]
     )
     split = MinibatchLossNormalization.from_batch(batch)

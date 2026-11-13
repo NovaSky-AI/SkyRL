@@ -39,6 +39,11 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     WorkerOutput,
     loss_fn_outputs_to_tensor,
 )
+from skyrl.backends.skyrl_train.fields import (
+    BatchMetadataKey,
+    InferenceEngineOutputKey,
+    TrainingField,
+)
 from skyrl.backends.skyrl_train.inference_servers.setup import (
     build_new_inference_client,
 )
@@ -157,19 +162,19 @@ def build_batch(sequences: List[List[int]], pad_token_id: int) -> TrainingInputB
     zeros = torch.zeros((batch_size, num_actions), dtype=torch.float32)
     batch = TrainingInputBatch(
         {
-            "sequences": input_ids,
-            "attention_mask": attention_mask,
-            "response_mask": response_mask,
-            "loss_mask": response_mask.clone(),
-            "rewards": zeros.clone(),
-            "rollout_logprobs": zeros.clone(),
-            "rollout_expert_indices": None,
-            "action_log_probs": zeros.clone(),
-            "base_action_log_probs": zeros.clone(),
-            "advantages": zeros.clone(),
+            TrainingField.SEQUENCES: input_ids,
+            TrainingField.ATTENTION_MASK: attention_mask,
+            TrainingField.RESPONSE_MASK: response_mask,
+            TrainingField.LOSS_MASK: response_mask.clone(),
+            TrainingField.REWARDS: zeros.clone(),
+            TrainingField.ROLLOUT_LOGPROBS: zeros.clone(),
+            TrainingField.ROLLOUT_EXPERT_INDICES: None,
+            TrainingField.ACTION_LOG_PROBS: zeros.clone(),
+            TrainingField.BASE_ACTION_LOG_PROBS: zeros.clone(),
+            TrainingField.ADVANTAGES: zeros.clone(),
         }
     )
-    batch.metadata = {"response_length": num_actions}
+    batch.metadata = {BatchMetadataKey.RESPONSE_LENGTH: num_actions}
     return batch
 
 
@@ -178,7 +183,7 @@ def score_trainer(policy: PPORayActorGroup, batch: TrainingInputBatch) -> List[f
     results = ray.get(policy.async_run_ray_method("mesh", "forward", data=batch))
     output = WorkerOutput.cat(policy.actor_infos, results)
     logprobs = loss_fn_outputs_to_tensor(output.loss_fn_outputs, key="logprobs")
-    scores = logprobs[batch["response_mask"].bool()].tolist()
+    scores = logprobs[batch[TrainingField.RESPONSE_MASK].bool()].tolist()
     if not all(map(math.isfinite, scores)):
         raise ValueError("nonfinite trainer logprobs")
     return scores
@@ -200,7 +205,7 @@ async def score_inference(client, sequences: List[List[int]], model: str) -> Lis
                 }
             }
         )
-        values = result["prompt_logprobs"]
+        values = result[InferenceEngineOutputKey.PROMPT_LOGPROBS]
         if values is None or len(values) != len(tokens) or values[0] is not None or any(v is None for v in values[1:]):
             raise ValueError(f"unexpected prompt_logprobs for {len(tokens)} tokens: {values}")
         if not all(map(math.isfinite, values[1:])):

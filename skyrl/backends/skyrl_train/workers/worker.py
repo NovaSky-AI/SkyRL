@@ -38,6 +38,11 @@ from skyrl.backends.skyrl_train.distributed.ulysses import (
     apply_monkey_patch,
     set_ulysses_sequence_parallel_group,
 )
+from skyrl.backends.skyrl_train.fields import (
+    BatchMetadataKey,
+    ForwardOutputKey,
+    TrainingField,
+)
 from skyrl.backends.skyrl_train.rollout_shard import RolloutShard, ShardRows
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
@@ -56,7 +61,6 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
 )
 from skyrl.backends.skyrl_train.utils.profiler import Profiler
 from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_FIELD,
     SCORE_CENTERING_SCORES_KEY,
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
@@ -1137,7 +1141,7 @@ class PolicyWorkerBase(Worker):
             )
 
             # Extract loss_fn_outputs before reduce_metrics (it's not a scalar metric)
-            loss_fn_output_batches.append(metrics.pop("loss_fn_outputs", []))
+            loss_fn_output_batches.append(metrics.pop(ForwardOutputKey.LOSS_FN_OUTPUTS, []))
 
             for k, v in metrics.items():
                 all_metrics[k].append(v)
@@ -1322,14 +1326,14 @@ class PolicyWorkerBase(Worker):
                 "loss": unscaled_loss.item(),
                 "response_length": num_actions,
                 "lr": self.scheduler.get_last_lr()[0],
-                "loss_fn_outputs": loss_fn_outputs,
+                ForwardOutputKey.LOSS_FN_OUTPUTS: loss_fn_outputs,
             }
         else:
             # RL path: add optional KL/entropy terms
             # entropy loss
             with torch.set_grad_enabled(self.cfg.algorithm.use_entropy_loss):
                 # batch_size, seqlen
-                entropy_BS = output["entropy"]
+                entropy_BS = output[ForwardOutputKey.ENTROPY]
                 entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
                 entropy = masked_mean(entropy_BS, loss_mask)
                 entropy = loss_normalization.token_mean_contribution(entropy, loss_mask)
@@ -1389,7 +1393,7 @@ class PolicyWorkerBase(Worker):
                 "policy_entropy": entropy.item(),
                 "response_length": num_actions,
                 "policy_lr": self.scheduler.get_last_lr()[0],
-                "loss_fn_outputs": loss_fn_outputs,
+                ForwardOutputKey.LOSS_FN_OUTPUTS: loss_fn_outputs,
             }
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v
@@ -1460,8 +1464,8 @@ class PolicyWorkerBase(Worker):
                 loss_fn_config=loss_fn_config,
                 return_per_token_outputs=return_per_token_outputs,
             )
-            if "loss_fn_outputs" in metrics:
-                all_loss_fn_outputs.extend(metrics.pop("loss_fn_outputs"))
+            if ForwardOutputKey.LOSS_FN_OUTPUTS in metrics:
+                all_loss_fn_outputs.extend(metrics.pop(ForwardOutputKey.LOSS_FN_OUTPUTS))
             for k, v in metrics.items():
                 all_metrics[k].append(v)
 
@@ -1494,7 +1498,7 @@ class PolicyWorkerBase(Worker):
         output = microbatch_iterator.reorder_and_combine_batches(outputs)
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
-        return output["output"]
+        return output[ForwardOutputKey.OUTPUT]
 
     def forward_backward_rollout_shard(
         self,
@@ -1664,18 +1668,18 @@ class PolicyWorkerBase(Worker):
         return {
             "loss": policy_loss.item(),
             "response_length": num_actions,
-            "loss_fn_outputs": loss_fn_outputs,
+            ForwardOutputKey.LOSS_FN_OUTPUTS: loss_fn_outputs,
         }
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         device = torch.cuda.current_device()
         micro_batch.to(device)
         self.model.eval()
-        sequences = micro_batch["sequences"]
-        response_length = micro_batch.metadata["response_length"]
-        attention_mask = micro_batch["attention_mask"]
-        pixel_values = micro_batch.get("pixel_values", None)
-        image_grid_thw = micro_batch.get("image_grid_thw", None)
+        sequences = micro_batch[TrainingField.SEQUENCES]
+        response_length = micro_batch.metadata[BatchMetadataKey.RESPONSE_LENGTH]
+        attention_mask = micro_batch[TrainingField.ATTENTION_MASK]
+        pixel_values = micro_batch.get(TrainingField.PIXEL_VALUES, None)
+        image_grid_thw = micro_batch.get(TrainingField.IMAGE_GRID_THW, None)
         sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -1688,13 +1692,13 @@ class PolicyWorkerBase(Worker):
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
                 # Replay the rollout support when recomputing the policy ratio.
-                sample_support=micro_batch.get(SAMPLE_SUPPORT_FIELD) if sample_support_replay else None,
-                loss_mask=micro_batch.get("loss_mask") if sample_support_replay else None,
+                sample_support=micro_batch.get(TrainingField.ROLLOUT_SAMPLE_SUPPORT) if sample_support_replay else None,
+                loss_mask=micro_batch.get(TrainingField.LOSS_MASK) if sample_support_replay else None,
                 enable_sample_support_replay=sample_support_replay,
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
-            {"output": policy_logprob},
+            {ForwardOutputKey.OUTPUT: policy_logprob},
         )
         output.metadata = micro_batch.metadata
         return output
@@ -1889,9 +1893,9 @@ class CriticWorkerBase(Worker):
         """Generates critic values."""
         device = torch.cuda.current_device()
         micro_batch.to(device)
-        sequences = micro_batch["sequences"]
-        response_length = micro_batch.metadata["response_length"]
-        attention_mask = micro_batch["attention_mask"]
+        sequences = micro_batch[TrainingField.SEQUENCES]
+        response_length = micro_batch.metadata[BatchMetadataKey.RESPONSE_LENGTH]
+        attention_mask = micro_batch[TrainingField.ATTENTION_MASK]
         self.model.eval()
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             value = self.model(
@@ -1902,7 +1906,7 @@ class CriticWorkerBase(Worker):
         self.model.train()  # reset model state
         value = value.to("cpu")
         output = TrainingOutputBatch(
-            {"output": value},
+            {ForwardOutputKey.OUTPUT: value},
         )
         output.metadata = micro_batch.metadata
         return output
@@ -1925,7 +1929,7 @@ class CriticWorkerBase(Worker):
         output = microbatch_iterator.reorder_and_combine_batches(outputs)
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
-        row_tensor = output["output"]
+        row_tensor = output[ForwardOutputKey.OUTPUT]
         loss_fn_outputs = [{"values": row_tensor[i].tolist()} for i in range(row_tensor.shape[0])]
         return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
@@ -1956,18 +1960,18 @@ class RefWorkerBase(Worker):
         output = microbatch_iterator.reorder_and_combine_batches(outputs)
         if output.device is not None and output.device != torch.device("cpu"):
             output = output.to("cpu")
-        row_tensor = output["output"]
+        row_tensor = output[ForwardOutputKey.OUTPUT]
         loss_fn_outputs = [{"logprobs": row_tensor[i].tolist()} for i in range(row_tensor.shape[0])]
         return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
         device = torch.cuda.current_device()
         micro_batch.to(device)
-        sequences = micro_batch["sequences"]
-        response_length = micro_batch.metadata["response_length"]
-        attention_mask = micro_batch["attention_mask"]
-        pixel_values = micro_batch.get("pixel_values", None)
-        image_grid_thw = micro_batch.get("image_grid_thw", None)
+        sequences = micro_batch[TrainingField.SEQUENCES]
+        response_length = micro_batch.metadata[BatchMetadataKey.RESPONSE_LENGTH]
+        attention_mask = micro_batch[TrainingField.ATTENTION_MASK]
+        pixel_values = micro_batch.get(TrainingField.PIXEL_VALUES, None)
+        image_grid_thw = micro_batch.get(TrainingField.IMAGE_GRID_THW, None)
         sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             log_probs = self.model(
@@ -1979,13 +1983,13 @@ class RefWorkerBase(Worker):
                 temperature=self.cfg.algorithm.temperature if sample_support_replay else 1.0,
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
-                sample_support=micro_batch.get(SAMPLE_SUPPORT_FIELD) if sample_support_replay else None,
-                loss_mask=micro_batch.get("loss_mask") if sample_support_replay else None,
+                sample_support=micro_batch.get(TrainingField.ROLLOUT_SAMPLE_SUPPORT) if sample_support_replay else None,
+                loss_mask=micro_batch.get(TrainingField.LOSS_MASK) if sample_support_replay else None,
                 enable_sample_support_replay=sample_support_replay,
             )
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch(
-            {"output": log_probs},
+            {ForwardOutputKey.OUTPUT: log_probs},
         )
         output.metadata = micro_batch.metadata
         return output

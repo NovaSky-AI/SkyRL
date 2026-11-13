@@ -14,6 +14,7 @@ RAY_ADDRESS=local uv run --isolated --extra dev --extra megatron -- pytest -s te
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     append_tensor_list_padding,
@@ -192,4 +193,4 @@ def test_dummy_rows_train_nothing_and_mask_their_routers():
 def test_append_tensor_list_padding_zero_count_is_a_no_op():
     field = TensorList([torch.tensor([5], dtype=torch.long)])
 
-    assert append_tensor_list_padding("sub_seq_lengths", field, 0) is field
+    assert append_tensor_list_padding(TrainingField.SUB_SEQ_LENGTHS, field, 0) is field

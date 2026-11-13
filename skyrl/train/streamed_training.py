@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Tuple
 import numpy as np
 import torch
 
-from skyrl.backends.skyrl_train.rollout_shard import RolloutPayloadKey, RolloutShard
+from skyrl.backends.skyrl_train.fields import GeneratorOutputKey
+from skyrl.backends.skyrl_train.rollout_shard import RolloutShard
 from skyrl.backends.skyrl_train.utils.loss_normalization import (
     MinibatchLossNormalization,
 )
@@ -244,7 +245,7 @@ def plan_streamed_mini_batch(
     payload_keys = {group_of[i].generator_output.payload_keys for i in (*trained, padding)}
     if len(payload_keys) > 1:
         raise ValueError(f"stored groups carry different payload keys: {sorted(map(sorted, payload_keys))}")
-    has_rollout_logprobs = RolloutPayloadKey.ROLLOUT_LOGPROBS in next(iter(payload_keys))
+    has_rollout_logprobs = GeneratorOutputKey.ROLLOUT_LOGPROBS in next(iter(payload_keys))
     rows = StreamedRolloutRows(
         view=RolloutMetadataView.cat([group.metadata_view() for group in groups]),
         uids=[uid for uid, t in trajectories for _ in range(t.num_rows)],

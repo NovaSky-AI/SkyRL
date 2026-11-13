@@ -27,13 +27,16 @@ from loguru import logger
 from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 
+from skyrl.backends.skyrl_train.fields import (
+    BatchMetadataKey,
+    GeneratorInputKey,
+    GeneratorOutputKey,
+    TrainingField,
+)
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
-from skyrl.backends.skyrl_train.rollout_shard import (
-    RolloutPayloadKey,
-    dump_training_batch,
-)
+from skyrl.backends.skyrl_train.rollout_shard import dump_training_batch
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
@@ -121,7 +124,7 @@ class GeneratedOutputGroup:
         """Rows of the group's output; a step-wise trajectory has one per step."""
         if isinstance(self.generator_output, StoredRolloutGroup):
             return self.generator_output.num_rows
-        return len(self.generator_output["rewards"])
+        return len(self.generator_output[GeneratorOutputKey.REWARDS])
 
     def metadata_view(self) -> RolloutMetadataView:
         """The group's output without its token payload."""
@@ -137,7 +140,7 @@ class GeneratedOutputGroup:
 
 def _trajectory_ids(groups: List[GeneratedOutputGroup]) -> Optional[List[Any]]:
     """The trajectory of each row of the groups' outputs, in order; None if a generator left them out."""
-    ids = [group.metadata_view().get("trajectory_ids") for group in groups]
+    ids = [group.metadata_view().get(GeneratorOutputKey.TRAJECTORY_IDS) for group in groups]
     if any(group_ids is None for group_ids in ids):
         return None
     return [trajectory_id for group_ids in ids for trajectory_id in group_ids]
@@ -154,7 +157,7 @@ def _row_prompts(groups: List[GeneratedOutputGroup]) -> List[Any]:
     for group in groups:
         if group.prompts is None:
             return []
-        trajectory_ids = group.metadata_view().get("trajectory_ids")
+        trajectory_ids = group.metadata_view().get(GeneratorOutputKey.TRAJECTORY_IDS)
         if trajectory_ids is None:
             # Without trajectory ids the output is not step-wise: one row per trajectory.
             prompts.extend(group.prompts)
@@ -181,7 +184,7 @@ def streaming_bypassed_overrides(trainer_cls: type) -> List[str]:
 
 
 # The token fields of a row the trajectory table logs.
-_LOGGED_TOKEN_KEYS = (RolloutPayloadKey.RESPONSE_IDS, RolloutPayloadKey.LOSS_MASKS)
+_LOGGED_TOKEN_KEYS = (GeneratorOutputKey.RESPONSE_IDS, GeneratorOutputKey.LOSS_MASKS)
 
 
 @ray.remote(num_cpus=0)
@@ -1069,8 +1072,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         if isinstance(go, StoredRolloutGroup):
             rewards, loss_masks = go.summary.rewards, go.summary.num_loss_tokens
         else:
-            rewards = go.get("rewards") if isinstance(go, dict) else None
-            loss_masks = go.get("loss_masks") if isinstance(go, dict) else None
+            rewards = go.get(GeneratorOutputKey.REWARDS) if isinstance(go, dict) else None
+            loss_masks = go.get(GeneratorOutputKey.LOSS_MASKS) if isinstance(go, dict) else None
         logger.exception(
             "sample_full_batch: error processing generated group "
             f"(uid={group.uid}, kept_so_far={kept_so_far}, dropped_so_far={dropped_so_far}). "
@@ -1194,7 +1197,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             for row in range(t.num_rows)
         ]
         prompts = _row_prompts(groups)
-        logged = self._logged_rows(view["rewards"], len(prompts))
+        logged = self._logged_rows(view[GeneratorOutputKey.REWARDS], len(prompts))
         read = sorted({0, *logged})
         # Submitted now: the task holds the payloads it reads after the step releases them.
         tokens_ref = _payload_token_rows.remote([rows[i][1] for i in read], *(rows[i][0] for i in read))
@@ -1203,10 +1206,10 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             tokens = ray.get(tokens_ref)
             position = {row: k for k, row in enumerate(read)}
             self._log_train_examples(
-                tokens[RolloutPayloadKey.RESPONSE_IDS][position[0]],
+                tokens[GeneratorOutputKey.RESPONSE_IDS][position[0]],
                 [prompts[i] for i in logged],
                 {key: [tokens[key][position[i]] for i in logged] for key in _LOGGED_TOKEN_KEYS}
-                | {"rewards": [view["rewards"][i] for i in logged]},
+                | {GeneratorOutputKey.REWARDS: [view[GeneratorOutputKey.REWARDS][i] for i in logged]},
             )
             self.log_streamed_rollouts(rollout_rows)
 
@@ -1256,7 +1259,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             summary = RolloutSummary.cat([summaries[id(g)] for g in selected])
             view = RolloutMetadataView.cat([views[id(g)] for g in selected])
             metrics = RolloutMetricInputs.from_summary(summary, view, step_wise).metrics()
-            merge_generator_rollout_metrics(metrics, [views[id(g)].get("rollout_metrics") for g in selected])
+            merge_generator_rollout_metrics(
+                metrics, [views[id(g)].get(GeneratorOutputKey.ROLLOUT_METRICS) for g in selected]
+            )
             return metrics
 
         def completion_metrics(selected: List[GeneratedOutputGroup]) -> Dict[str, float]:
@@ -1316,9 +1321,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         with Timer("compute_advantages_and_returns", self.all_timings):
             training_input = self.compute_advantages_and_returns(training_input)
             # remove some unwanted keys
-            for key in ["rewards"]:
-                training_input.pop(key)
-            training_input.metadata.pop("uids")
+            training_input.pop(TrainingField.REWARDS)
+            training_input.metadata.pop(BatchMetadataKey.UIDS)
 
         if self.cfg.trainer.dump_data_batch:
             # dump data to file
@@ -1396,7 +1400,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             uid=uids[0],
                             global_step_when_scheduled=global_step_at_start,
                             group_completion_time_s=group_completion_time_s,
-                            prompts=generator_input["prompts"],
+                            prompts=generator_input[GeneratorInputKey.PROMPTS],
                         )
                     )
                 except asyncio.QueueFull:
@@ -1473,11 +1477,14 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         )
 
         prompts = _row_prompts(groups)
-        logged = self._logged_rows(generator_output["rewards"], len(prompts))
+        logged = self._logged_rows(generator_output[GeneratorOutputKey.REWARDS], len(prompts))
         self._log_train_examples(
-            generator_output["response_ids"][0],
+            generator_output[GeneratorOutputKey.RESPONSE_IDS][0],
             [prompts[i] for i in logged],
-            {key: [generator_output[key][i] for i in logged] for key in (*_LOGGED_TOKEN_KEYS, "rewards")},
+            {
+                key: [generator_output[key][i] for i in logged]
+                for key in (*_LOGGED_TOKEN_KEYS, GeneratorOutputKey.REWARDS)
+            },
         )
         return self.convert_to_training_input(generator_output, uids)
 

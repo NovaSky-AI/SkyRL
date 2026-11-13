@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from jaxtyping import Bool, Float, Integer
 
+from skyrl.backends.skyrl_train.fields import BatchMetadataKey, TrainingField
 from skyrl.backends.skyrl_train.utils.packed_ragged_tensor import (
     PackedRaggedTensor,
     packed_ragged_padding_segments,
@@ -21,11 +22,8 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
     packed_padding_segments,
 )
 from skyrl.backends.skyrl_train.utils.replay_utils import replay_padding_row
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 
 DictType = TypeVar("DictType")
-REAL_SAMPLE_MASK = "real_sample_mask"
-SUB_SEQ_LENGTHS = "sub_seq_lengths"
 
 
 class TensorFormat(StrEnum):
@@ -177,7 +175,9 @@ class TensorBatch(dict, Generic[DictType]):
     metadata: Optional[Dict[str, Any]] = None
 
     # These fields may be backed by read-only shared memory after deserialization.
-    ZERO_COPY_KEYS: frozenset[str] = frozenset({"rollout_expert_indices", SAMPLE_SUPPORT_FIELD})
+    ZERO_COPY_KEYS: frozenset[str] = frozenset(
+        {TrainingField.ROLLOUT_EXPERT_INDICES, TrainingField.ROLLOUT_SAMPLE_SUPPORT}
+    )
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -578,9 +578,9 @@ class TrainingInputBatch(TensorBatch[TrainingInput]):
     @property
     def real_sample_mask(self) -> torch.Tensor:
         """Identify real rows, including real trajectories with no loss tokens."""
-        if REAL_SAMPLE_MASK in self:
-            return self[REAL_SAMPLE_MASK]
-        return torch.ones(self.batch_size, dtype=torch.bool, device=self["sequences"].device)
+        if TrainingField.REAL_SAMPLE_MASK in self:
+            return self[TrainingField.REAL_SAMPLE_MASK]
+        return torch.ones(self.batch_size, dtype=torch.bool, device=self[TrainingField.SEQUENCES].device)
 
 
 class TrainingOutputBatch(TensorBatch[Dict[str, torch.Tensor]]):
@@ -604,12 +604,12 @@ class PackedFieldPadding:
 
 # Every packed batch field needs a padding rule.
 PACKED_FIELD_PADDING: Dict[str, PackedFieldPadding] = {
-    "rollout_expert_indices": PackedFieldPadding(
+    TrainingField.ROLLOUT_EXPERT_INDICES: PackedFieldPadding(
         # Megatron's dropless `tokens * topk` dispatcher needs topk distinct experts per row.
         fill=lambda field: replay_padding_row(field.row_shape[-1], dtype=field.dtype, device=field.device),
         dummy_row_length=1,
     ),
-    SAMPLE_SUPPORT_FIELD: PackedFieldPadding(dummy_row_length=0),
+    TrainingField.ROLLOUT_SAMPLE_SUPPORT: PackedFieldPadding(dummy_row_length=0),
 }
 
 
@@ -657,7 +657,7 @@ def append_tensor_list_padding(key: str, field: TensorList, count: int) -> Tenso
     if count <= 0:
         return field
     reference = field.tensors[0]
-    if key == SUB_SEQ_LENGTHS:
+    if key == TrainingField.SUB_SEQ_LENGTHS:
         row = torch.ones(1, dtype=reference.dtype, device=reference.device)
     else:
         row = torch.empty(0, *reference.shape[1:], dtype=reference.dtype, device=reference.device)
@@ -668,9 +668,9 @@ def padding_rows(key: str, field: torch.Tensor, count: int) -> torch.Tensor:
     """``count`` rows of dense ``key`` that train nothing: not real samples, without loss tokens, routers
     masked. Other fields copy row 0, so their values have a valid shape and dtype and are never read."""
     shape = (count, *field.shape[1:])
-    if key in ("loss_mask", REAL_SAMPLE_MASK):
+    if key in (TrainingField.LOSS_MASK, TrainingField.REAL_SAMPLE_MASK):
         return torch.zeros(shape, dtype=field.dtype, device=field.device)
-    if key == "router_padding_mask":
+    if key == TrainingField.ROUTER_PADDING_MASK:
         return torch.ones(shape, dtype=torch.bool, device=field.device)
     return field[[0] * count].clone()
 
@@ -688,7 +688,7 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
     if pad_size == 0:
         if unpadded_batch.metadata is None:
             unpadded_batch.metadata = {}
-        unpadded_batch.metadata["pad_size"] = 0
+        unpadded_batch.metadata[BatchMetadataKey.PAD_SIZE] = 0
         return unpadded_batch
 
     # Pad each tensor depending on its type.
@@ -712,21 +712,21 @@ def pad_training_input_batch(unpadded_batch: TrainingInputBatch, pad_size: int) 
             new_tensors[key] = torch.cat([tensor, padding_rows(key, tensor, pad_size)], dim=0)
 
     real_sample_mask = unpadded_batch.real_sample_mask
-    new_tensors[REAL_SAMPLE_MASK] = torch.cat(
-        [real_sample_mask, padding_rows(REAL_SAMPLE_MASK, real_sample_mask, pad_size)]
+    new_tensors[TrainingField.REAL_SAMPLE_MASK] = torch.cat(
+        [real_sample_mask, padding_rows(TrainingField.REAL_SAMPLE_MASK, real_sample_mask, pad_size)]
     )
 
     # Update metadata as well.
     new_metadata = {}
     old_metadata = unpadded_batch.metadata or {}
     for key, value in old_metadata.items():
-        if key == "uids":
-            new_metadata["uids"] = value + [f"pad{i}" for i in range(pad_size)]
-        elif key == "is_last_step":
-            new_metadata["is_last_step"] = value + [True for _ in range(pad_size)]
+        if key == BatchMetadataKey.UIDS:
+            new_metadata[BatchMetadataKey.UIDS] = value + [f"pad{i}" for i in range(pad_size)]
+        elif key == BatchMetadataKey.IS_LAST_STEP:
+            new_metadata[BatchMetadataKey.IS_LAST_STEP] = value + [True for _ in range(pad_size)]
         else:
             new_metadata[key] = copy.deepcopy(value)
-    new_metadata["pad_size"] = pad_size
+    new_metadata[BatchMetadataKey.PAD_SIZE] = pad_size
 
     new_batch = TrainingInputBatch(new_tensors)
     new_batch.metadata = new_metadata

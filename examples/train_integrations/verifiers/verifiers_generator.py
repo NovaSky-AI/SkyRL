@@ -3,6 +3,7 @@ from typing import Optional
 import httpx
 from openai import AsyncOpenAI
 
+from skyrl.backends.skyrl_train.fields import GeneratorInputKey
 from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
 from skyrl.train.config import GeneratorConfig
 from skyrl.train.generators.base import (
@@ -51,15 +52,15 @@ class VerifiersGenerator(GeneratorInterface):
         )
 
     async def generate(self, input_batch: GeneratorInput) -> GeneratorOutput:
-        assert "env_extras" in input_batch, "Verifiers dataset fields are passed through env_extras"
+        assert GeneratorInputKey.ENV_EXTRAS in input_batch, "Verifiers dataset fields are passed through env_extras"
 
         # Defaults are based on Verifiers' defaults.
-        verifiers_dicts = [sample["verifiers"] for sample in input_batch["env_extras"]]
+        verifiers_dicts = [sample["verifiers"] for sample in input_batch[GeneratorInputKey.ENV_EXTRAS]]
         rollout_inputs = []
         for i, item in enumerate(verifiers_dicts):
             rollout_inputs.append(
                 RolloutInput(
-                    prompt=input_batch["prompts"][i],
+                    prompt=input_batch[GeneratorInputKey.PROMPTS][i],
                     answer=item.get("answer", ""),
                     example_id=item["example_id"],
                     info=item.get("info", {}),
@@ -73,7 +74,7 @@ class VerifiersGenerator(GeneratorInterface):
         vf_env = load_environment(environment_id)
 
         # Verifiers requires logprobs from vLLM for post-processing.
-        sampling_params = input_batch.get("sampling_params", {}).copy()
+        sampling_params = input_batch.get(GeneratorInputKey.SAMPLING_PARAMS, {}).copy()
         sampling_params["logprobs"] = True
         sampling_params["top_logprobs"] = 1
         sampling_params["extra_body"] = {

@@ -12,6 +12,7 @@ from loguru import logger
 
 import skyrl_gym
 from skyrl.backends.renderer import decode_mm_kwargs
+from skyrl.backends.skyrl_train.fields import InferenceEngineOutputKey
 from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     InferenceEngineInput,
@@ -166,10 +167,14 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
                 )
                 engine_output = await self.inference_engine_client.generate(engine_input, model=self.policy_model_name)
 
-                gen_text = engine_output["responses"][0]
-                gen_ids = engine_output["response_ids"][0]
-                stop_reason = engine_output["stop_reasons"][0]
-                gen_logprobs = engine_output["response_logprobs"][0] if engine_output.get("response_logprobs") else None
+                gen_text = engine_output[InferenceEngineOutputKey.RESPONSES][0]
+                gen_ids = engine_output[InferenceEngineOutputKey.RESPONSE_IDS][0]
+                stop_reason = engine_output[InferenceEngineOutputKey.STOP_REASONS][0]
+                gen_logprobs = (
+                    engine_output[InferenceEngineOutputKey.RESPONSE_LOGPROBS][0]
+                    if engine_output.get(InferenceEngineOutputKey.RESPONSE_LOGPROBS)
+                    else None
+                )
 
                 # 2b. Append eos when sampling_params.stop is not None
                 added_eos = False

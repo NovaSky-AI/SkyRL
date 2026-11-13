@@ -28,6 +28,7 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     gather_outputs_and_unpad,
     ulysses_pad_and_slice_inputs,
 )
+from skyrl.backends.skyrl_train.fields import ForwardOutputKey
 from skyrl.backends.skyrl_train.training_batch import TensorList
 from skyrl.backends.skyrl_train.utils.lora_targets import (
     resolve_critic_lora_target_modules,
@@ -488,10 +489,10 @@ class HFModelWrapper(nn.Module):
 
         if compute_entropy:
             if support_entropy is not None:
-                output["entropy"] = to_canonical_batch_positions(support_entropy)
+                output[ForwardOutputKey.ENTROPY] = to_canonical_batch_positions(support_entropy)
             else:
                 padding_mask = None if self.remove_microbatch_padding else attention_mask_fwd
-                output["entropy"] = to_canonical_batch_positions(
+                output[ForwardOutputKey.ENTROPY] = to_canonical_batch_positions(
                     self.chunked_entropy_from_logits_fn(
                         logits_BSV,
                         requires_grad=entropy_requires_grad,

@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     to_te_attention_mask,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import TokenLayout
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.backends.skyrl_train.training_batch import (
     PACKED_BATCH_FIELD_TYPES,
     BatchField,
@@ -215,36 +216,36 @@ class HostMicrobatch:
         loss = self.loss
         return dataclasses.replace(
             self,
-            sequences=_pad_rows("sequences", self.sequences, count),
-            attention_mask=_pad_rows("attention_mask", self.attention_mask, count, first_token),
-            position_ids=_pad_rows("position_ids", self.position_ids, count, positions),
-            sub_seq_lengths=_pad_rows("sub_seq_lengths", self.sub_seq_lengths, count),
-            rollout_expert_indices=_pad_rows("rollout_expert_indices", self.rollout_expert_indices, count),
-            router_padding_mask=_pad_rows("router_padding_mask", self.router_padding_mask, count, padding),
-            rollout_sample_support=_pad_rows("rollout_sample_support", self.rollout_sample_support, count),
-            pixel_values=_pad_rows("pixel_values", self.pixel_values, count),
-            image_grid_thw=_pad_rows("image_grid_thw", self.image_grid_thw, count),
+            sequences=_pad_rows(TrainingField.SEQUENCES, self.sequences, count),
+            attention_mask=_pad_rows(TrainingField.ATTENTION_MASK, self.attention_mask, count, first_token),
+            position_ids=_pad_rows(None, self.position_ids, count, positions),
+            sub_seq_lengths=_pad_rows(TrainingField.SUB_SEQ_LENGTHS, self.sub_seq_lengths, count),
+            rollout_expert_indices=_pad_rows(TrainingField.ROLLOUT_EXPERT_INDICES, self.rollout_expert_indices, count),
+            router_padding_mask=_pad_rows(TrainingField.ROUTER_PADDING_MASK, self.router_padding_mask, count, padding),
+            rollout_sample_support=_pad_rows(TrainingField.ROLLOUT_SAMPLE_SUPPORT, self.rollout_sample_support, count),
+            pixel_values=_pad_rows(TrainingField.PIXEL_VALUES, self.pixel_values, count),
+            image_grid_thw=_pad_rows(TrainingField.IMAGE_GRID_THW, self.image_grid_thw, count),
             loss=dataclasses.replace(
                 loss,
-                old_action_log_probs=_pad_rows("old_action_log_probs", loss.old_action_log_probs, count),
-                base_action_log_probs=_pad_rows("base_action_log_probs", loss.base_action_log_probs, count),
-                advantages=_pad_rows("advantages", loss.advantages, count),
-                loss_mask=_pad_rows("loss_mask", loss.loss_mask, count),
-                rollout_action_logprobs=_pad_rows("rollout_action_logprobs", loss.rollout_action_logprobs, count),
-                response_mask=_pad_rows("response_mask", loss.response_mask, count),
-                real_sample_mask=_pad_rows("real_sample_mask", loss.real_sample_mask, count),
+                old_action_log_probs=_pad_rows(TrainingField.ACTION_LOG_PROBS, loss.old_action_log_probs, count),
+                base_action_log_probs=_pad_rows(TrainingField.BASE_ACTION_LOG_PROBS, loss.base_action_log_probs, count),
+                advantages=_pad_rows(TrainingField.ADVANTAGES, loss.advantages, count),
+                loss_mask=_pad_rows(TrainingField.LOSS_MASK, loss.loss_mask, count),
+                rollout_action_logprobs=_pad_rows(TrainingField.ROLLOUT_LOGPROBS, loss.rollout_action_logprobs, count),
+                response_mask=_pad_rows(TrainingField.RESPONSE_MASK, loss.response_mask, count),
+                real_sample_mask=_pad_rows(TrainingField.REAL_SAMPLE_MASK, loss.real_sample_mask, count),
             ),
         )
 
 
 def _pad_rows(
-    key: str,
+    key: Optional[TrainingField],
     value: Any,
     count: int,
     fill: Optional[Callable[[torch.Tensor, int], torch.Tensor]] = None,
 ) -> Any:
-    """``value`` with ``count`` dummy rows appended, ``fill``'s or zeros; ``key`` names its padding rule
-    when it is packed or ragged."""
+    """``value`` with ``count`` dummy rows appended, ``fill``'s or zeros; ``key``, the batch field it comes
+    from, names its padding rule when it is packed or ragged."""
     if value is None:
         return None
     if isinstance(value, PACKED_BATCH_FIELD_TYPES):

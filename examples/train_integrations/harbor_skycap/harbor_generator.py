@@ -41,6 +41,7 @@ from skycap import CapturePool, PathRuleError
 from skycap.paths import load_rule
 from tqdm import tqdm
 
+from skyrl.backends.skyrl_train.fields import GeneratorInputKey, GeneratorOutputKey
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
 from skyrl.train.generators.base import (
     GeneratorInput,
@@ -195,7 +196,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         """Run the batch over every server and compose it here (eval, unstreamed training)."""
         outcomes, metrics = await self._trials(input_batch, self.pool, [], disable_tqdm)
         output = compose(outcomes, **self._compose_options())
-        output["rollout_metrics"].update(metrics)
+        output[GeneratorOutputKey.ROLLOUT_METRICS].update(metrics)
         return output
 
     async def generate_to_ray(self, input_batch: GeneratorInput, disable_tqdm: bool = False) -> StoredRolloutGroup:
@@ -221,7 +222,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         with stage_trace.span("gen.compose_group", trajectories=len(outcomes)):
             group = await pool.compose_group(outcomes, discard, self._compose_options(), self.support_id_bits)
         stage_trace.record("gen.group", t_group, time.perf_counter(), trajectories=len(outcomes))
-        group.group_fields["rollout_metrics"].update(metrics)
+        group.group_fields[GeneratorOutputKey.ROLLOUT_METRICS].update(metrics)
         return group
 
     def _compose_options(self) -> Dict[str, Any]:
@@ -237,13 +238,13 @@ class HarborSkycapGenerator(GeneratorInterface):
         self, input_batch: GeneratorInput, pool: CapturePool, finished: List[str], disable_tqdm: bool
     ) -> tuple[List[TrialOutcome], Dict[str, Any]]:
         """Run every trial of the batch on ``pool``, recording each trajectory it finishes in ``finished``."""
-        prompts = input_batch["prompts"]
-        trajectory_ids = input_batch["trajectory_ids"]
+        prompts = input_batch[GeneratorInputKey.PROMPTS]
+        trajectory_ids = input_batch[GeneratorInputKey.TRAJECTORY_IDS]
         if trajectory_ids is None:
             raise ValueError("`trajectory_ids` is required in the input batch")
         if len(prompts) != len(trajectory_ids):
             raise ValueError(f"Prompt count ({len(prompts)}) doesn't match trajectory_ids ({len(trajectory_ids)})")
-        metadata = input_batch.get("batch_metadata")
+        metadata = input_batch.get(GeneratorInputKey.BATCH_METADATA)
         step = getattr(metadata, "global_step", None)
         phase = getattr(metadata, "training_phase", "train")
         cache_salt = self._cache_salt()
