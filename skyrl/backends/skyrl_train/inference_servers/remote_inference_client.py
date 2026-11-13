@@ -50,6 +50,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
@@ -549,6 +550,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
     _sem_loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
     # Monotonic counter of weight syncs (see `increment_weight_version`); source of the prefix-cache salt.
     _weight_version: int = field(default=0, repr=False)
+    # Engine-paused time bookkeeping (see `paused_seconds`), on the monotonic clock.
+    _paused_since: Optional[float] = field(default=None, repr=False)
+    _paused_seconds_total: float = field(default=0.0, repr=False)
 
     @property
     def weight_version(self) -> int:
@@ -558,6 +562,17 @@ class RemoteInferenceClient(InferenceEngineInterface):
     def increment_weight_version(self) -> None:
         """Advance the weight version. Called once per completed weight sync to the engines."""
         self._weight_version += 1
+
+    def paused_seconds(self) -> float:
+        """Cumulative seconds generation has been paused via ``pause_generation`` on this client.
+
+        Includes the in-progress pause, if any. Measured on ``time.monotonic()`` from just before
+        ``/pause`` is issued until ``/resume`` returns. Pauses issued by other processes (e.g. the
+        delta weight-sync receiver on a trainer worker) are not counted.
+        """
+        if self._paused_since is None:
+            return self._paused_seconds_total
+        return self._paused_seconds_total + (time.monotonic() - self._paused_since)
 
     def __post_init__(self):
         if self.data_parallel_size <= 0:
@@ -1270,12 +1285,26 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return await self._call_all_servers("/resume")
 
     async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
-        """Pause using keep mode."""
-        return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
+        """Pause using keep mode. Starts the ``paused_seconds`` clock."""
+        started_pause = self._paused_since is None
+        if started_pause:
+            self._paused_since = time.monotonic()
+        try:
+            return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
+        except BaseException:
+            # The engines may not be paused, and no resume follows: stop the clock.
+            if started_pause:
+                self._paused_since = None
+            raise
 
     async def resume_generation(self) -> Dict[str, Any]:
-        """Resume after pause."""
-        return await self.resume()
+        """Resume after pause. Stops the ``paused_seconds`` clock."""
+        try:
+            return await self.resume()
+        finally:
+            if self._paused_since is not None:
+                self._paused_seconds_total += time.monotonic() - self._paused_since
+                self._paused_since = None
 
     async def sleep(self, level: int = 2, tags: Optional[List[str]] = None) -> Dict[str, Any]:
         """

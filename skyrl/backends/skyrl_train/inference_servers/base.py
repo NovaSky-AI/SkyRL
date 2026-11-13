@@ -159,6 +159,13 @@ class InferenceEngineInterface(ABC):
         """Resume generation after a pause, continuing any frozen in-flight requests."""
         raise NotImplementedError
 
+    def paused_seconds(self) -> float:
+        """Cumulative seconds generation has spent paused via ``pause_generation``.
+
+        Clients that do not track pauses return 0.0.
+        """
+        return 0.0
+
     @abstractmethod
     async def finish_session(self, session_id: str) -> None:
         """Notify the inference server that a session (trajectory) is complete.

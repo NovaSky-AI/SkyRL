@@ -227,6 +227,53 @@ async def test_drain_next_group_raises_when_worker_fails_mid_drain():
     await asyncio.wait_for(watcher, timeout=5)
 
 
+@pytest.mark.asyncio
+async def test_group_completion_time_excludes_engine_pause(monkeypatch):
+    """A group in flight across a weight-sync pause reports wall-clock time minus the paused time."""
+    import skyrl.train.fully_async_trainer as fully_async_trainer_module
+
+    now = [100.0]
+    paused = [0.0]
+    monkeypatch.setattr(fully_async_trainer_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(
+        fully_async_trainer_module,
+        "prepare_generator_input",
+        lambda *args, **kwargs: ({"prompts": [["p"], ["p"]]}, ["u0", "u0"]),
+    )
+    monkeypatch.setattr(fully_async_trainer_module, "get_sampling_params_for_backend", lambda *args: None)
+
+    async def generate(generator_input):
+        # 10s of wall-clock time, 4s of which the engines spend paused.
+        now[0] += 10.0
+        paused[0] += 4.0
+        return {"rewards": [1.0, 0.0]}
+
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.cfg = SimpleNamespace(
+        generator=SimpleNamespace(
+            n_samples_per_prompt=2, inference_engine=SimpleNamespace(backend="vllm"), sampling_params=None
+        ),
+        environment=SimpleNamespace(env_class="gsm8k"),
+    )
+    trainer.global_step = 1
+    trainer.async_train_dataloader = SimpleNamespace(
+        get_next_non_consumed_data=AsyncMock(side_effect=[[{"uid": "u0"}], None])
+    )
+    trainer._staleness_manager = SimpleNamespace(
+        acquire_submission_slot=AsyncMock(), on_rollout_accepted=AsyncMock(), on_rollout_rejected=AsyncMock()
+    )
+    trainer.generator = SimpleNamespace(generate=generate)
+    trainer.inference_engine_client = SimpleNamespace(paused_seconds=lambda: paused[0])
+
+    buffer: asyncio.Queue = asyncio.Queue()
+    await trainer._run_generate_for_a_group_loop(buffer, BackgroundFailure())
+
+    group = buffer.get_nowait()
+    assert group.uid == "u0"
+    assert group.group_completion_time_s == pytest.approx(6.0)
+    assert buffer.empty()
+
+
 # --------------------------------------------------------------------------------------
 # _should_keep_group
 # --------------------------------------------------------------------------------------

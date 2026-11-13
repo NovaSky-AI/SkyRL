@@ -5,7 +5,9 @@ import json
 import pickle
 import threading
 import time
+from types import SimpleNamespace
 from typing import Dict, List, Optional
+from unittest.mock import AsyncMock
 
 import aiohttp
 import httpx
@@ -1039,6 +1041,64 @@ class TestControlPlane:
         assert set(result) == set(client.server_urls)
         for response in result.values():
             assert response["body"] == {"success": True, "reset_running_requests": reset_running_requests}
+
+
+class TestPausedSeconds:
+    """``paused_seconds`` accumulates time between ``pause_generation`` and ``resume_generation``."""
+
+    @staticmethod
+    def _client_with_fake_clock(monkeypatch, now):
+        """A client whose /pause and /resume are mocked, with ``time.monotonic`` reading ``now[0]``."""
+        monkeypatch.setattr(remote_client_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+        client = RemoteInferenceClient(proxy_url="http://proxy", server_urls=["http://server"], data_parallel_size=1)
+        monkeypatch.setattr(client, "pause", AsyncMock(return_value={}))
+        monkeypatch.setattr(client, "resume", AsyncMock(return_value={}))
+        return client
+
+    @pytest.mark.asyncio
+    async def test_accumulates_across_pauses(self, monkeypatch):
+        now = [100.0]
+        client = self._client_with_fake_clock(monkeypatch, now)
+        assert client.paused_seconds() == 0.0
+
+        await client.pause_generation()
+        now[0] = 103.0
+        # The in-progress pause counts.
+        assert client.paused_seconds() == 3.0
+        await client.resume_generation()
+        now[0] = 110.0
+        assert client.paused_seconds() == 3.0
+
+        await client.pause_generation()
+        now[0] = 112.0
+        await client.resume_generation()
+        assert client.paused_seconds() == 5.0
+        client.pause.assert_awaited_with(mode=PauseMode.KEEP, clear_cache=False)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error", [RuntimeError("pause failed"), asyncio.CancelledError()])
+    async def test_failed_pause_stops_clock(self, monkeypatch, error):
+        now = [100.0]
+        client = self._client_with_fake_clock(monkeypatch, now)
+        client.pause.side_effect = error
+
+        with pytest.raises(type(error)):
+            await client.pause_generation()
+        now[0] = 150.0
+        assert client.paused_seconds() == 0.0
+
+    @pytest.mark.asyncio
+    async def test_failed_resume_stops_clock(self, monkeypatch):
+        now = [100.0]
+        client = self._client_with_fake_clock(monkeypatch, now)
+        client.resume.side_effect = RuntimeError("resume failed")
+
+        await client.pause_generation()
+        now[0] = 102.0
+        with pytest.raises(RuntimeError):
+            await client.resume_generation()
+        now[0] = 150.0
+        assert client.paused_seconds() == 2.0
 
 
 class TestWeightSync:
