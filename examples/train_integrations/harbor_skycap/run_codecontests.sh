@@ -33,6 +33,8 @@
 #                              routed experts and Megatron replays them (needs STRATEGY=megatron)
 #   ASYNC=1                    the fully-async trainer (skycap only): half the GPUs train, half
 #                              serve, with MAX_STALENESS (default 1) and generation workers per prompt
+#   STREAM=1                   with ASYNC=1, keep each group's rows in the object store of the node
+#                              that composed them until they are trained on (store_groups_in_ray)
 #
 # Needs: the GPUs, and the sandbox's credentials in a file: `DAYTONA_API_KEY=...`
 # (DAYTONA_KEY_FILE) or `MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...` (MODAL_KEY_FILE). For W&B,
@@ -77,6 +79,7 @@ MEGATRON_EP="${MEGATRON_EP:-1}"
 MEGATRON_ETP="${MEGATRON_ETP:-1}"
 R3="${R3:-0}"
 ASYNC="${ASYNC:-0}"
+STREAM="${STREAM:-0}"
 MAX_STALENESS="${MAX_STALENESS:-1}"
 OPTIMIZER_OFFLOAD="${OPTIMIZER_OFFLOAD:-1}"
 
@@ -160,7 +163,15 @@ if [[ "$ASYNC" == 1 ]]; then
     trainer.fully_async.enabled=true
     trainer.fully_async.max_staleness_steps="$MAX_STALENESS"
     trainer.fully_async.num_parallel_generation_workers="$NUM_PROMPTS"
+    trainer.fully_async.store_groups_in_ray="$([[ "$STREAM" == 1 ]] && echo true || echo false)"
   )
+  # Streamed ranks train different numbers of rows; token batching keeps their microbatch counts equal.
+  if [[ "$STREAM" == 1 ]]; then
+    ARM_ARGS+=(trainer.max_tokens_per_microbatch="$MAX_MODEL_LEN")
+  fi
+elif [[ "$STREAM" == 1 ]]; then
+  echo "STREAM=1 needs ASYNC=1" >&2
+  exit 1
 fi
 if [[ "$DETERMINISTIC" == 1 ]]; then
   ARM_ARGS+=(

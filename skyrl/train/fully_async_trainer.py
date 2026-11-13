@@ -16,9 +16,12 @@ import inspect
 import os
 import sys
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from typing import Any, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+import numpy as np
+import ray
 import torch
 from loguru import logger
 from torchdata.stateful_dataloader import StatefulDataLoader
@@ -27,17 +30,37 @@ from tqdm import tqdm
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
+from skyrl.backends.skyrl_train.rollout_shard import (
+    RolloutPayloadKey,
+    dump_training_batch,
+)
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     LOSSES_WITH_OLD_LOGPROBS,
     PolicyLossType,
 )
-from skyrl.train.generators.base import GeneratorOutput
+from skyrl.train.generators.base import (
+    GeneratorOutput,
+    RolloutMetadataView,
+    RolloutSummary,
+    StoredRolloutGroup,
+    scalar_reward,
+)
 from skyrl.train.generators.utils import (
+    RolloutMetricInputs,
     concatenate_generator_outputs,
     get_metrics_from_generator_output,
+    merge_generator_rollout_metrics,
     prepare_generator_input,
+)
+from skyrl.train.streamed_training import (
+    ROLLOUT_TRAIN_LOGPROB_DIFF_ALIASES,
+    STREAM_BYPASSED_HOOKS,
+    StreamedPlan,
+    StreamedRolloutRows,
+    plan_streamed_mini_batch,
+    unsupported_streaming_settings,
 )
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils import Timer
@@ -47,6 +70,7 @@ from skyrl.train.utils.metrics import ScalarGauges, TrainingPhaseGauge
 from skyrl.train.utils.trainer_utils import (
     ResumeMode,
     build_dataloader,
+    finalize_minibatch_rollout_logprob_diff_std,
     get_group_completion_metrics,
     get_intra_group_completion_time_std_cv,
     zero_variance_filter,
@@ -59,8 +83,9 @@ class GeneratedOutputGroup:
     The GeneratorOutput for a single group of rollouts, along with the metadata.
 
     Attributes:
-        generator_output (GeneratorOutput): The GeneratorOutput for a single group of rollouts.
-            That is, the output to the same prompt, but `n_samples_per_prompt` of it.
+        generator_output (GeneratorOutput | StoredRolloutGroup): The GeneratorOutput for a single group
+            of rollouts, i.e. `n_samples_per_prompt` outputs for the same prompt. With
+            ``trainer.fully_async.store_groups_in_ray`` its payloads stay in the Ray object store.
 
         uid (str): The uid of the group. Underlyingly, it is the index of the data in train_dataloader.dataset.
 
@@ -77,19 +102,103 @@ class GeneratedOutputGroup:
             logs ``generator_input["prompts"]``. None if not captured.
     """
 
-    generator_output: GeneratorOutput
+    generator_output: GeneratorOutput | StoredRolloutGroup
     uid: str
     global_step_when_scheduled: int
     group_completion_time_s: Optional[float] = None
     prompts: Optional[List[Any]] = None
 
+    @property
+    def summary(self) -> RolloutSummary:
+        """Per-row scalars, read without loading a stored payload."""
+        if isinstance(self.generator_output, StoredRolloutGroup):
+            return self.generator_output.summary
+        return RolloutSummary.from_output(self.generator_output)
+
+    @property
+    def num_rows(self) -> int:
+        """Rows of the group's output; a step-wise trajectory has one per step."""
+        if isinstance(self.generator_output, StoredRolloutGroup):
+            return self.generator_output.num_rows
+        return len(self.generator_output["rewards"])
+
+    def metadata_view(self) -> RolloutMetadataView:
+        """The group's output without its token payload."""
+        if isinstance(self.generator_output, StoredRolloutGroup):
+            return self.generator_output.metadata_view()
+        return RolloutMetadataView.from_output(self.generator_output)
+
+    def release_output(self) -> None:
+        """Release a stored group's payloads, e.g. once the group is dropped."""
+        if isinstance(self.generator_output, StoredRolloutGroup):
+            self.generator_output.release()
+
 
 def _trajectory_ids(groups: List[GeneratedOutputGroup]) -> Optional[List[Any]]:
     """The trajectory of each row of the groups' outputs, in order; None if a generator left them out."""
-    ids = [group.generator_output.get("trajectory_ids") for group in groups]
+    ids = [group.metadata_view().get("trajectory_ids") for group in groups]
     if any(group_ids is None for group_ids in ids):
         return None
     return [trajectory_id for group_ids in ids for trajectory_id in group_ids]
+
+
+def _row_uids(groups: List[GeneratedOutputGroup]) -> List[str]:
+    """Each row's group uid (a step-wise group has a row per step)."""
+    return [group.uid for group in groups for _ in range(group.num_rows)]
+
+
+def _row_prompts(groups: List[GeneratedOutputGroup]) -> List[Any]:
+    """Each row's trajectory's prompt (a group holds one per trajectory); empty if a group kept none."""
+    prompts: List[Any] = []
+    for group in groups:
+        if group.prompts is None:
+            return []
+        trajectory_ids = group.metadata_view().get("trajectory_ids")
+        if trajectory_ids is None:
+            # Without trajectory ids the output is not step-wise: one row per trajectory.
+            prompts.extend(group.prompts)
+            continue
+        trajectories = [t.to_string() for t in trajectory_ids]
+        index = {trajectory: i for i, trajectory in enumerate(dict.fromkeys(trajectories))}
+        prompts.extend(group.prompts[index[trajectory]] for trajectory in trajectories)
+    return prompts
+
+
+def streaming_bypassed_overrides(trainer_cls: type) -> List[str]:
+    """The overrides of ``STREAM_BYPASSED_HOOKS`` that a streamed step would silently skip.
+
+    An override that only observes the batch is listed in its class's ``STREAMED_HOOKS``, and
+    observes a streamed mini-batch in ``log_streamed_rollouts`` instead.
+    """
+    return [
+        f"{cls.__qualname__}.{hook}"
+        for cls in trainer_cls.__mro__
+        if cls not in (FullyAsyncRayPPOTrainer, RayPPOTrainer)
+        for hook in STREAM_BYPASSED_HOOKS
+        if hook in vars(cls) and hook not in vars(cls).get("STREAMED_HOOKS", ())
+    ]
+
+
+# The token fields of a row the trajectory table logs.
+_LOGGED_TOKEN_KEYS = (RolloutPayloadKey.RESPONSE_IDS, RolloutPayloadKey.LOSS_MASKS)
+
+
+@ray.remote(num_cpus=0)
+def _payload_token_rows(rows: List[int], *payloads: Dict[str, list]) -> Dict[str, List[List[int]]]:
+    """``response_ids`` and ``loss_masks`` of row ``rows[i]`` of ``payloads[i]``, read beside the payloads."""
+    return {
+        key: [np.asarray(payload[key][row]).tolist() for payload, row in zip(payloads, rows, strict=True)]
+        for key in _LOGGED_TOKEN_KEYS
+    }
+
+
+def _check_dumps(dumps: List[ray.ObjectRef]) -> None:
+    """Wait for a step's ``trainer.dump_data_batch`` tasks, warning (not raising) for each that failed."""
+    for ref in dumps:
+        try:
+            ray.get(ref)
+        except Exception as error:  # noqa: BLE001 - a failed debug dump must not fail the step
+            logger.warning(f"trainer.dump_data_batch: a streamed batch dump failed: {error}")
 
 
 @dataclass
@@ -336,6 +445,7 @@ class _AsyncDataloader:
 
 
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
+    STREAMS_STORED_GROUPS = True
 
     def __init__(self, *args, **kwargs):
         # Extract cfg before base init so we can initialize async-specific knobs used by our overrides.
@@ -407,9 +517,23 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             "of recomputing logprobs, since stale policies are not kept for logprob computation."
         )
 
+        if self.cfg.trainer.fully_async.store_groups_in_ray:
+            unsupported = unsupported_streaming_settings(self.cfg, has_critic=self.has_critic)
+            if unsupported:
+                raise ValueError(f"trainer.fully_async.store_groups_in_ray requires: {', '.join(unsupported)}")
+            bypassed = streaming_bypassed_overrides(type(self))
+            if bypassed:
+                raise ValueError(
+                    "trainer.fully_async.store_groups_in_ray never calls these overrides, so they would be "
+                    f"silently skipped: {', '.join(bypassed)}. An override that only observes the batch lists "
+                    "them in its class's STREAMED_HOOKS and observes streamed steps in log_streamed_rollouts."
+                )
+
         # TODO(Charlie): need to assert we are doing TIS and returning logprobs
 
         # Async-specific states
+        # Runs a streamed step's logging beside its training.
+        self._observer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="skyrl-streamed-logging")
         self.async_train_dataloader = _AsyncDataloader(self.train_dataloader, self.mini_batch_size)
         self._staleness_manager = _AsyncStalenessManager(
             max_concurrent_generation_groups=self.num_parallel_generation_workers,
@@ -570,7 +694,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                             # Exhausted mid mini-batch: discard the partial batch (marked consumed so it
                             # isn't regenerated on resume) and end the epoch early.
                             if cur_generation_group_mini_batch:
-                                for _ in cur_generation_group_mini_batch:
+                                for group in cur_generation_group_mini_batch:
+                                    group.release_output()
                                     await self._staleness_manager.on_rollout_filtered()
                                 await self.async_train_dataloader.mark_filtered_uids(
                                     [g.uid for g in cur_generation_group_mini_batch]
@@ -604,23 +729,35 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                                 "Fraction of drained groups kept while collecting the last mini-batch.",
                             )
 
-                        # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
-                        with self._phase_gauge.timed_phase("convert_to_training_input", self.all_timings):
-                            training_input = await asyncio.to_thread(
-                                self.convert_generation_group_mini_batch_to_training_input,
-                                cur_generation_group_mini_batch,
-                                cur_dropped_groups,
-                            )
+                        streamed_rows: Optional[StreamedRolloutRows] = None
+                        if self.cfg.trainer.fully_async.store_groups_in_ray:
+                            # 2-3. Plan the mini-batch from its summaries; each policy DP rank trains on its
+                            # shard, loading each microbatch as it reaches it.
+                            with self._phase_gauge.timed_phase("run_training", self.all_timings):
+                                status, streamed_rows = await asyncio.to_thread(
+                                    self._train_streamed_step, cur_generation_group_mini_batch, cur_dropped_groups
+                                )
+                            step_batch = None
+                        else:
+                            # 2. Post-process the generated groups, aggregating to a single GeneratorOutput, and convert to training format.
+                            with self._phase_gauge.timed_phase("convert_to_training_input", self.all_timings):
+                                training_input = await asyncio.to_thread(
+                                    self.convert_generation_group_mini_batch_to_training_input,
+                                    cur_generation_group_mini_batch,
+                                    cur_dropped_groups,
+                                )
 
-                        # 3. Run training and update consumed UIDs.
-                        with self._phase_gauge.timed_phase("run_training", self.all_timings):
-                            status = await self._run_training(training_input)
-                            await self.async_train_dataloader.mark_consumed_uids(
-                                [g.uid for g in cur_generation_group_mini_batch]
-                            )
+                            # 3. Run training.
+                            with self._phase_gauge.timed_phase("run_training", self.all_timings):
+                                status = await self._run_training(training_input)
+                            step_batch = training_input
+                        await self.async_train_dataloader.mark_consumed_uids(
+                            [g.uid for g in cur_generation_group_mini_batch]
+                        )
                         self._fire(
                             "on_step_end",
-                            batch=training_input,
+                            batch=step_batch,
+                            streamed_rows=streamed_rows,
                             metrics=status,
                             trajectory_ids=_trajectory_ids(cur_generation_group_mini_batch),
                             consumed_trajectory_ids=_trajectory_ids(
@@ -851,17 +988,13 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         Token-level rewards (``List[List[float]]``) are collapsed to a per-trajectory sum, like the rest
         of the trainer. Groups with <=1 live trajectory (singletons / mostly masked) are always kept.
         """
-        rewards = group.generator_output["rewards"]
-        if rewards and isinstance(rewards[0], list):
-            # Token-level rewards: collapse each trajectory to a scalar sequence reward.
-            seq_rewards = [float(sum(r)) for r in rewards]
-        else:
-            seq_rewards = rewards
+        # Read from the summary, so the check loads no stored payload.
+        summary = group.summary
         kept_indices = zero_variance_filter(
-            seq_rewards,
-            [group.uid] * len(seq_rewards),
-            num_loss_tokens=[sum(mask) for mask in group.generator_output["loss_masks"]],
+            summary.rewards,
+            [group.uid] * len(summary.rewards),
             tol=self.cfg.trainer.algorithm.zero_variance_filter_tol,
+            num_loss_tokens=summary.num_loss_tokens,
         )
         return len(kept_indices) > 0
 
@@ -908,6 +1041,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                         # Drop the zero-variance group: give its capacity back to the producers and mark
                         # its UID consumed (skipped, not regenerated, on resume).
                         dropped_groups.append(group)
+                        # Dropped groups count in the metrics only, which need no payload.
+                        group.release_output()
                         await self._staleness_manager.on_rollout_filtered()
                         await self.async_train_dataloader.mark_filtered_uids([group.uid])
                 except Exception:
@@ -921,8 +1056,11 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         """Log the offending group's reward / loss-mask shape before a drain-loop error propagates,
         flushing stderr so the log isn't lost if the process dies during teardown."""
         go = group.generator_output
-        rewards = go.get("rewards") if isinstance(go, dict) else None
-        loss_masks = go.get("loss_masks") if isinstance(go, dict) else None
+        if isinstance(go, StoredRolloutGroup):
+            rewards, loss_masks = go.summary.rewards, go.summary.num_loss_tokens
+        else:
+            rewards = go.get("rewards") if isinstance(go, dict) else None
+            loss_masks = go.get("loss_masks") if isinstance(go, dict) else None
         logger.exception(
             "sample_full_batch: error processing generated group "
             f"(uid={group.uid}, kept_so_far={kept_so_far}, dropped_so_far={dropped_so_far}). "
@@ -933,6 +1071,225 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             f"len={len(loss_masks) if hasattr(loss_masks, '__len__') else 'n/a'}"
         )
         sys.stderr.flush()
+
+    def _staleness_metrics(self, groups: List[GeneratedOutputGroup]) -> Dict[str, float]:
+        """Staleness statistics for this step, warning on each violation."""
+        stalenesses = [self.global_step - group.global_step_when_scheduled for group in groups]
+        for staleness in stalenesses:
+            if staleness > self.max_staleness_steps:
+                # TODO(Charlie): should we drop, drop and resample, or just log?
+                logger.warning(
+                    "Staleness control violated despite using AsyncStalenessManager: "
+                    f"cur_staleness={staleness}, max_staleness_steps={self.max_staleness_steps}.\n"
+                    "If this happens too often, consider increasing max_staleness_steps, adjusting "
+                    "trainer.fully_async.num_parallel_generation_workers, or adjusting generation-training GPU allocation.\n"
+                    "See https://docs.skyrl.ai/docs/tutorials/fully_async#async-staleness-manager for more details."
+                )
+        return {
+            "async/staleness_mean": sum(stalenesses) / len(stalenesses),
+            "async/staleness_max": max(stalenesses),
+            "async/staleness_min": min(stalenesses),
+            "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
+            "async/staleness_violation_count": sum(1 for s in stalenesses if s > self.max_staleness_steps),
+        }
+
+    def _plan_streamed_mini_batch(self, groups: List[GeneratedOutputGroup]) -> StreamedPlan:
+        """``plan_streamed_mini_batch`` with this trainer's algorithm, policy DP size and collation."""
+        return plan_streamed_mini_batch(
+            groups,
+            self.cfg.trainer.algorithm,
+            dp_size=self.dispatch.dp_size("policy"),
+            collation=self._row_collation(),
+            skip_policy_forward=self._skip_policy_forward,
+        )
+
+    def _train_streamed_step(
+        self, groups: List[GeneratedOutputGroup], dropped_groups: List[GeneratedOutputGroup]
+    ) -> Tuple[Dict[str, float], StreamedRolloutRows]:
+        """Plan the mini-batch from its stored summaries, train each policy DP rank on its shard, then
+        take one optimizer step.
+
+        Returns the reduced policy metrics and the mini-batch's rows, for ``on_step_end``.
+        """
+        with Timer("plan_streamed_mini_batch", self.all_timings):
+            plan = self._plan_streamed_mini_batch(groups)
+        dumps = []
+        if self.cfg.trainer.dump_data_batch:
+            dump_path = os.path.join(
+                self.cfg.trainer.export_path, "dumped_data", f"global_step_{self.global_step}_training_input"
+            )
+            # Beside the training, off the trainer nodes: nothing trains on a dumped batch.
+            dumps = [
+                dump_training_batch.remote(shard, unscaled, f"{dump_path}_dp{dp_rank}.pkl")
+                for dp_rank, (shard, unscaled) in enumerate(zip(plan.shards, plan.unscaled_advantages, strict=True))
+            ]
+        self._log_streamed_rollout_metrics(groups, dropped_groups, plan.rows)
+        self.all_metrics.update(plan.metrics)
+        observed = self._observe_streamed_step(groups, plan.rows)
+        with Timer("policy_train", self.all_timings):
+            # The old-logprob forward pass, when the loss needs one, runs within this call.
+            with Timer("policy_forward_backward", self.all_timings):
+                status = self.dispatch.forward_backward_rollout_shards(
+                    "policy",
+                    plan.shards,
+                    loss_normalization=plan.normalization,
+                    compute_old_logprobs=plan.compute_old_logprobs,
+                )
+            # The workers hold the payloads they train on; dropped groups were released when dropped.
+            for group in groups:
+                group.release_output()
+            with Timer("policy_optim_step", self.all_timings):
+                grad_norm = self.dispatch.optim_step("policy")
+        # The logging ran beside the training; it must land before the step's metrics are committed.
+        with Timer("wait_streamed_logging", self.all_timings):
+            observed.result()
+        _check_dumps(dumps)
+        # One mini-batch: the workers' metrics are already reduced.
+        reduced = dict(status.metrics)
+        if grad_norm is not None:
+            reduced["grad_norm"] = grad_norm
+        finalize_minibatch_rollout_logprob_diff_std(reduced)
+        self.all_metrics.update({f"policy/{key}": value for key, value in reduced.items()})
+        if plan.compute_old_logprobs:
+            # The unstreamed trainer's forward-pass diff, from the worker's.
+            self.all_metrics.update(
+                {
+                    f"policy/{alias}": reduced[key]
+                    for key, alias in ROLLOUT_TRAIN_LOGPROB_DIFF_ALIASES.items()
+                    if key in reduced
+                }
+            )
+        self.dispatch.empty_cache()
+        return reduced, plan.rows
+
+    def log_streamed_rollouts(self, rows: StreamedRolloutRows) -> None:
+        """Observe a streamed mini-batch's rows before it trains; by default, nothing.
+
+        A streamed step never builds the driver batch ``convert_to_training_input`` and
+        ``compute_advantages_and_returns`` see, so a subclass that logs from those logs from here.
+        """
+
+    def _observe_streamed_step(self, groups: List[GeneratedOutputGroup], rollout_rows: StreamedRolloutRows) -> Future:
+        """Start a streamed step's example and trajectory-table logging and ``log_streamed_rollouts``,
+        on a background thread beside the training.
+
+        This is the logging ``convert_generation_group_mini_batch_to_training_input`` and its hooks do
+        for an unstreamed step. Only the logged rows' tokens are read, by a task beside their payloads.
+        """
+        view = rollout_rows.view
+        rows = [
+            (t.payload, row)
+            for group in groups
+            for t in group.generator_output.trajectories
+            for row in range(t.num_rows)
+        ]
+        prompts = _row_prompts(groups)
+        logged = self._logged_rows(view["rewards"], len(prompts))
+        read = sorted({0, *logged})
+        # Submitted now: the task holds the payloads it reads after the step releases them.
+        tokens_ref = _payload_token_rows.remote([rows[i][1] for i in read], *(rows[i][0] for i in read))
+
+        def observe() -> None:
+            tokens = ray.get(tokens_ref)
+            position = {row: k for k, row in enumerate(read)}
+            self._log_train_examples(
+                tokens[RolloutPayloadKey.RESPONSE_IDS][position[0]],
+                [prompts[i] for i in logged],
+                {key: [tokens[key][position[i]] for i in logged] for key in _LOGGED_TOKEN_KEYS}
+                | {"rewards": [view["rewards"][i] for i in logged]},
+            )
+            self.log_streamed_rollouts(rollout_rows)
+
+        return self._observer.submit(observe)
+
+    def _logged_rows(self, rewards: List[Any], num_rows: int) -> List[int]:
+        """The rows, of the first ``num_rows``, the trajectory table logs this step."""
+        num_samples = self.cfg.trainer.num_logger_train_samples
+        if self.trajectory_logger is None or num_samples <= 0:
+            return []
+        return self.trajectory_logger.select_sample_indices(
+            num_samples=num_samples, rewards=[scalar_reward(r) for r in rewards[:num_rows]], total=num_rows
+        )
+
+    def _log_train_examples(self, example_response_ids: List[int], prompts: List[Any], rows: Dict[str, list]) -> None:
+        """Log one example response, and ``rows`` (``response_ids``, ``loss_masks``, ``rewards``, one per prompt)
+        to the trajectory table, as the synchronous trainer logs its train samples."""
+        logger.info(f"Example generated: {self.tokenizer.decode(example_response_ids)}")
+        if not prompts:
+            return
+        with Timer("log_train_results"):
+            self.trajectory_logger.log(
+                tracker=self.tracker,
+                num_samples=len(prompts),
+                prompts=prompts,
+                generator_output=rows,
+                tokenizer=self.tokenizer,
+                global_step=self.global_step,
+                wandb_key="trajectories/train",
+                include_idx=False,
+            )
+
+    def _log_group_metrics(
+        self, groups: List[GeneratedOutputGroup], dropped_groups: List[GeneratedOutputGroup]
+    ) -> None:
+        """A mini-batch's generation, completion-time, dropped-reward and staleness metrics.
+
+        Read from the groups' summaries and metadata, so stored groups load nothing. Over kept and
+        dropped groups when ``sample_full_batch`` dropped some, with ``kept``/``dropped`` splits.
+        """
+        step_wise = self.cfg.generator.step_wise_trajectories
+        n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
+        views = {id(group): group.metadata_view() for group in groups + dropped_groups}
+        summaries = {id(group): group.summary for group in groups + dropped_groups}
+
+        def rollout_metrics(selected: List[GeneratedOutputGroup]) -> Dict[str, float]:
+            summary = RolloutSummary.cat([summaries[id(g)] for g in selected])
+            view = RolloutMetadataView.cat([views[id(g)] for g in selected])
+            metrics = RolloutMetricInputs.from_summary(summary, view, step_wise).metrics()
+            merge_generator_rollout_metrics(metrics, [views[id(g)].get("rollout_metrics") for g in selected])
+            return metrics
+
+        def completion_metrics(selected: List[GeneratedOutputGroup]) -> Dict[str, float]:
+            times = [g.group_completion_time_s for g in selected if g.group_completion_time_s is not None]
+            spreads = [get_intra_group_completion_time_std_cv(views[id(g)]) for g in selected]
+            return get_group_completion_metrics(
+                times, [std for std, _ in spreads if std is not None], [cv for _, cv in spreads if cv is not None]
+            )
+
+        if dropped_groups:
+            self.all_metrics.update(rollout_metrics(groups + dropped_groups))
+            self.all_metrics.update(self._reprefix_metrics(rollout_metrics(groups), "kept"))
+            self.all_metrics.update(self._reprefix_metrics(rollout_metrics(dropped_groups), "dropped"))
+            dropped_view = RolloutMetadataView.cat([views[id(g)] for g in dropped_groups])
+            dropped_reward = get_metrics_from_generator_output(dropped_view, _row_uids(dropped_groups))
+            self.all_metrics.update(
+                {
+                    f"reward_dropped/avg_pass_at_{n_samples_per_prompt}": dropped_reward["pass_at_n"],
+                    "reward_dropped/avg_raw_reward": dropped_reward["avg_score"],
+                    "reward_dropped/mean_positive_reward": dropped_reward["mean_positive_reward"],
+                }
+            )
+            self.all_metrics.update(self._reprefix_metrics(completion_metrics(groups), "kept"))
+            self.all_metrics.update(self._reprefix_metrics(completion_metrics(dropped_groups), "dropped"))
+            self.all_metrics.update(completion_metrics(groups + dropped_groups))
+        else:
+            self.all_metrics.update(rollout_metrics(groups))
+            self.all_metrics.update(completion_metrics(groups))
+        self.all_metrics.update(self._staleness_metrics(groups))
+
+    def _log_streamed_rollout_metrics(
+        self,
+        groups: List[GeneratedOutputGroup],
+        dropped_groups: List[GeneratedOutputGroup],
+        rows: StreamedRolloutRows,
+    ) -> None:
+        """Log a streamed mini-batch's metrics from its metadata (``log_rollout_metrics``)."""
+        self._log_group_metrics(groups, dropped_groups)
+        metrics_view = metrics_uids = None
+        if dropped_groups:
+            metrics_view = RolloutMetadataView.cat([group.metadata_view() for group in groups + dropped_groups])
+            metrics_uids = _row_uids(groups + dropped_groups)
+        self.log_rollout_metrics(rows.view, rows.uids, metrics_generator_output=metrics_view, metrics_uids=metrics_uids)
 
     async def _run_training(self, training_input: TrainingInputBatch):
         # TODO(Charlie): share this code with the one-step-off async trainer.
@@ -1003,14 +1360,16 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 global_step_at_start = self.global_step  # for staleness control
 
                 group_start_time = time.monotonic()
+                generate_kwargs = {}
                 if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
                     # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
                     # blast the console with each worker's progress bar.
-                    cur_generator_output: GeneratorOutput = await self.generator.generate(
-                        generator_input, disable_tqdm=True
-                    )
+                    generate_kwargs["disable_tqdm"] = True
+                cur_generator_output: GeneratorOutput | StoredRolloutGroup
+                if self.cfg.trainer.fully_async.store_groups_in_ray:
+                    cur_generator_output = await self.generator.generate_to_ray(generator_input, **generate_kwargs)
                 else:
-                    cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
+                    cur_generator_output = await self.generator.generate(generator_input, **generate_kwargs)
                 group_completion_time_s = time.monotonic() - group_start_time
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
@@ -1066,177 +1425,44 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         ``dropped_groups`` (zero-variance groups dropped this step under ``sample_full_batch``) are not
         trained on, but are folded into the reward/generation metrics to keep them comparable across runs.
         """
-        dropped_groups = dropped_groups or []
-        generator_outputs = []
-        # Prompts for the kept groups, kept parallel to the concatenated `generator_output` so the
-        # trajectory logger can render prompt + response (mirrors the sync trainer's use of
-        # `generator_input["prompts"]`).
-        prompts: List[Any] = []
-        uids = []
-        stalenesses = []
-        staleness_violation_count = 0
-        # Per-group completion times (seconds) and the intra-group spread (std and coefficient of
-        # variation) of per-trajectory completion times. Helpful to understand tail latency
-        group_completion_times: List[float] = []
-        intra_group_stds: List[float] = []
-        intra_group_cvs: List[float] = []
-        for cur_generated_output_group in cur_generation_group_mini_batch:
-            cur_staleness = self.global_step - cur_generated_output_group.global_step_when_scheduled
-            stalenesses.append(cur_staleness)
-            generator_outputs.append(cur_generated_output_group.generator_output)
-            if cur_generated_output_group.prompts is not None:
-                prompts.extend(cur_generated_output_group.prompts)
-
-            # Collect per-group / per-trajectory completion-time stats for this group.
-            if cur_generated_output_group.group_completion_time_s is not None:
-                group_completion_times.append(cur_generated_output_group.group_completion_time_s)
-            intra_group_std, intra_group_cv = get_intra_group_completion_time_std_cv(
-                cur_generated_output_group.generator_output
-            )
-            if intra_group_std is not None:
-                intra_group_stds.append(intra_group_std)
-            if intra_group_cv is not None:
-                intra_group_cvs.append(intra_group_cv)
-
-            # NOTE(Charlie): for step-wise training each group can contain a variable number of entries
-            # (n_samples_per_prompt * variable turns_per_trajectory), so the uid fanout is per-group.
-            group_size = len(cur_generated_output_group.generator_output["response_ids"])
-            uids.extend([cur_generated_output_group.uid] * group_size)
-
-            # Check staleness violation.
-            if cur_staleness > self.max_staleness_steps:
-                # TODO(Charlie): should we drop, drop and resample, or just log?
-                logger.warning(
-                    "Staleness control violated despite using AsyncStalenessManager: "
-                    f"cur_staleness={cur_staleness}, max_staleness_steps={self.max_staleness_steps}.\n"
-                    "If this happens too often, consider increasing max_staleness_steps, adjusting "
-                    "trainer.fully_async.num_parallel_generation_workers, or adjusting generation-training GPU allocation.\n"
-                    "See https://docs.skyrl.ai/docs/tutorials/fully_async#async-staleness-manager for more details."
-                )
-                staleness_violation_count += 1
-
+        groups, dropped_groups = cur_generation_group_mini_batch, dropped_groups or []
+        self._log_group_metrics(groups, dropped_groups)
+        step_wise = self.cfg.generator.step_wise_trajectories
+        # The rollout metrics came from the groups' summaries (_log_group_metrics).
         generator_output = concatenate_generator_outputs(
-            generator_outputs,
-            step_wise=self.cfg.generator.step_wise_trajectories,
+            [group.generator_output for group in groups],
+            step_wise=step_wise,
             routes_expected=self.cfg.generator.inference_engine.enable_return_routed_experts,
             support_expected=self.cfg.trainer.algorithm.enable_sample_support_replay,
             support_scores_expected=self.cfg.trainer.algorithm.enable_score_centering,
+            with_rollout_metrics=False,
         )
-        kept_rollout_metrics = generator_output["rollout_metrics"]
-        assert kept_rollout_metrics is not None, "Rollout metrics should be non-null."
-
-        # Kept + dropped view for the headline reward/generation metrics, so they stay comparable
-        # across runs regardless of filtering. Dropped groups are used for metrics only, never trained.
-        metrics_generator_output = None
-        metrics_uids = None
+        # Kept and dropped groups for the headline reward metrics; a hook may read their tokens
+        # (DAPO's overlong punishment), so these are the outputs themselves, not their metadata.
+        metrics_generator_output = metrics_uids = None
         if dropped_groups:
             metrics_generator_output = concatenate_generator_outputs(
-                generator_outputs + [g.generator_output for g in dropped_groups],
-                step_wise=self.cfg.generator.step_wise_trajectories,
+                [group.generator_output for group in groups + dropped_groups],
+                step_wise=step_wise,
+                with_rollout_metrics=False,
             )
-            metrics_uids = []
-            for g in list(cur_generation_group_mini_batch) + dropped_groups:
-                metrics_uids.extend([g.uid] * len(g.generator_output["response_ids"]))
+            metrics_uids = _row_uids(groups + dropped_groups)
 
-        # Headline generation (rollout) metrics: over kept + dropped when sample_full_batch dropped groups.
-        rollout_metrics_source = metrics_generator_output if metrics_generator_output is not None else generator_output
-        self.all_metrics.update(rollout_metrics_source["rollout_metrics"])
-
-        group_completion_metrics = get_group_completion_metrics(
-            group_completion_times, intra_group_stds, intra_group_cvs
-        )
-
-        if dropped_groups:
-            # Also split generation metrics by kept vs dropped, plus reward metrics for the dropped
-            # groups. (Kept reward metrics are uninformative -- pass@n ~1 -- and loss/avg_final_rewards
-            # already covers the trained set.)
-            dropped_generator_output = concatenate_generator_outputs(
-                [g.generator_output for g in dropped_groups], step_wise=self.cfg.generator.step_wise_trajectories
-            )
-            self.all_metrics.update(self._reprefix_metrics(kept_rollout_metrics, "kept"))
-            self.all_metrics.update(self._reprefix_metrics(dropped_generator_output["rollout_metrics"], "dropped"))
-            dropped_uids = [g.uid for g in dropped_groups for _ in range(len(g.generator_output["response_ids"]))]
-            dropped_reward = get_metrics_from_generator_output(dropped_generator_output, dropped_uids)
-
-            n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
-            self.all_metrics.update(
-                {
-                    f"reward_dropped/avg_pass_at_{n_samples_per_prompt}": dropped_reward["pass_at_n"],
-                    "reward_dropped/avg_raw_reward": dropped_reward["avg_score"],
-                    "reward_dropped/mean_positive_reward": dropped_reward["mean_positive_reward"],
-                }
-            )
-            dropped_generator_output.pop("rollout_metrics", None)
-
-            # Per-group completion times and intra-group spread for dropped groups
-            dropped_group_completion_times = []
-            dropped_group_intra_group_stds = []
-            dropped_group_intra_group_cvs = []
-            for dropped_group in dropped_groups:
-                if dropped_group.group_completion_time_s is not None:
-                    dropped_group_completion_times.append(dropped_group.group_completion_time_s)
-                intra_group_std, intra_group_cv = get_intra_group_completion_time_std_cv(dropped_group.generator_output)
-                if intra_group_std is not None:
-                    dropped_group_intra_group_stds.append(intra_group_std)
-                if intra_group_cv is not None:
-                    dropped_group_intra_group_cvs.append(intra_group_cv)
-
-            dropped_metrics = get_group_completion_metrics(
-                dropped_group_completion_times, dropped_group_intra_group_stds, dropped_group_intra_group_cvs
-            )
-
-            self.all_metrics.update(self._reprefix_metrics(group_completion_metrics, "kept"))
-            self.all_metrics.update(self._reprefix_metrics(dropped_metrics, "dropped"))
-
-            merged_group_completion_times = group_completion_times + dropped_group_completion_times
-            merged_intra_group_stds = intra_group_stds + dropped_group_intra_group_stds
-            merged_intra_group_cvs = intra_group_cvs + dropped_group_intra_group_cvs
-            # get merged metrics with kept + dropped groups
-            group_completion_metrics = get_group_completion_metrics(
-                merged_group_completion_times, merged_intra_group_stds, merged_intra_group_cvs
-            )
-
-        self.all_metrics.update(group_completion_metrics)
-
-        generator_output.pop("rollout_metrics", None)
-        if metrics_generator_output is not None:
-            metrics_generator_output.pop("rollout_metrics", None)
-
-        # Log staleness statistics for this step
-        self.all_metrics.update(
-            {
-                "async/staleness_mean": sum(stalenesses) / len(stalenesses),
-                "async/staleness_max": max(stalenesses),
-                "async/staleness_min": min(stalenesses),
-                "async/staleness_ratio": sum(1 for s in stalenesses if s > 0) / len(stalenesses),
-                "async/staleness_violation_count": staleness_violation_count,
-            }
-        )
-
-        # Per-token reward conversion (kept groups only) + reward metrics over the kept+dropped view.
+        # Per-token reward conversion (kept groups only) + reward metrics over the kept+dropped outputs.
         generator_output, uids = self.postprocess_generator_output(
-            generator_output, uids, metrics_generator_output=metrics_generator_output, metrics_uids=metrics_uids
+            generator_output,
+            _row_uids(groups),
+            metrics_generator_output=metrics_generator_output,
+            metrics_uids=metrics_uids,
         )
 
-        # print example just for debugging
-        vis = self.tokenizer.decode(generator_output["response_ids"][0])
-        logger.info(f"Example generated: {vis}")
-
-        # Optionally upload up to `num_logger_train_samples` samples to tracker (mirrors the
-        # synchronous trainer's train trajectory logging).
-        if self.trajectory_logger is not None:
-            with Timer("log_train_results"):
-                self.trajectory_logger.log(
-                    tracker=self.tracker,
-                    num_samples=self.cfg.trainer.num_logger_train_samples,
-                    prompts=prompts,
-                    generator_output=generator_output,
-                    tokenizer=self.tokenizer,
-                    global_step=self.global_step,
-                    wandb_key="trajectories/train",
-                    include_idx=False,
-                )
-
+        prompts = _row_prompts(groups)
+        logged = self._logged_rows(generator_output["rewards"], len(prompts))
+        self._log_train_examples(
+            generator_output["response_ids"][0],
+            [prompts[i] for i in logged],
+            {key: [generator_output[key][i] for i in logged] for key in (*_LOGGED_TOKEN_KEYS, "rewards")},
+        )
         return self.convert_to_training_input(generator_output, uids)
 
     def save_checkpoints(self) -> str:

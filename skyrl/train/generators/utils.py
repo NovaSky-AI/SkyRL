@@ -3,6 +3,7 @@ import hashlib
 import os
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -17,8 +18,10 @@ from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorOutput,
     MetricsOutput,
+    RolloutSummary,
     TrainingPhase,
     TrajectoryID,
+    scalar_reward,
 )
 from skyrl_gym.metrics import aggregate_for_environment
 
@@ -293,12 +296,40 @@ def _last_step_only(
     return [v for v, last in zip(values, is_last_step) if last]
 
 
+def merge_generator_rollout_metrics(
+    rollout_metrics: Dict[str, Any], per_output_metrics: List[Optional[Dict[str, Any]]]
+) -> None:
+    """Add generator-specific keys of per-output ``rollout_metrics`` to ``rollout_metrics``, in place.
+
+    `RolloutMetricInputs` only computes basic stats (response length, reward); generators may add
+    custom keys, which we aggregate by inferring from the key name. TODO(Charlie): hacky, to be
+    removed soon.
+    """
+    extra_keys: dict = {}
+    for per_output in per_output_metrics:
+        for k, v in (per_output or {}).items():
+            if k not in rollout_metrics and isinstance(v, (int, float)):
+                extra_keys.setdefault(k, []).append(v)
+    for k, values in extra_keys.items():
+        # Match whole words so exception names such as TerminatedError remain counts.
+        words = set(re.split(r"[/_]", k))
+        if "avg" in words or "mean" in words or any(re.fullmatch(r"p\d+", word) for word in words):
+            rollout_metrics[k] = sum(values) / len(values)
+        elif "min" in words:
+            rollout_metrics[k] = min(values)
+        elif "max" in words:
+            rollout_metrics[k] = max(values)
+        else:
+            rollout_metrics[k] = sum(values)
+
+
 def concatenate_generator_outputs(
     generator_outputs: List[GeneratorOutput],
     step_wise: bool = False,
     routes_expected: bool = False,
     support_expected: bool = False,
     support_scores_expected: bool = False,
+    with_rollout_metrics: bool = True,
 ) -> GeneratorOutput:
     """
     Concatenate the generator outputs of multiple batches. Then validate the concatenated result.
@@ -313,6 +344,8 @@ def concatenate_generator_outputs(
         routes_expected: If True, a result with trainable tokens must carry routed experts (R3).
         support_expected: If True, a result with trainable tokens must carry sampler support.
         support_scores_expected: If True, that support must carry the sampler's member logprobs.
+        with_rollout_metrics: If True, re-aggregate the batches' rollout metrics into the result's
+            ``rollout_metrics``; a caller that computes them elsewhere passes False.
     """
     assert len(generator_outputs) > 0
     # Per-token side channels must be populated consistently across batches.
@@ -344,42 +377,11 @@ def concatenate_generator_outputs(
     for key in additional_keys:
         result[key] = _flatten_field(generator_outputs, key)
 
-    # With step-wise training each trajectory spans multiple rows; keep only its last-step timing.
-    is_last_step = result.get("is_last_step") if step_wise else None
-    trajectory_generation_times = _last_step_only(result.get("trajectory_generation_times"), is_last_step)
-    trajectory_time_splits = _last_step_only(result.get("trajectory_time_splits"), is_last_step)
-
-    # Re-aggregate rollout metrics; the extra_keys fallback below cannot aggregate a p90 or a ratio.
-    rollout_metrics = get_rollout_metrics(
-        result["response_ids"],
-        result["rewards"],
-        loss_masks=result.get("loss_masks"),
-        trajectory_completion_times=trajectory_generation_times,
-        trajectory_time_splits=trajectory_time_splits,
-    )
-
-    # Preserve generator-specific metrics from per-group rollout_metrics. get_rollout_metrics only
-    # computes basic stats (response length, reward); generators may add custom keys, which we
-    # aggregate by inferring from the key name. TODO(Charlie): hacky, to be removed soon.
-    extra_keys: dict = {}
-    for go in generator_outputs:
-        per_group = go.get("rollout_metrics") or {}
-        for k, v in per_group.items():
-            if k not in rollout_metrics and isinstance(v, (int, float)):
-                extra_keys.setdefault(k, []).append(v)
-    for k, values in extra_keys.items():
-        # Whole words of the key only, so e.g. ".../num_failed_attempts/TerminatedError" is not a "min".
-        words = set(re.split(r"[/_]", k))
-        if "avg" in words or "mean" in words or any(re.fullmatch(r"p\d+", w) for w in words):
-            # A percentile can't be recombined from per-group ones; their mean is an approximation, not a sum.
-            rollout_metrics[k] = sum(values) / len(values)
-        elif "min" in words:
-            rollout_metrics[k] = min(values)
-        elif "max" in words:
-            rollout_metrics[k] = max(values)
-        else:
-            rollout_metrics[k] = sum(values)
-    result["rollout_metrics"] = rollout_metrics
+    if with_rollout_metrics:
+        # Re-aggregate rollout metrics; the extra-key merge below cannot aggregate a p90 or a ratio.
+        rollout_metrics = RolloutMetricInputs.from_generator_output(result, step_wise=step_wise).metrics()
+        merge_generator_rollout_metrics(rollout_metrics, [go.get("rollout_metrics") for go in generator_outputs])
+        result["rollout_metrics"] = rollout_metrics
 
     # Validate the generator output using the number of prompts
     # Import here to avoid circular dependency.
@@ -433,7 +435,7 @@ def compute_turn_token_counts(loss_masks: List[List[int]]) -> List[int]:
     """
     turn_token_counts: List[int] = []
     for mask in loss_masks:
-        if not mask:
+        if len(mask) == 0:
             continue
         nz = (np.asarray(mask) != 0).astype(np.int8)
         if nz.sum() == 0:
@@ -458,6 +460,121 @@ def _add_time_stats(rollout_metrics: Dict[str, Any], name: str, times: Optional[
             f"generate/trajectory_time_{name}_max": np.max(arr).item(),
         }
     )
+
+
+@dataclass
+class RolloutMetricInputs:
+    """The per-trajectory scalars `get_rollout_metrics` reduces, without the token payloads."""
+
+    num_tokens: List[int]
+    rewards: List[float]
+    num_loss_tokens: Optional[List[int]] = None
+    turn_token_counts: Optional[List[int]] = None
+    completion_times: Optional[List[float]] = None
+    time_splits: Optional[Dict[str, List[float]]] = None
+
+    @classmethod
+    def from_lists(
+        cls,
+        responses: List[List[int]],
+        rewards: Union[List[float], List[List[float]]],
+        loss_masks: Optional[List[List[int]]] = None,
+        completion_times: Optional[List[float]] = None,
+        time_splits: Optional[Dict[str, List[float]]] = None,
+    ) -> "RolloutMetricInputs":
+        return cls(
+            num_tokens=[len(response) for response in responses],
+            # Support both response-level and token-level rewards
+            rewards=[scalar_reward(r) for r in rewards],
+            num_loss_tokens=None if loss_masks is None else [sum(mask) for mask in loss_masks],
+            turn_token_counts=None if loss_masks is None else compute_turn_token_counts(loss_masks),
+            completion_times=completion_times,
+            time_splits=time_splits,
+        )
+
+    @classmethod
+    def from_generator_output(cls, output: GeneratorOutput, step_wise: bool = False) -> "RolloutMetricInputs":
+        # With step-wise training each trajectory spans multiple rows; keep only its last-step timing.
+        is_last_step = output.get("is_last_step") if step_wise else None
+        return cls.from_lists(
+            output["response_ids"],
+            output["rewards"],
+            output.get("loss_masks"),
+            _last_step_only(output.get("trajectory_generation_times"), is_last_step),
+            _last_step_only(output.get("trajectory_time_splits"), is_last_step),
+        )
+
+    @classmethod
+    def from_summary(
+        cls, summary: RolloutSummary, metadata: Dict[str, Any], step_wise: bool = False
+    ) -> "RolloutMetricInputs":
+        """The same inputs from stored rollouts' summary and metadata, without their token payloads."""
+        is_last_step = metadata.get("is_last_step") if step_wise else None
+        return cls(
+            num_tokens=list(summary.response_lengths),
+            rewards=list(summary.rewards),
+            num_loss_tokens=list(summary.num_loss_tokens),
+            turn_token_counts=[n for turns in summary.turn_token_counts for n in turns],
+            completion_times=_last_step_only(metadata.get("trajectory_generation_times"), is_last_step),
+            time_splits=_last_step_only(metadata.get("trajectory_time_splits"), is_last_step),
+        )
+
+    def metrics(self) -> Dict[str, float]:
+        num_tokens_arr = np.array(self.num_tokens)
+        flat_rewards_arr = np.array(self.rewards)
+        non_zero_rewards_arr = flat_rewards_arr > 0.0
+        zero_rewards_arr = flat_rewards_arr == 0.0
+        # average tokens for non zero rewards
+        avg_tokens_non_zero_rewards = (
+            np.mean(num_tokens_arr[non_zero_rewards_arr]) if non_zero_rewards_arr.sum() > 0 else np.zeros(1)
+        )
+        # average tokens for zero rewards
+        avg_tokens_zero_rewards = (
+            np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
+        )
+
+        rollout_metrics = {
+            "generate/min_num_tokens": np.min(num_tokens_arr).item(),
+            "generate/max_num_tokens": np.max(num_tokens_arr).item(),
+            "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
+            "generate/std_num_tokens": np.std(num_tokens_arr).item(),
+            "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
+            "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
+        }
+
+        if self.num_loss_tokens is not None:
+            assistant_tokens_arr = np.array(self.num_loss_tokens)
+            rollout_metrics.update(
+                {
+                    "generate/avg_assistant_tokens": np.mean(assistant_tokens_arr).item(),
+                    "generate/min_assistant_tokens": np.min(assistant_tokens_arr).item(),
+                    "generate/max_assistant_tokens": np.max(assistant_tokens_arr).item(),
+                    "generate/std_assistant_tokens": np.std(assistant_tokens_arr).item(),
+                }
+            )
+
+        # Per-turn token stats: run lengths of consecutive non-zero loss-mask entries (one run per turn).
+        if self.turn_token_counts:
+            turn_token_counts_arr = np.array(self.turn_token_counts)
+            rollout_metrics.update(
+                {
+                    "generate/tokens_per_turn_mean": np.mean(turn_token_counts_arr).item(),
+                    "generate/tokens_per_turn_std": np.std(turn_token_counts_arr).item(),
+                    "generate/tokens_per_turn_max": np.max(turn_token_counts_arr).item(),
+                }
+            )
+
+        _add_time_stats(rollout_metrics, "completion", self.completion_times)
+        for name, times in (self.time_splits or {}).items():
+            _add_time_stats(rollout_metrics, name, times)
+
+        if self.completion_times and self.time_splits:
+            # Completion time not attributed to a named split, e.g. tokenization and chat templating.
+            other = np.array(self.completion_times, dtype=np.float64)
+            for times in self.time_splits.values():
+                other = other - np.array(times, dtype=np.float64)
+            _add_time_stats(rollout_metrics, "other", other.tolist())
+        return rollout_metrics
 
 
 def get_rollout_metrics(
@@ -486,66 +603,9 @@ def get_rollout_metrics(
     Returns:
         Dictionary of aggregated metrics
     """
-    num_tokens_arr = np.array([len(response) for response in responses])
-    # Support both response-level and token-level rewards
-    flat_rewards = []
-    for r in rewards:
-        if isinstance(r, list):
-            flat_rewards.append(float(np.sum(r)))
-        else:
-            flat_rewards.append(float(r))
-    flat_rewards_arr = np.array(flat_rewards)
-    non_zero_rewards_arr = flat_rewards_arr > 0.0
-    zero_rewards_arr = flat_rewards_arr == 0.0
-    # average tokens for non zero rewards
-    avg_tokens_non_zero_rewards = (
-        np.mean(num_tokens_arr[non_zero_rewards_arr]) if non_zero_rewards_arr.sum() > 0 else np.zeros(1)
-    )
-    # average tokens for zero rewards
-    avg_tokens_zero_rewards = np.mean(num_tokens_arr[zero_rewards_arr]) if zero_rewards_arr.sum() > 0 else np.zeros(1)
-
-    rollout_metrics = {
-        "generate/min_num_tokens": np.min(num_tokens_arr).item(),
-        "generate/max_num_tokens": np.max(num_tokens_arr).item(),
-        "generate/avg_num_tokens": np.mean(num_tokens_arr).item(),
-        "generate/std_num_tokens": np.std(num_tokens_arr).item(),
-        "generate/avg_tokens_non_zero_rewards": avg_tokens_non_zero_rewards.item(),
-        "generate/avg_tokens_zero_rewards": avg_tokens_zero_rewards.item(),
-    }
-
-    if loss_masks is not None:
-        assistant_tokens_arr = np.array([sum(mask) for mask in loss_masks])
-        rollout_metrics.update(
-            {
-                "generate/avg_assistant_tokens": np.mean(assistant_tokens_arr).item(),
-                "generate/min_assistant_tokens": np.min(assistant_tokens_arr).item(),
-                "generate/max_assistant_tokens": np.max(assistant_tokens_arr).item(),
-                "generate/std_assistant_tokens": np.std(assistant_tokens_arr).item(),
-            }
-        )
-
-        # Per-turn token stats: run lengths of consecutive non-zero loss-mask entries (one run per turn).
-        turn_token_counts = compute_turn_token_counts(loss_masks)
-        if turn_token_counts:
-            turn_token_counts_arr = np.array(turn_token_counts)
-            rollout_metrics.update(
-                {
-                    "generate/tokens_per_turn_mean": np.mean(turn_token_counts_arr).item(),
-                    "generate/tokens_per_turn_std": np.std(turn_token_counts_arr).item(),
-                    "generate/tokens_per_turn_max": np.max(turn_token_counts_arr).item(),
-                }
-            )
-
-    _add_time_stats(rollout_metrics, "completion", trajectory_completion_times)
-    for name, times in (trajectory_time_splits or {}).items():
-        _add_time_stats(rollout_metrics, name, times)
-
-    if trajectory_completion_times and trajectory_time_splits:
-        # Completion time not attributed to a named split, e.g. tokenization and chat templating.
-        other = np.array(trajectory_completion_times, dtype=np.float64)
-        for times in trajectory_time_splits.values():
-            other = other - np.array(times, dtype=np.float64)
-        _add_time_stats(rollout_metrics, "other", other.tolist())
+    rollout_metrics = RolloutMetricInputs.from_lists(
+        responses, rewards, loss_masks, trajectory_completion_times, trajectory_time_splits
+    ).metrics()
 
     if env_metrics is not None and env_classes is not None:
         env_to_metrics = defaultdict(list)

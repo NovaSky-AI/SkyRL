@@ -450,6 +450,8 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         ).warning
         if mfu_warning:
             logger.warning(mfu_warning)
+    if cfg.trainer.fully_async.store_groups_in_ray and not cfg.trainer.fully_async.enabled:
+        raise ValueError("trainer.fully_async.store_groups_in_ray requires trainer.fully_async.enabled")
 
     # Validate generation config separately
     validate_generator_cfg(cfg)

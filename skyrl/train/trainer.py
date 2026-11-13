@@ -44,6 +44,7 @@ from skyrl.backends.skyrl_train.utils.ppo_utils import (
     FixedKLController,
     PolicyLossType,
     apply_loss_reduction_to_advantages_minibatch,
+    batch_normalize_advantages,
     compute_approx_kl,
     get_kl_controller,
 )
@@ -56,7 +57,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     select_forward_inputs,
 )
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
-from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.config import AlgorithmConfig, SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
     RowCollation,
@@ -69,6 +70,8 @@ from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
     GeneratorOutput,
+    SupportCounts,
+    sample_support_metrics,
 )
 from skyrl.train.generators.utils import (
     get_metrics_from_generator_output,
@@ -109,7 +112,56 @@ from skyrl.train.utils.utils import ResolvedPlacementGroup, configure_ray_worker
 from skyrl.train.utils.vllm_metrics_scraper import VLLMMetricsScraper
 
 
+def outcome_advantages(
+    algorithm: AlgorithmConfig,
+    token_level_rewards: torch.Tensor,
+    index: np.ndarray,
+    values: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Advantages and returns of whole trajectories, one per row of ``token_level_rewards``, at every
+    position: an outcome estimator scores a trajectory, so its response mask is all ones.
+
+    ``index`` holds each trajectory's group uid.
+    """
+    return ppo_utils.compute_advantages_and_returns(
+        token_level_rewards=token_level_rewards,
+        response_mask=torch.ones_like(token_level_rewards, dtype=torch.float),
+        index=index,
+        adv_estimator=algorithm.advantage_estimator,
+        values=values,
+        config=algorithm,
+        gamma=algorithm.gamma,
+        lambd=algorithm.lambd,
+        grpo_norm_by_std=algorithm.grpo_norm_by_std,
+    )
+
+
+def advantage_metrics(
+    final_rewards: torch.Tensor, advantages: torch.Tensor, token_counts: Optional[torch.Tensor] = None
+) -> Dict[str, float]:
+    """A mini-batch's ``loss/`` metrics: its mean final reward, and its mean (absolute) advantage over
+    response tokens.
+
+    ``advantages`` holds one value per response token or, with ``token_counts``, one per row that
+    each of the row's ``token_counts`` response tokens carries.
+    """
+    if token_counts is None:
+        mean, abs_mean = advantages.mean(), advantages.abs().mean()
+    else:
+        weights = token_counts.double()
+        mean = (advantages.double() * weights).sum() / weights.sum()
+        abs_mean = (advantages.double().abs() * weights).sum() / weights.sum()
+    return {
+        "loss/avg_final_rewards": final_rewards.mean().item(),
+        "loss/avg_raw_advantages": mean.item(),
+        "loss/avg_raw_advantages_abs": abs_mean.item(),
+    }
+
+
 class RayPPOTrainer:
+    # Whether the trainer streams training from stored groups (``trainer.fully_async.store_groups_in_ray``).
+    STREAMS_STORED_GROUPS = False
+
     def __init__(
         self,
         cfg: SkyRLTrainConfig,
@@ -122,6 +174,10 @@ class RayPPOTrainer:
         eval_dataset: Optional[PromptDataset] = None,
         callbacks: Optional[List[TrainingCallback]] = None,
     ):
+        if cfg.trainer.fully_async.store_groups_in_ray and not self.STREAMS_STORED_GROUPS:
+            raise ValueError(
+                f"trainer.fully_async.store_groups_in_ray needs the fully-async trainer, not {type(self).__name__}"
+            )
         self.cfg = cfg
         self.colocate_all = cfg.trainer.placement.colocate_all
         self.tracker = tracker
@@ -953,6 +1009,9 @@ class RayPPOTrainer:
             max_seq_len=algorithm.max_seq_len,
             require_rollout_logprobs=off_policy_correction.tis_ratio_type is not None
             or off_policy_correction.sequence_mask_metric is not None,
+            routes_expected=self.cfg.generator.inference_engine.enable_return_routed_experts,
+            support_expected=algorithm.enable_sample_support_replay,
+            support_scores_expected=algorithm.enable_score_centering,
         )
 
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
@@ -997,21 +1056,11 @@ class RayPPOTrainer:
             "generate/batch_padded_seq_len": batch_padded_seq_len,
         }
         # Add metrics for sample support replay if enabled
-        rollout_sample_support_tensor = training_input[SAMPLE_SUPPORT_FIELD]
-        rollout_sample_support = generator_output.get(SAMPLE_SUPPORT_FIELD)
-        if rollout_sample_support_tensor is not None:
-            # Rows without captured support (padding, masked tokens) are excluded.
-            support_sizes = rollout_sample_support_tensor.row_lengths
-            support_sizes = support_sizes[support_sizes > 0]
-            if support_sizes.numel() > 0:
-                # `build_sample_support` already required one top_k across the batch.
-                top_k = rollout_sample_support[0].top_k
-                batch_metrics.update(
-                    {
-                        "generate/sample_support_size_mean": support_sizes.float().mean().item(),
-                        "generate/sample_support_full_fraction": (support_sizes == top_k).float().mean().item(),
-                    }
-                )
+        if training_input[SAMPLE_SUPPORT_FIELD] is not None:
+            # From the rows' counts, as a streamed step logs them from its summaries.
+            batch_metrics.update(
+                sample_support_metrics([SupportCounts.of(rows) for rows in generator_output[SAMPLE_SUPPORT_FIELD]])
+            )
         self.all_metrics.update(batch_metrics)
         response_ids = generator_output["response_ids"]
         training_input.metadata["avg_response_length"] = sum(
@@ -1065,30 +1114,20 @@ class RayPPOTrainer:
 
         return generator_output
 
-    @torch.no_grad()
-    def postprocess_generator_output(
+    def log_rollout_metrics(
         self,
         generator_output: GeneratorOutput,
         uids: List[str],
         metrics_generator_output: Optional[GeneratorOutput] = None,
         metrics_uids: Optional[List[str]] = None,
-    ) -> Tuple[GeneratorOutput, List[str]]:
-        """
-        Converts to per token rewards and computes pass@N.
+    ) -> None:
+        """Log a mini-batch's reward metrics (pass@N, mean reward), from its rows' metadata.
 
-        For step-wise training with ``merge_stepwise_output=true``, also collapses
-        consecutive turns sharing a common prefix into a single sequence; ``uids``
-        is shortened to match.
-
-        In the future algorithm specific reward or loss mask post processing should be done here.
-
-        Reward metrics are computed over ``metrics_generator_output`` / ``metrics_uids`` when provided
-        (a superset of the trained output -- e.g. sample_full_batch passes the dropped groups so metrics
-        stay comparable), otherwise over ``generator_output`` / ``uids``. The per-token / loss-mask
-        conversion always applies to ``generator_output`` only.
-
-        Returns:
-            (generator_output, uids) — uids may be shorter than the input when merging.
+        Computed over ``metrics_generator_output`` / ``metrics_uids`` when provided (a superset of the
+        trained output -- e.g. sample_full_batch passes the dropped groups so metrics stay comparable),
+        otherwise over ``generator_output`` / ``uids``; for step-wise training, over last steps only.
+        Reads no token payload, so a streamed step logs its metadata view through it. A subclass that
+        logs more of the rows' metadata overrides this rather than ``postprocess_generator_output``.
         """
         metrics_output = metrics_generator_output if metrics_generator_output is not None else generator_output
         metrics_output_uids = metrics_uids if metrics_uids is not None else uids
@@ -1113,6 +1152,41 @@ class RayPPOTrainer:
             generator_output_for_metrics,
             uids_for_metrics,
         )
+
+        n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
+
+        reward_metrics = {
+            f"reward/avg_pass_at_{n_samples_per_prompt}": overall_metrics["pass_at_n"],
+            "reward/avg_raw_reward": overall_metrics["avg_score"],
+            "reward/mean_positive_reward": overall_metrics["mean_positive_reward"],
+        }
+        self.all_metrics.update(reward_metrics)
+        logger.info(
+            f"reward/avg_pass_at_{n_samples_per_prompt}: {overall_metrics['pass_at_n']}, reward/avg_raw_reward: {overall_metrics['avg_score']}, reward/mean_positive_reward: {overall_metrics['mean_positive_reward']}"
+        )
+
+    @torch.no_grad()
+    def postprocess_generator_output(
+        self,
+        generator_output: GeneratorOutput,
+        uids: List[str],
+        metrics_generator_output: Optional[GeneratorOutput] = None,
+        metrics_uids: Optional[List[str]] = None,
+    ) -> Tuple[GeneratorOutput, List[str]]:
+        """
+        Logs the reward metrics (``log_rollout_metrics``) and converts to per token rewards.
+
+        For step-wise training with ``merge_stepwise_output=true``, also collapses
+        consecutive turns sharing a common prefix into a single sequence; ``uids``
+        is shortened to match.
+
+        In the future algorithm specific reward or loss mask post processing should be done here.
+        The per-token / loss-mask conversion applies to ``generator_output`` only.
+
+        Returns:
+            (generator_output, uids) — uids may be shorter than the input when merging.
+        """
+        self.log_rollout_metrics(generator_output, uids, metrics_generator_output, metrics_uids)
 
         # Prefix-aware merging of step-wise turns.
         if self.cfg.generator.merge_stepwise_output:
@@ -1161,17 +1235,6 @@ class RayPPOTrainer:
                 per_token_reward[-1] = float(reward)
                 per_token_rewards.append(per_token_reward)
 
-        n_samples_per_prompt = self.cfg.generator.n_samples_per_prompt
-
-        reward_metrics = {
-            f"reward/avg_pass_at_{n_samples_per_prompt}": overall_metrics["pass_at_n"],
-            "reward/avg_raw_reward": overall_metrics["avg_score"],
-            "reward/mean_positive_reward": overall_metrics["mean_positive_reward"],
-        }
-        self.all_metrics.update(reward_metrics)
-        logger.info(
-            f"reward/avg_pass_at_{n_samples_per_prompt}: {overall_metrics['pass_at_n']}, reward/avg_raw_reward: {overall_metrics['avg_score']}, reward/mean_positive_reward: {overall_metrics['mean_positive_reward']}"
-        )
         # re-assign reward but now it's per token rewards
         generator_output["rewards"] = per_token_rewards
         return generator_output, uids
@@ -1212,17 +1275,11 @@ class RayPPOTrainer:
             #       (batch_size, response_len):        broadcast to every step of the owning trajectory
             #   response_mask_float,
             #       (batch_size, response_len):        per-step response mask
-            last_step_response_mask = data["response_mask"][is_last_step]
-            last_step_advantages, last_step_returns = ppo_utils.compute_advantages_and_returns(
-                token_level_rewards=token_level_rewards[is_last_step],
-                response_mask=torch.ones_like(last_step_response_mask, dtype=torch.float),
-                index=index[is_last_step.cpu().numpy()],
-                adv_estimator=self.cfg.trainer.algorithm.advantage_estimator,
+            last_step_advantages, last_step_returns = outcome_advantages(
+                self.cfg.trainer.algorithm,
+                token_level_rewards[is_last_step],
+                index[is_last_step.cpu().numpy()],
                 values=values[is_last_step] if values is not None else None,
-                config=self.cfg.trainer.algorithm,
-                gamma=self.cfg.trainer.algorithm.gamma,
-                lambd=self.cfg.trainer.algorithm.lambd,
-                grpo_norm_by_std=self.cfg.trainer.algorithm.grpo_norm_by_std,
             )
             traj_ids = (
                 torch.cat([torch.tensor([False], device=is_last_step.device), is_last_step[:-1]]).int().cumsum(dim=0)
@@ -1255,9 +1312,7 @@ class RayPPOTrainer:
 
         return_sums = token_level_rewards.sum(dim=-1)[: num_samples - pad_size]
         if self.cfg.generator.step_wise_trajectories:
-            avg_rewards: float = return_sums[is_last_step[: num_samples - pad_size]].mean().item()
-        else:
-            avg_rewards: float = return_sums.mean().item()
+            return_sums = return_sums[is_last_step[: num_samples - pad_size]]
 
         avg_response_length = data.metadata["avg_response_length"]
         data = data.to("cpu")
@@ -1265,8 +1320,10 @@ class RayPPOTrainer:
         valid_advantages = torch.masked_select(
             data["advantages"][: num_samples - pad_size, ...], data["response_mask"][: num_samples - pad_size].bool()
         )
-        avg_advantages: float = valid_advantages.mean().item()
-        avg_advantages_abs: float = valid_advantages.abs().mean().item()
+        loss_metrics = advantage_metrics(return_sums, valid_advantages)
+        avg_rewards = loss_metrics["loss/avg_final_rewards"]
+        avg_advantages = loss_metrics["loss/avg_raw_advantages"]
+        avg_advantages_abs = loss_metrics["loss/avg_raw_advantages_abs"]
 
         if "metrics" not in data.metadata:
             data.metadata["metrics"] = {}
@@ -1280,13 +1337,7 @@ class RayPPOTrainer:
         )
 
         logger.info(f"avg_final_rewards: {avg_rewards}, avg_response_length: {avg_response_length}")
-        self.all_metrics.update(
-            {
-                "loss/avg_final_rewards": avg_rewards,
-                "loss/avg_raw_advantages": avg_advantages,
-                "loss/avg_raw_advantages_abs": avg_advantages_abs,
-            }
-        )
+        self.all_metrics.update(loss_metrics)
         return data
 
     def dump_data(self, data: TrainingInputBatch, file_name: str):
@@ -1332,7 +1383,7 @@ class RayPPOTrainer:
         output = self.dispatch.forward(model, data_fwd_pass)
         return loss_fn_outputs_to_tensor(output.loss_fn_outputs, key=key)
 
-    def _skip_policy_forward(self, training_input: TrainingInputBatch) -> bool:
+    def _skip_policy_forward(self, has_rollout_logprobs: bool) -> bool:
         """Whether the policy forward pass producing the "old" logprobs can be skipped.
 
         Safe only when the loss optimizes against rollout logprobs and nothing else reads the
@@ -1354,7 +1405,7 @@ class RayPPOTrainer:
             loss_without_old_logprobs = algorithm.policy_loss_type in LOSSES_WITHOUT_OLD_LOGPROBS
         return (
             loss_without_old_logprobs
-            and training_input.get("rollout_logprobs", None) is not None
+            and has_rollout_logprobs
             and not algorithm.use_kl_in_reward
             and not off_policy_correction_enabled(algorithm.off_policy_correction)
         )
@@ -1404,7 +1455,7 @@ class RayPPOTrainer:
 
         # Policy forward. Skipped for losses that optimize against rollout logprobs (see
         # `_skip_policy_forward`), where the resulting logprobs are never read.
-        if self._skip_policy_forward(training_input):
+        if self._skip_policy_forward(training_input.get("rollout_logprobs", None) is not None):
             action_log_probs = None
         else:
             action_log_probs = self._execute_forward_pass(
@@ -1522,12 +1573,9 @@ class RayPPOTrainer:
 
         # Step 1: Z-score normalization over the real response tokens (if enabled)
         if self.cfg.trainer.algorithm.advantage_batch_normalize:
-            response_mask = data["response_mask"] * data.real_sample_mask[:, None]
-            num_actions = response_mask.sum()
-            mean = (advantages * response_mask).sum() / num_actions.clamp(min=1)
-            std = ((advantages - mean).pow(2) * response_mask).sum()
-            rstd = (std / num_actions).clamp(min=1e-8).rsqrt()
-            data["advantages"] = (advantages - mean) * rstd
+            data["advantages"] = batch_normalize_advantages(
+                advantages, data["response_mask"] * data.real_sample_mask[:, None]
+            )
 
         # Step 2: Loss reduction normalization per mini-batch
         normalized_advantages = torch.zeros_like(advantages)

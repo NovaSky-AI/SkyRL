@@ -5,6 +5,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Dict,
+    FrozenSet,
     List,
     Literal,
     Optional,
@@ -94,6 +95,11 @@ class MetricsOutput(TypedDict):
     mean_positive_reward: Optional[float]
 
 
+def scalar_reward(reward: Union[float, List[float]]) -> float:
+    """A trajectory's reward; a token-level reward counts as its sum."""
+    return float(sum(reward)) if isinstance(reward, list) else float(reward)
+
+
 @dataclass(frozen=True)
 class SupportCounts:
     """A row's response tokens with captured sample support, their support sizes summed, and how many
@@ -130,15 +136,30 @@ class RolloutSummary:
     rewards: List[float]
     # ``sum(loss_mask)``; fractional when the mask weights tokens.
     num_loss_tokens: List[float]
+    # Together, a row's attended tokens.
+    prompt_lengths: List[int]
+    response_lengths: List[int]
+    # Tokens of each assistant turn (runs of the loss mask).
+    turn_token_counts: List[List[int]]
     # Each row's sample-support counts; None when the rows carry no sample support.
     sample_support: Optional[List[SupportCounts]] = None
 
+    @property
+    def row_lengths(self) -> List[int]:
+        """Each row's attended tokens."""
+        return [p + r for p, r in zip(self.prompt_lengths, self.response_lengths, strict=True)]
+
     @classmethod
     def from_output(cls, output: GeneratorOutput) -> "RolloutSummary":
+        from skyrl.train.generators.utils import compute_turn_token_counts
+
         support = output.get(RolloutPayloadKey.ROLLOUT_SAMPLE_SUPPORT)
         return cls(
-            rewards=[float(sum(r)) if isinstance(r, list) else float(r) for r in output["rewards"]],
+            rewards=[scalar_reward(r) for r in output["rewards"]],
             num_loss_tokens=[float(sum(mask)) for mask in output["loss_masks"]],
+            prompt_lengths=[len(ids) for ids in output["prompt_token_ids"]],
+            response_lengths=[len(ids) for ids in output["response_ids"]],
+            turn_token_counts=[compute_turn_token_counts([mask]) for mask in output["loss_masks"]],
             sample_support=None if support is None else [SupportCounts.of(rows) for rows in support],
         )
 
@@ -148,8 +169,26 @@ class RolloutSummary:
         return cls(
             rewards=[r for s in summaries for r in s.rewards],
             num_loss_tokens=[n for s in summaries for n in s.num_loss_tokens],
+            prompt_lengths=[n for s in summaries for n in s.prompt_lengths],
+            response_lengths=[n for s in summaries for n in s.response_lengths],
+            turn_token_counts=[t for s in summaries for t in s.turn_token_counts],
             sample_support=None if None in supports else [c for s in supports for c in s],
         )
+
+
+class RolloutMetadataView(dict):
+    """A ``GeneratorOutput`` with its payload keys left out: what the trainer may read of stored rollouts."""
+
+    @classmethod
+    def from_output(cls, output: GeneratorOutput) -> "RolloutMetadataView":
+        return cls({key: value for key, value in output.items() if key not in PAYLOAD_KEYS})
+
+    @classmethod
+    def cat(cls, views: List["RolloutMetadataView"]) -> "RolloutMetadataView":
+        """The views' per-row fields, concatenated; fields that are not per row are left out."""
+        num_rows = [len(view["rewards"]) for view in views]
+        keys = [key for key in views[0] if all(_is_per_row(view.get(key), n) for view, n in zip(views, num_rows))]
+        return cls({key: _cat_rows([view[key] for view in views]) for key in keys})
 
 
 @dataclass
@@ -185,6 +224,8 @@ class StoredRolloutGroup:
     trajectories: List[StoredTrajectory]
     # Fields that are not per row, e.g. ``rollout_metrics``, and fields that are None.
     group_fields: Dict[str, Any]
+    # The ``RolloutPayloadKey``s every trajectory's payload holds.
+    payload_keys: FrozenSet[str] = frozenset()
 
     @classmethod
     def split_output(
@@ -212,7 +253,8 @@ class StoredRolloutGroup:
             summary = RolloutSummary.from_output({**rows, **payload})
             trajectories.append(StoredTrajectory(payload=None, metadata=rows, summary=summary))
             payloads.append(encode_payload(payload, support_id_bits=support_id_bits))
-        return cls(trajectories=trajectories, group_fields=group_fields), payloads
+        group = cls(trajectories=trajectories, group_fields=group_fields, payload_keys=frozenset(payloads[0]))
+        return group, payloads
 
     @classmethod
     def from_output(cls, output: GeneratorOutput, *, support_id_bits: Optional[int] = None) -> "StoredRolloutGroup":
@@ -230,8 +272,19 @@ class StoredRolloutGroup:
             trajectory.payload = ref
 
     @property
+    def num_rows(self) -> int:
+        return sum(t.num_rows for t in self.trajectories)
+
+    @property
     def summary(self) -> RolloutSummary:
         return RolloutSummary.cat([t.summary for t in self.trajectories])
+
+    def metadata_view(self) -> RolloutMetadataView:
+        """The group's ``GeneratorOutput`` without its payload keys, read without loading anything."""
+        view = RolloutMetadataView({key: value for key, value in self.group_fields.items() if key not in PAYLOAD_KEYS})
+        for key in self.trajectories[0].metadata:
+            view[key] = _cat_rows([t.metadata[key] for t in self.trajectories])
+        return view
 
     def release(self) -> None:
         for trajectory in self.trajectories:
@@ -250,6 +303,12 @@ def _slice_rows(value: Union[list, Dict[str, list]], start: int, end: int) -> Un
     if isinstance(value, dict):
         return {key: rows[start:end] for key, rows in value.items()}
     return value[start:end]
+
+
+def _cat_rows(parts: List[Union[list, Dict[str, list]]]) -> Union[list, Dict[str, list]]:
+    if isinstance(parts[0], dict):
+        return {key: [row for part in parts for row in part[key]] for key in parts[0]}
+    return [row for part in parts for row in part]
 
 
 def _trajectory_row_spans(is_last_step: Optional[List[bool]], num_rows: int) -> List[Tuple[int, int]]:

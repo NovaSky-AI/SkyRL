@@ -1258,6 +1258,19 @@ class FullyAsyncConfig(BaseConfig):
     If False, we reuse KV cache from stale policies during generation
     (avoids recomputation at the cost of using slightly stale KV cache).
     """
+    store_groups_in_ray: bool = False
+    """Keep each generated group's token payloads in the Ray object store
+    (``generator.generate_to_ray``) and stream training: the trainer plans each mini-batch from the
+    groups' summaries, and each policy worker collates its microbatches from their payloads, so the
+    trainer process never loads a payload. See ``unsupported_streaming_settings`` in
+    ``streamed_training.py`` for the settings this supports. Requires ``enabled`` and
+    ``FullyAsyncRayPPOTrainer``.
+
+    A streamed step logs the unstreamed step's metrics, and also ``timing/plan_streamed_mini_batch`` and
+    ``async/num_padding_dp_shards`` (DP ranks left without a trajectory to train).
+
+    Token-level rewards train as their per-row sums, so ``algorithm.zero_variance_filter`` also applies
+    to them here, on those sums. Unstreamed training skips the filter for token-level rewards."""
 
     # --- Trainer simulation (no real trainer components) ---
     simulate_training: bool = False
@@ -1849,7 +1862,12 @@ class TrainerConfig(BaseConfig):
     dump_data_batch: bool = False
     """Dump each training data batch to a file for debugging.
     The batch at global step N is written to
-    ``{export_path}/dumped_data/global_step_{N}_training_input.pkl``."""
+    ``{export_path}/dumped_data/global_step_{N}_training_input.pkl``. Streamed training
+    (``fully_async.store_groups_in_ray``) writes each policy DP rank's batch, as its workers train on
+    it (advantages already scaled by the loss reduction, and ``unscaled_advantages`` as the
+    unstreamed batch holds them), to ``..._training_input_dp{rank}.pkl`` from a Ray task in the
+    background; multi-node runs need a shared ``export_path``. A dump that fails is logged as a
+    warning at the end of its step."""
     dump_eval_results: bool = True
     """Dump full evaluation results to a file.
     Results at global step N are written to ``{export_path}/dumped_evals/global_step_{N}_evals``, with both per-dataset
