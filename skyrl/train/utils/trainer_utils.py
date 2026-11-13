@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import posixpath
 from collections import defaultdict
 from enum import Enum
 from pathlib import Path
@@ -357,7 +358,7 @@ def dump_per_dataset_eval_results(
     # Dump per-dataset files
     for data_source, indices in data_source_indices.items():
         sanitized_data_source = sanitize_data_source(data_source)
-        filename = os.path.join(dump_dir_path, f"{sanitized_data_source}.jsonl")
+        filename = posixpath.join(dump_dir_path, f"{sanitized_data_source}.jsonl")
 
         with io.open_file(filename, "w") as f:
             for i in indices:
@@ -375,7 +376,7 @@ def dump_per_dataset_eval_results(
         logger.info(f"Dumped eval data for {data_source} to {filename}")
 
     # Dump aggregated results file
-    aggregated_filename = os.path.join(dump_dir_path, "aggregated_results.jsonl")
+    aggregated_filename = posixpath.join(dump_dir_path, "aggregated_results.jsonl")
     with io.open_file(aggregated_filename, "w") as f:
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 

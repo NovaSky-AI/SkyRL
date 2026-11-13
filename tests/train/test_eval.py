@@ -50,17 +50,21 @@ class DummyGenerator(GeneratorInterface):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", ["local", "s3", "gs", "gcs"])
 @pytest.mark.parametrize("step", [None, 0, 5])
+@pytest.mark.parametrize("export_prefix", ["exports", r"exports\literal"])
 async def test_eval_dumps_use_native_storage_and_include_all_returned_metrics(
     dummy_config,
     tmp_path,
     monkeypatch,
     protocol,
     step,
+    export_prefix,
 ):
     monkeypatch.chdir(tmp_path)
     cfg = dummy_config
     cfg.trainer.dump_eval_results = True
-    cfg.trainer.export_path = str(tmp_path / "exports") if protocol == "local" else f"{protocol}://bucket/exports"
+    cfg.trainer.export_path = (
+        str(tmp_path / export_prefix) if protocol == "local" else f"{protocol}://bucket/{export_prefix}"
+    )
     if protocol != "local":
         filesystem = fsspec.filesystem("memory")
         filesystem.store.clear()

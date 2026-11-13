@@ -1,4 +1,4 @@
-import os
+import posixpath
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -259,7 +259,7 @@ async def evaluate(
     # 4. Prepare dumping data. The dump keeps every row (every step when step-wise).
     if cfg.trainer.dump_eval_results:
         with Timer("dump_eval_results"):
-            data_save_dir = os.path.join(
+            data_save_dir = posixpath.join(
                 cfg.trainer.export_path,
                 "dumped_evals",
                 "eval_only" if global_step is None else f"global_step_{global_step}_evals",
