@@ -246,3 +246,63 @@ except ImportError:
     def maybe_force_qwen35_text_bridge(bridge, hf_config) -> bool:  # noqa: D103
         # megatron-bridge not installed (e.g. CPU-only environment): nothing to force.
         return False
+
+
+# rope_type -> the provider field Megatron-Bridge sets from the override's "factor" (None: no scaling field).
+_ROPE_FACTOR_FIELDS = {
+    "default": None,
+    "yarn": "yarn_rotary_scaling_factor",
+    "linear": "seq_len_interpolation_factor",
+    "llama3": "rope_scaling_factor",
+}
+
+
+def apply_rope_override(bridge, rope_parameters: dict) -> None:
+    """Write a RoPE override into the HF config Megatron-Bridge translates into the provider.
+
+    This is the same write vLLM makes for ``hf_overrides.rope_parameters`` (top-level ``rope_parameters``), so
+    the trainer and the inference engine start from the same config. Call it before
+    ``bridge.to_megatron_provider()``, then confirm the result with :func:`check_rope_override`.
+    """
+    config = bridge.hf_pretrained.config
+    config.rope_parameters = dict(rope_parameters)
+    # Megatron-Bridge maps a top-level rope_theta before it reads rope_parameters, so set both.
+    if "rope_theta" in rope_parameters:
+        config.rope_theta = rope_parameters["rope_theta"]
+
+
+def _expected_rope_fields(provider, rope_parameters: dict) -> dict:
+    """The provider fields, and values, that Megatron-Bridge sets for this override."""
+    rope_type = rope_parameters.get("rope_type") or rope_parameters.get("type") or "default"
+    if rope_type not in _ROPE_FACTOR_FIELDS:
+        raise ValueError(
+            f"transformer_config_kwargs.rope_parameters.rope_type={rope_type!r} is not supported on the Megatron "
+            f"backend; supported: {', '.join(_ROPE_FACTOR_FIELDS)}."
+        )
+    expected = {"rotary_base": rope_parameters["rope_theta"]} if "rope_theta" in rope_parameters else {}
+    field = _ROPE_FACTOR_FIELDS[rope_type]
+    if field is not None:
+        if "factor" not in rope_parameters:
+            raise ValueError(
+                f"transformer_config_kwargs.rope_parameters with rope_type={rope_type!r} needs a 'factor'."
+            )
+        if rope_type == "yarn" and getattr(provider, "multi_latent_attention", False):
+            field = "rotary_scaling_factor"
+        expected[field] = rope_parameters["factor"]
+    return expected
+
+
+def check_rope_override(provider, rope_parameters: dict, bridge_name: str) -> None:
+    """Raise unless ``provider`` carries every field the RoPE override implies.
+
+    Megatron-Bridge drops RoPE settings it cannot translate for a model without an error (``linear`` outside the
+    Llama bridges, for example), which would leave the trainer on different positions than the inference engine.
+    """
+    expected = _expected_rope_fields(provider, rope_parameters)
+    actual = {field: getattr(provider, field, None) for field in expected}
+    if actual != expected:
+        raise ValueError(
+            f"transformer_config_kwargs.rope_parameters={dict(rope_parameters)} did not reach the Megatron model: "
+            f"{bridge_name} does not translate it (expected provider fields {expected}, got {actual}). Use a "
+            "rope_type this model's Megatron-Bridge bridge supports."
+        )
