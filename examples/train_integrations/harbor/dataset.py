@@ -45,7 +45,8 @@ class HarborTaskDataset:
             # If the path is a directory, find all valid task subdirectories
             if source_path.is_dir():
                 # Look for task subdirectories and validate them
-                all_dirs = [d for d in source_path.iterdir() if d.is_dir()]
+                # Sorted, so a resumed run's restored data-loader position maps to the same tasks on any filesystem.
+                all_dirs = sorted(d for d in source_path.iterdir() if d.is_dir())
                 valid_task_dirs = [d for d in all_dirs if self._is_valid_task_directory(d)]
 
                 if valid_task_dirs:
