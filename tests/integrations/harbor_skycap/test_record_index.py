@@ -32,6 +32,7 @@ from examples.train_integrations.harbor_skycap.record_index import (  # noqa: E4
     RecordLog,
     SkycapRecordIndex,
 )
+from skycap import CapturePool  # noqa: E402
 from skycap import record as skycap_record  # noqa: E402
 from skyrl.train.utils.callbacks import CallbackInput  # noqa: E402
 from tests.integrations.harbor_skycap import (
@@ -135,7 +136,7 @@ async def make_generator(skycap):
         url = (service or skycap).url
         made.append(
             HarborSkycapGenerator(
-                generator_cfg(), harbor_cfg(), [url], SimpleNamespace(weight_version=7), records=records
+                generator_cfg(), harbor_cfg(), CapturePool([url]), SimpleNamespace(weight_version=7), records=records
             )
         )
         return made[-1]
@@ -366,9 +367,8 @@ def test_a_batch_dropped_unfinished_is_not_indexed_with_the_next_step() -> None:
     trainer, run = wandb_trainer()
     records = RecordLog()
     callback = index(records)
-    callback.on_step_start(trainer, step_end(step=4), None)
     entries(records, "dropped")  # generated, then dropped: no on_step_end for it
-    callback.on_step_start(trainer, step_end(step=4), None)
+    callback.on_epoch_end(trainer, step_end(step=4), None)
     entries(records, "kept")
     callback.on_step_end(trainer, step_end(step=4), None)
     assert callback.close()
@@ -376,6 +376,23 @@ def test_a_batch_dropped_unfinished_is_not_indexed_with_the_next_step() -> None:
     ((artifact, _),) = run.logged
     assert {row["instance_id"] for row in artifact.index()} == {"kept"}
     assert callback.stats()["discarded"] == 1
+
+
+def test_a_fully_async_step_indexes_only_the_trajectories_it_consumed() -> None:
+    """Generation runs ahead of training: what a later step will consume stays for that step."""
+    trainer, run = wandb_trainer()
+    records = entries(RecordLog(), "now", "dropped", "later")
+    consumed = [SimpleNamespace(instance_id=name, repetition_id=0) for name in ("now", "dropped")]
+    callback = index(records)
+
+    step = step_end(step=4, trajectory_ids=consumed[:1], loss_masks=[[1]])
+    step.consumed_trajectory_ids = consumed
+    callback.on_step_end(trainer, step, None)
+    assert callback.close()
+
+    ((artifact, _),) = run.logged
+    assert {row["instance_id"] for row in artifact.index()} == {"now", "dropped"}
+    assert [entry.instance_id for entry in records.take("train")] == ["later"]
 
 
 def test_hanging_wandb_calls_are_capped_and_new_ones_refused(warnings) -> None:

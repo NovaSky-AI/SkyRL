@@ -9,7 +9,6 @@ import pytest
 pytest.importorskip("skycap")
 pytest.importorskip("harbor")
 
-from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa: E402
 from examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap import (  # noqa: E402
     HarborSkycapConfig,
     _exposure,
@@ -21,8 +20,9 @@ from examples.train_integrations.harbor_skycap.harbor_generator import (  # noqa
     runs_in_sandbox,
 )
 from examples.train_integrations.harbor_skycap.servers import exposure_for  # noqa: E402
-from skycap import CaptureService  # noqa: E402
+from skycap import CapturePool, CaptureService  # noqa: E402
 from skycap.exposure import Exposure  # noqa: E402
+from skyrl.train.generators.skycap_engine import SkyRLEngine  # noqa: E402
 from tests.integrations.harbor_skycap import test_harbor_skycap  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import TOP_K, FakeRenderer  # noqa: E402
 from tests.integrations.harbor_skycap.test_harbor_skycap import (  # noqa: E402
@@ -143,7 +143,9 @@ def test_installed_agents_run_in_the_sandbox_and_terminus_does_not() -> None:
 @pytest.mark.parametrize("agent", ["mini-swe-agent", "codex"])
 async def test_an_agent_in_the_sandbox_calls_skycap_on_its_exposed_url(agent, exposed, trials, monkeypatch) -> None:
     monkeypatch.delenv("MSWEA_API_KEY", raising=False)
-    gen = HarborSkycapGenerator(generator_cfg(), agent_cfg(agent), [exposed.url], SimpleNamespace(weight_version=7))
+    gen = HarborSkycapGenerator(
+        generator_cfg(), agent_cfg(agent), CapturePool([exposed.url]), SimpleNamespace(weight_version=7)
+    )
     try:
         out = await gen.generate(batch("linear", "summarize"), disable_tqdm=True)
     finally:
@@ -170,7 +172,7 @@ async def test_an_agent_in_the_sandbox_calls_skycap_on_its_exposed_url(agent, ex
 @pytest.mark.asyncio
 async def test_terminus_keeps_the_servers_own_url_when_it_is_exposed(exposed, trials) -> None:
     gen = HarborSkycapGenerator(
-        generator_cfg(), agent_cfg("terminus-2"), [exposed.url], SimpleNamespace(weight_version=7)
+        generator_cfg(), agent_cfg("terminus-2"), CapturePool([exposed.url]), SimpleNamespace(weight_version=7)
     )
     try:
         out = await gen.generate(batch("linear"), disable_tqdm=True)
@@ -192,7 +194,7 @@ async def test_without_exposure_an_agent_in_the_sandbox_gets_the_servers_url(rou
         sampling_overrides={"top_k": TOP_K}, host="127.0.0.1",
     )  # fmt: skip
     service.start()
-    gen = HarborSkycapGenerator(generator_cfg(), agent_cfg("mini-swe-agent"), [service.url])
+    gen = HarborSkycapGenerator(generator_cfg(), agent_cfg("mini-swe-agent"), CapturePool([service.url]))
     try:
         await gen.generate(batch("linear"), disable_tqdm=True)
     finally:

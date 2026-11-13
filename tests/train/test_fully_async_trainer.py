@@ -16,6 +16,7 @@ from skyrl.train.fully_async_trainer import (
     GeneratedOutputGroup,
     _AsyncDataloader,
     _AsyncStalenessManager,
+    _trajectory_ids,
 )
 from skyrl.train.utils.async_utils import BackgroundFailure
 
@@ -245,6 +246,16 @@ def _group(rewards, loss_masks, uid="u"):
         uid=uid,
         global_step_when_scheduled=0,
     )
+
+
+def test_trajectory_ids_are_none_unless_every_group_has_them():
+    def group(ids):
+        return GeneratedOutputGroup(generator_output={"trajectory_ids": ids}, uid="u", global_step_when_scheduled=0)
+
+    assert _trajectory_ids([group(["a", "b"]), group(["c"])]) == ["a", "b", "c"]
+    # SkyRLGymGenerator sets None unless step-wise; other generators leave the field out.
+    assert _trajectory_ids([group(["a"]), group(None)]) is None
+    assert _trajectory_ids([group(["a"]), _group([1.0], [[1]])]) is None
 
 
 def test_should_keep_group():
