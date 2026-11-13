@@ -87,6 +87,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     names = [entry.name for entry in args.tasks_dir.iterdir() if entry.is_dir()]
     train_names = [name for name in args.tasks.split(",") if name] or None
     train, held_out = split(names, num_eval=args.eval, num_train=args.train, seed=args.seed, train_names=train_names)
+    saved = [args.run_dir / "train_tasks.txt", args.run_dir / "eval_tasks.txt"]
+    if all(path.exists() for path in saved) and [path.read_text().split() for path in saved] != [train, held_out]:
+        raise ValueError(
+            f"{args.run_dir} already holds a different split (another seed, --eval, --train or --tasks). Resuming "
+            "it would put the saved data-loader position on other tasks and could evaluate on trained ones: use a "
+            "new run directory, or delete train_tasks.txt and eval_tasks.txt there to replace the split."
+        )
     link(args.tasks_dir, train, args.run_dir / "tasks")
     link(args.tasks_dir, held_out, args.run_dir / "eval_tasks")
     (args.run_dir / "train_tasks.txt").write_text("".join(f"{name}\n" for name in train))
