@@ -10,7 +10,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import transformers
-from flash_attn.bert_padding import pad_input, unpad_input
+
+try:
+    from flash_attn.bert_padding import pad_input, unpad_input
+except ImportError:  # e.g. the native neuron backend, where flash-attn (CUDA-only) is absent
+    pad_input = unpad_input = None
 from loguru import logger
 from packaging.version import Version
 from peft import LoraConfig, TaskType, get_peft_model
@@ -31,6 +35,7 @@ from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     ulysses_pad_and_slice_inputs,
 )
 from skyrl.backends.skyrl_train.training_batch import TensorList
+from skyrl.backends.skyrl_train.utils import device
 from skyrl.backends.skyrl_train.utils.lora_targets import (
     resolve_critic_lora_target_modules,
     resolve_lora_target_modules,
@@ -163,8 +168,8 @@ class HFModelWrapper(nn.Module):
         self.is_vlm = False
         if remove_microbatch_padding:
             assert (
-                self.attn_implementation == "flash_attention_2"
-            ), "Flash attention 2 should be used for `remove_microbatch_padding`"
+                self.attn_implementation == "flash_attention_2" and pad_input is not None and unpad_input is not None
+            ), "Flash attention 2 should be used for `remove_microbatch_padding` (flash-attn is not installed)"
 
         if isinstance(pretrain_or_model, str):
             if load_in_4bit:
@@ -200,6 +205,24 @@ class HFModelWrapper(nn.Module):
                     )
                     # NOTE: In future transformers releases (> 5.0.0), all multimodal models can use AutoModelForMultimodalLM.
                     model_class = AutoModelForImageTextToText
+                    # Qwen3.5-VL / Qwen3-VL vision towers have device-unsafe RoPE /
+                    # repeat_interleave paths that crash on TorchNeuron. Apply the
+                    # family-specific device-safety patch before the model is built
+                    # (idempotent, no-op off neuron, and gated on the model type so
+                    # unrelated VLMs are never monkeypatched).
+                    model_type = getattr(model_config, "model_type", None)
+                    if device.is_neuron() and model_type == "qwen3_5":
+                        from skyrl.backends.skyrl_train.patches.neuron.qwen3_5_vl import (
+                            apply_qwen3_5_vl_device_patch,
+                        )
+
+                        apply_qwen3_5_vl_device_patch()
+                    elif device.is_neuron() and model_type == "qwen3_vl":
+                        from skyrl.backends.skyrl_train.patches.neuron.qwen3_vl import (
+                            apply_qwen3_vl_device_patch,
+                        )
+
+                        apply_qwen3_vl_device_patch()
 
             model_config._attn_implementation = self.attn_implementation
 
@@ -543,7 +566,9 @@ def _get_critic_model(
             if remove_microbatch_padding:
                 assert (
                     config._attn_implementation == "flash_attention_2"
-                ), "Flash attention must be used with remove_microbatch_padding"
+                    and pad_input is not None
+                    and unpad_input is not None
+                ), "Flash attention must be used with remove_microbatch_padding (flash-attn is not installed)"
 
             if self.sequence_parallel_size > 1:
                 logger.info("Critic model using sequence parallelism with size: ", self.sequence_parallel_size)

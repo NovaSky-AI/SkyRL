@@ -1,0 +1,313 @@
+"""Tests for the native TorchNeuron inference engine.
+
+Model loading and device execution are not exercised here (no neuron device on CI);
+these tests pin the interface contract, the pure sampling-logprob math, and the
+vLLM-free VLM input building (image loading / extraction + vision-tensor replay).
+"""
+
+import base64
+import io
+
+import pytest
+import torch
+
+from skyrl.backends.skyrl_train.inference_servers.base import InferenceEngineInterface
+from skyrl.backends.skyrl_train.inference_servers.neuron_engine import (
+    NeuronInferenceEngine,
+)
+
+
+def test_engine_fully_implements_interface():
+    assert issubclass(NeuronInferenceEngine, InferenceEngineInterface)
+    assert not NeuronInferenceEngine.__abstractmethods__
+
+
+def test_response_logprobs_matches_processed_scores():
+    # ``scores`` are the fully-processed per-step logits (temperature / filters already
+    # applied); the response logprob is just log_softmax(scores)[sampled_token].
+    scores = (
+        torch.tensor([[0.0, 1.0, 2.0]]),
+        torch.tensor([[3.0, 0.0, 1.0]]),
+    )
+    out = _engine_stub()._response_logprobs(scores, [[2, 0]])
+    assert torch.allclose(
+        torch.tensor(out[0]),
+        torch.tensor(
+            [
+                torch.tensor([0.0, 1.0, 2.0]).log_softmax(-1)[2],
+                torch.tensor([3.0, 0.0, 1.0]).log_softmax(-1)[0],
+            ]
+        ),
+    )
+
+
+def test_response_logprobs_aligns_variable_length_responses():
+    scores = tuple(torch.tensor([[0.0, 1.0, 2.0], [0.0, 1.0, 2.0], [0.0, 1.0, 2.0]]) for _ in range(3))
+    out = _engine_stub()._response_logprobs(scores, [[2], [0, 1], [1]])
+
+    assert [len(r) for r in out] == [1, 2, 1]
+    reference = torch.tensor([0.0, 1.0, 2.0]).log_softmax(-1)
+    for b, tokens in enumerate(([2], [0, 1], [1])):
+        for t, token in enumerate(tokens):
+            assert torch.allclose(torch.tensor(out[b][t]), reference[token])
+
+
+# -- VLM path (no model / neuron device required) -----------------------------
+
+
+def _engine_stub():
+    engine = object.__new__(NeuronInferenceEngine)
+    engine._device = "cpu"
+    return engine
+
+
+def _png_data_uri(color="red", size=(4, 4)):
+    from PIL import Image
+
+    img = Image.new("RGB", size, color=color)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+
+
+def test_load_image_decodes_data_uri():
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    out = NeuronInferenceEngine._load_image(_png_data_uri())
+    assert isinstance(out, Image.Image)
+    assert out.size == (4, 4)
+
+
+def test_load_image_reads_file_path_and_file_uri(tmp_path):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    img = Image.new("RGB", (3, 5), color="blue")
+    path = tmp_path / "frame.png"
+    img.save(path)
+    for source in (str(path), f"file://{path}"):
+        out = NeuronInferenceEngine._load_image(source)
+        assert out.size == (3, 5)
+
+
+def test_load_image_passes_through_pil_image():
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    img = Image.new("RGB", (2, 2))
+    assert NeuronInferenceEngine._load_image(img) is img
+
+
+def test_extract_images_collects_in_conversation_order():
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": _png_data_uri()}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": _png_data_uri("green")},
+            ],
+        },
+        {"role": "user", "content": "text-only message"},
+    ]
+    images = NeuronInferenceEngine._extract_images(messages)
+    assert len(images) == 2
+    assert all(isinstance(im, Image.Image) for im in images)
+
+
+def test_vlm_inputs_rebuilds_vision_tensors():
+    from skyrl.backends.mm_codec import encode_mm_kwargs_item
+
+    engine = _engine_stub()
+    pv = torch.randn(4, 3, 8, 8, dtype=torch.bfloat16)
+    thw = torch.tensor([[1, 8, 8]], dtype=torch.long)
+    blob = encode_mm_kwargs_item({"pixel_values": pv, "image_grid_thw": thw})
+    mm_features = [{"kwargs_data": {"image": [blob]}}]
+
+    inputs, prompt_lens = engine._vlm_inputs([[7, 8, 9]], mm_features)
+
+    assert prompt_lens == [3]
+    assert torch.equal(inputs["input_ids"], torch.tensor([[7, 8, 9]]))
+    assert torch.equal(inputs["attention_mask"], torch.ones(1, 3, dtype=torch.long))
+    assert torch.equal(inputs["pixel_values"], pv)
+    assert torch.equal(inputs["image_grid_thw"], thw)
+
+
+def test_vlm_inputs_no_images_yields_text_only_inputs():
+    engine = _engine_stub()
+    inputs, prompt_lens = engine._vlm_inputs([[7, 8, 9]], [{"kwargs_data": None}])
+    assert prompt_lens == [3]
+    assert "pixel_values" not in inputs
+    assert "image_grid_thw" not in inputs
+
+
+# -- content normalization (parquet/pyarrow round-trip artifacts) -------------
+
+
+def test_normalize_content_passes_through_plain_string():
+    assert NeuronInferenceEngine._normalize_content("hello") == "hello"
+
+
+def test_normalize_content_none_becomes_empty_list():
+    assert NeuronInferenceEngine._normalize_content(None) == []
+
+
+def test_normalize_content_single_dict_is_wrapped():
+    part = {"type": "text", "text": "hi"}
+    assert NeuronInferenceEngine._normalize_content(part) == [{"type": "text", "text": "hi"}]
+
+
+def test_normalize_content_strips_spurious_keys_from_struct_parts():
+    # A unified pyarrow struct schema gives a text part an ``image_url: None`` key (and
+    # vice versa). The Qwen3.5-VL template treats any dict with an ``image_url`` *key*
+    # as an image, so those spurious keys must be dropped before rendering.
+    content = [
+        {"type": "text", "text": "look", "image_url": None},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}, "text": None},
+    ]
+    assert NeuronInferenceEngine._normalize_content(content) == [
+        {"type": "text", "text": "look"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+    ]
+
+
+def test_normalize_content_drops_empty_and_unknown_parts():
+    content = [
+        {"type": "text", "text": None},
+        {"type": "image_url", "image_url": None},
+        {"type": "image", "image": None},
+        {"type": "mystery", "x": 1},
+        "not-a-dict",
+    ]
+    assert NeuronInferenceEngine._normalize_content(content) == []
+
+
+def test_normalize_content_handles_numpy_ndarray_of_structs():
+    numpy = pytest.importorskip("numpy")
+    arr = numpy.array(
+        [
+            {"type": "text", "text": "a", "image_url": None},
+            {"type": "text", "text": "b", "image_url": None},
+        ],
+        dtype=object,
+    )
+    assert NeuronInferenceEngine._normalize_content(arr) == [
+        {"type": "text", "text": "a"},
+        {"type": "text", "text": "b"},
+    ]
+
+
+# -- token id list normalization (transformers 4.x vs 5.x) --------------------
+
+
+def test_as_token_id_list_passthrough_flat_list():
+    # transformers 4.x: ``apply_chat_template(tokenize=True)`` returned ``List[int]``.
+    assert NeuronInferenceEngine._as_token_id_list([7, 8, 9]) == [7, 8, 9]
+
+
+def test_as_token_id_list_unwraps_batch_encoding_flat_input_ids():
+    # transformers >= 5.0 returns a ``BatchEncoding`` (a ``UserDict``) whose
+    # ``input_ids`` is a flat list for a single conversation.
+    from collections import UserDict
+
+    enc = UserDict({"input_ids": [7, 8, 9], "attention_mask": [1, 1, 1]})
+    assert NeuronInferenceEngine._as_token_id_list(enc) == [7, 8, 9]
+
+
+def test_as_token_id_list_unwraps_batch_encoding_batched_input_ids():
+    # A batched template call returns a list of lists; the caller renders one
+    # conversation, so the batch dimension must be dropped.
+    from collections import UserDict
+
+    enc = UserDict({"input_ids": [[7, 8, 9]], "attention_mask": [[1, 1, 1]]})
+    assert NeuronInferenceEngine._as_token_id_list(enc) == [7, 8, 9]
+
+
+def test_as_token_id_list_unwraps_tensor_flat_and_batched():
+    # ``return_tensors="pt"`` yields tensors; both flat and batched shapes normalize.
+    assert NeuronInferenceEngine._as_token_id_list(torch.tensor([7, 8, 9])) == [7, 8, 9]
+    assert NeuronInferenceEngine._as_token_id_list(torch.tensor([[7, 8, 9]])) == [7, 8, 9]
+
+
+def test_teardown_releases_neuron_device_cache(monkeypatch):
+    # torch-neuronx has no ``reset()``; teardown must call ``empty_cache()`` (the
+    # device-memory analog of ``torch.cuda.empty_cache()``) and drop the model refs.
+    import asyncio
+    import sys
+    import types
+
+    calls = []
+    monkeypatch.setitem(sys.modules, "torch_neuronx", types.SimpleNamespace(empty_cache=lambda: calls.append(True)))
+
+    engine = object.__new__(NeuronInferenceEngine)
+    engine._device = "neuron"
+    engine._model = object()
+    engine._base_model = object()
+    engine._adapters = {}
+
+    asyncio.run(engine.teardown())
+
+    assert calls == [True]
+    assert not hasattr(engine, "_model")
+    assert not hasattr(engine, "_base_model")
+
+
+# -- text input padding -------------------------------------------------------
+
+
+def _text_engine(pad_token_id, eos_token_id):
+    from types import SimpleNamespace
+
+    engine = _engine_stub()
+    engine._tokenizer = SimpleNamespace(pad_token_id=pad_token_id, eos_token_id=eos_token_id)
+    return engine
+
+
+def test_text_inputs_left_pads_prompt_batch():
+    engine = _text_engine(pad_token_id=0, eos_token_id=2)
+    inputs, prompt_lens = engine._text_inputs([[7, 8, 9], [10]])
+
+    assert prompt_lens == [3, 1]
+    # Left-padded: the shorter prompt's pads precede its real tokens, so the last input
+    # position is always a real token (``generate`` samples from the logits there).
+    assert inputs["input_ids"].tolist() == [[7, 8, 9], [0, 0, 10]]
+    assert inputs["attention_mask"].tolist() == [[1, 1, 1], [0, 0, 1]]
+
+
+def test_text_inputs_uses_eos_as_pad_when_no_pad_token():
+    engine = _text_engine(pad_token_id=None, eos_token_id=2)
+    inputs, _ = engine._text_inputs([[7], [10, 11]])
+
+    assert inputs["input_ids"].tolist() == [[2, 7], [10, 11]]
+    assert inputs["attention_mask"].tolist() == [[0, 1], [1, 1]]
+
+
+# -- adapter swap under the generation lock -----------------------------------
+
+
+def test_generate_deactivates_adapter_when_base_model_requested():
+    import asyncio
+
+    engine = object.__new__(NeuronInferenceEngine)
+    engine._model_path = "policy"
+    engine._base_model = base = object()
+    engine._model = adapter = object()
+    engine._adapters = {"adapter": adapter}
+    engine._active_lora_name = "adapter"
+    engine._generate_lock = asyncio.Lock()
+    engine._generate_sync = lambda prompt_ids, kwargs, mm_features: "ok"
+
+    result = asyncio.run(engine.generate({"prompt_token_ids": [[1, 2, 3]], "sampling_params": {}}, model=None))
+
+    assert result == "ok"
+    assert engine._model is base
+    assert engine._active_lora_name is None

@@ -31,6 +31,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_wire_format,
     validate_concrete_fp8_recipe,
 )
+from skyrl.backends.skyrl_train.utils import device
 from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     AUTO_FP8,
@@ -481,6 +482,22 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     ), "use_kl_in_reward and use_kl_loss should be mutually exclusive"
     use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
 
+    # The native neuron backend runs every FSDP worker group (policy, ref, critic) as
+    # an independent Ray process that pins its NeuronCore to its local rank. On the
+    # single-node topology the neuron backend supports, those groups all claim logical
+    # cores ``0 .. world_size-1`` and collide -- a NeuronCore is not shareable across
+    # processes. Reject the multi-group topology up front (a supported neuron run is a
+    # single policy group with no reference model and no critic; the TRL-compatible
+    # CholecT50 leg sets ``use_kl_loss=false`` / ``beta=0.0``).
+    if cfg.generator.inference_engine.backend == "neuron" and (use_ref_model or cfg.trainer.critic.model.path):
+        raise ValueError(
+            "generator.inference_engine.backend='neuron' supports a single FSDP worker group "
+            "(the policy): each group pins disjoint NeuronCores by local rank, so a reference "
+            "model (use_kl_loss / use_kl_in_reward) or a critic would collide with the policy "
+            "workers on the same cores. Set use_kl_loss=false and use_kl_in_reward=false and "
+            "leave trainer.critic.model.path unset."
+        )
+
     if cfg.trainer.policy.language_model_only:
         assert (
             cfg.generator.inference_engine.language_model_only
@@ -617,8 +634,12 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             )
 
     if cfg.trainer.policy.model.lora.rank > 0:
-        # LoRA enabled: generator backend must be vllm, training backend must be fsdp or megatron
-        assert cfg.generator.inference_engine.backend == "vllm", "LoRA enabled requires vLLM backend"
+        # LoRA enabled: generator backend must be vllm (or the native neuron engine,
+        # which syncs LoRA adapters directly), training backend must be fsdp or megatron
+        assert cfg.generator.inference_engine.backend in (
+            "vllm",
+            "neuron",
+        ), "LoRA enabled requires vLLM or neuron backend"
         megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config
         if megatron_lora_cfg.experts_shared_outer_loras and megatron_lora_cfg.lora_type != "lora":
             raise ValueError(
@@ -633,6 +654,16 @@ def validate_cfg(cfg: SkyRLTrainConfig):
         assert (
             cfg.generator.inference_engine.weight_sync_backend != "delta"
         ), "Delta weight sync is not yet supported for LoRA"
+
+    # The native neuron engine runs in-process on the driver (no separate server
+    # actors to colocate), so colocation is meaningless and its placement-group math
+    # (which assumes GPU bundles) would hang or mis-place workers. Reject it up front.
+    if cfg.generator.inference_engine.backend == "neuron" and cfg.trainer.placement.colocate_all:
+        raise ValueError(
+            "generator.inference_engine.backend='neuron' does not support placement.colocate_all=true: "
+            "the native engine runs in-process on the driver and has no server actors to colocate. "
+            "Set placement.colocate_all=false."
+        )
 
     # Validate placement
     if cfg.trainer.placement.colocate_all:
@@ -1002,8 +1033,10 @@ def ray_noset_visible_devices(env_vars=os.environ):
 def get_physical_gpu_id():
     import torch
 
-    device = torch.cuda.current_device()
-    props = torch.cuda.get_device_properties(device)
+    if not device.is_cuda():
+        return "0"
+    device_id = device.current_device_id()
+    props = torch.cuda.get_device_properties(device_id)
     return str(props.uuid)
 
 
@@ -1102,6 +1135,22 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             )
             env_vars["RAY_CGRAPH_get_timeout"] = os.environ["RAY_CGRAPH_get_timeout"]
 
+    if cfg.generator.inference_engine.backend == "neuron":
+        # The NKI / hub-kernel pins must reach both the driver's in-process engine and
+        # the FSDP workers. They are read at import/forward time in every process, and
+        # Ray workers are spawned by the raylet, so a driver-only shell export never
+        # reaches them when the cluster is started externally (``ray start --head``).
+        # ``NEURON_RT_VISIBLE_CORES`` is deliberately NOT forwarded here: Ray's neuron
+        # accelerator manager reads it back as the worker's "original visible cores" and
+        # indexes worker core assignments into it, so a runtime-env copy would collapse
+        # every FSDP worker onto the driver's single-core list (IndexError). The driver
+        # pins its own core inside ``NeuronInferenceEngine`` and each worker pins
+        # ``rank`` in its ``__init__``.
+        for var_name in ("NKI_ENABLE_TRACE_CACHE", "USE_HUB_KERNELS"):
+            if value := os.environ.get(var_name):
+                logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
+                env_vars[var_name] = value
+
     # Use max of available GPU counts, defaulting to 1 if none found
     gpu_counts = []
     if hasattr(cfg.generator, "inference_engine") and hasattr(cfg.generator.inference_engine, "tensor_parallel_size"):
@@ -1116,7 +1165,11 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             ]
         )
     max_num_gpus_per_node = max(gpu_counts) if gpu_counts else 1
-    if not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
+    # NCCL P2P/SHM transport flags are a CUDA-only tuning path. Trainium's `neuron`
+    # collective backend (libnccom/libnrt) needs its intra-device transport enabled:
+    # disabling it yields "No transport found between devices" and a SIGSEGV in the
+    # worker communicator. Skip the peer-access probe for the neuron backend.
+    if not device.is_neuron() and not peer_access_supported(max_num_gpus_per_node=max_num_gpus_per_node):
         logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
@@ -1542,7 +1595,7 @@ def print_mem(tag: str, mem: dict):
 
 
 def run_p2p_access_check():
-    device_count = torch.cuda.device_count()
+    device_count = device.device_count()
     if device_count < 2:
         return False
 
@@ -1551,7 +1604,7 @@ def run_p2p_access_check():
         for j in range(device_count):
             if i != j:
                 # This checks if device i can access device j's memory
-                can_access = torch.cuda.can_device_access_peer(i, j)
+                can_access = device.can_device_access_peer(i, j)
                 if not can_access:
                     return False
 
@@ -1564,7 +1617,11 @@ def peer_access_supported(max_num_gpus_per_node: int):
     if max_num_gpus_per_node <= 1:
         return False
 
-    if not torch.cuda.is_available():
+    if device.is_neuron():
+        # Trainium has no CUDA P2P path.
+        return False
+
+    if not device.is_cuda():
         # we are on cpu head node, so we need to check P2P access on a node with 2 GPUs
         ray.init()
         pg = placement_group([{"CPU": 1, "GPU": 2}], strategy="PACK")

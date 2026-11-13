@@ -42,6 +42,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     TrainingOutputBatch,
 )
+from skyrl.backends.skyrl_train.utils import device
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     PolicyLossRegistry,
@@ -131,7 +132,15 @@ if TYPE_CHECKING:
 # Adapted from OpenRLHF: https://github.com/OpenRLHF/OpenRLHF/blob/main/openrlhf/trainer/ray/launcher.py#L17
 class DistributedTorchRayActor:
     def __init__(
-        self, world_size, rank, local_rank, master_addr, master_port, sequence_parallel_size, record_memory=False
+        self,
+        world_size,
+        rank,
+        local_rank,
+        master_addr,
+        master_port,
+        sequence_parallel_size,
+        record_memory=False,
+        num_nodes=1,
     ):
         logging.basicConfig(
             format="%(asctime)s %(levelname)-8s %(message)s",
@@ -141,6 +150,7 @@ class DistributedTorchRayActor:
         self._world_size = world_size
         self._rank = rank
         self._local_rank = local_rank
+        self._num_nodes = num_nodes
         self._master_addr = master_addr if master_addr else self._get_current_node_ip()
         self._master_port = master_port if master_port else self._get_free_port()
         os.environ["MASTER_ADDR"] = self._master_addr
@@ -150,11 +160,21 @@ class DistributedTorchRayActor:
         # NOTE: Ray will automatically set the CUDA_VISIBLE_DEVICES
         # environment variable for each actor, so always set device to 0
         # os.environ["LOCAL_RANK"] = str(self._local_rank)
-        os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0]) if ray_noset_visible_devices() else "0"
+        if device.is_neuron():
+            os.environ["LOCAL_RANK"] = "0"
+            # This FSDP worker actor is a separate Ray process and a NeuronCore is not
+            # shareable across processes, so it claims its own single core before the
+            # first neuron allocation (the runtime reads NEURON_RT_VISIBLE_CORES lazily,
+            # at first use). The core must equal the local rank: the neuron collective
+            # backend's NCCL topology aborts when the visible core is offset from it.
+            # See device.neuron_worker_core.
+            os.environ["NEURON_RT_VISIBLE_CORES"] = str(device.neuron_worker_core(self._rank, self._num_nodes))
+        else:
+            os.environ["LOCAL_RANK"] = str(ray.get_gpu_ids()[0]) if ray_noset_visible_devices() else "0"
         self.sequence_parallel_size: int = sequence_parallel_size
 
         self.record_memory = record_memory
-        if record_memory:
+        if record_memory and device.is_cuda():
             torch.cuda.memory._record_memory_history(max_entries=MEMORY_HISTORY_MAX_ENTRIES)
 
         # Redirect worker output to log file (infra logs shouldn't pollute driver stdout)
@@ -169,8 +189,17 @@ class DistributedTorchRayActor:
     def init_worker_process_group(self):
         if not torch.distributed.is_initialized():
             # Default torch dist pg init timeout is 10 minutes (600 seconds)
+            if device.is_cuda():
+                backend = "cpu:gloo,cuda:nccl"
+            elif device.is_neuron():
+                # Neuron has a native NKI collective backend for sharded DTensors, but
+                # SkyRL's scalar/metric reductions still run on CPU, so request both and
+                # let c10d dispatch on tensor device.
+                backend = "cpu:gloo,neuron:neuron"
+            else:
+                backend = "gloo"
             torch.distributed.init_process_group(
-                backend="cpu:gloo,cuda:nccl", timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
+                backend=backend, timeout=timedelta(seconds=SKYRL_WORKER_NCCL_TIMEOUT_IN_S)
             )
 
         # setup device mesh
@@ -179,8 +208,15 @@ class DistributedTorchRayActor:
         # it is only meant to interact with worker state; not hold worker state. Thus, this should live outside the strategy object.
         # This device mesh can be common across all the strategies we use
         dp_size = self._world_size // self.sequence_parallel_size
+        # ``init_device_mesh`` auto-resolves the mesh collective backend from
+        # ``dist.Backend.default_device_backend_map``, which torch-neuronx populates with
+        # ``"neuron" -> "neuron"``. Forcing gloo here is wrong: gloo is CPU-only and cannot
+        # run the sharded-DTensor all-gather/reduce-scatter that FSDP2 needs. CUDA resolves
+        # to NCCL, so neither path needs an explicit override.
         device_mesh = torch.distributed.device_mesh.init_device_mesh(
-            "cuda", mesh_shape=(dp_size, self.sequence_parallel_size), mesh_dim_names=("dp", "sp")
+            device.backend(),
+            mesh_shape=(dp_size, self.sequence_parallel_size),
+            mesh_dim_names=("dp", "sp"),
         )
         self.device_mesh = device_mesh
         self.mesh_rank = MeshRank(
@@ -207,6 +243,8 @@ class DistributedTorchRayActor:
         return self.mesh_rank
 
     def get_gpu_id(self):
+        if device.is_neuron():
+            return 0
         return ray.get_gpu_ids()[0]
 
     @staticmethod
@@ -300,6 +338,8 @@ class DistributedTorchRayActor:
             needed (and none works: with one visible device, GPU-count-based sharding sends
             every rank but 0 to the last node).
             """
+            if not device.is_cuda():
+                return None
             try:
                 props = torch.cuda.get_device_properties(0)
                 bdf = f"{props.pci_domain_id:04x}:{props.pci_bus_id:02x}:{props.pci_device_id:02x}.0"
@@ -353,9 +393,8 @@ class Worker(DistributedTorchRayActor):
         raise NotImplementedError()
 
     def empty_cache(self) -> None:
-        """Empty this worker's CUDA allocator cache."""
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        """Empty this worker's accelerator allocator cache."""
+        device.empty_cache()
 
     def _set_expandable_segments(self, enabled: bool) -> None:
         """Toggle PyTorch's CUDA ``expandable_segments`` allocator at runtime.
@@ -371,7 +410,7 @@ class Worker(DistributedTorchRayActor):
         """
         if not self.cfg.use_expandable_segments:
             return
-        if not torch.cuda.is_available():
+        if not device.is_cuda():
             return
         setting = f"expandable_segments:{enabled}"
         try:
@@ -411,7 +450,7 @@ class Worker(DistributedTorchRayActor):
             # 235B allocator scale.
             if not getattr(self, "_ipc_segment_cache_flushed", False):
                 self._ipc_segment_cache_flushed = True
-                torch.cuda.empty_cache()
+                device.empty_cache()
         try:
             yield
         finally:
@@ -476,7 +515,7 @@ class Worker(DistributedTorchRayActor):
             offload_optimizer: Whether to offload optimizer state (no-op when there is no optimizer, e.g. Ref worker).
             offload_model: Whether to offload model parameters.
         """
-        self._set_numa_affinity(torch.distributed.get_rank() % torch.cuda.device_count())
+        self._set_numa_affinity(torch.distributed.get_rank() % device.device_count())
         self.strategy.offload_to_cpu(
             self._get_module_for_offload(),
             self.optimizer,
@@ -499,12 +538,12 @@ class Worker(DistributedTorchRayActor):
         )
 
     def get_cuda_memory(self) -> Dict[str, Any]:
-        """Get CUDA memory usage on worker's CUDA device."""
-        torch.cuda.synchronize()
-        free, total = torch.cuda.mem_get_info()
+        """Get accelerator memory usage on worker's accelerator device."""
+        device.synchronize()
+        free, total = device.mem_get_info()
         return {
-            "allocated": torch.cuda.memory_allocated(),
-            "reserved": torch.cuda.memory_reserved(),
+            "allocated": device.memory_allocated(),
+            "reserved": device.memory_reserved(),
             "free": free,
             "total": total,
         }
@@ -521,6 +560,8 @@ class Worker(DistributedTorchRayActor):
             This function should be called on all the ranks in the worker group simultaneously.
         """
         if not self.record_memory:
+            return
+        if not device.is_cuda():
             return
 
         # Track snapshot count for unique filenames
@@ -635,11 +676,11 @@ class Worker(DistributedTorchRayActor):
         would all land on the wrong GPU. Capture it on the main thread, where it
         is correct, and select it inside the thread.
         """
-        device = torch.cuda.current_device() if torch.cuda.is_available() else None
+        device_id = device.current_device_id() if device.is_cuda() else None
 
         def run():
-            if device is not None:
-                torch.cuda.set_device(device)
+            if device_id is not None:
+                device.set_device(device_id)
             return fn(*args, **kwargs)
 
         return asyncio.to_thread(run)
@@ -660,6 +701,10 @@ class Worker(DistributedTorchRayActor):
 
         Returned rather than awaited so the caller can overlap it with the send.
         """
+        if inference_engine_client is None:
+            # Native neuron backend: the engine lives on the driver, so the worker
+            # has no client and there is no prefix cache to reset.
+            return None
         if not self._should_reset_prefix_cache(inference_engine_cfg):
             return None
         if torch.distributed.get_rank() != 0:
@@ -693,7 +738,7 @@ class Worker(DistributedTorchRayActor):
         if not engine.skyrl_handles_prefix_cache_reset:
             cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
 
-        torch.cuda.empty_cache()
+        device.empty_cache()
 
         # Under colocate_all the CUDA-IPC path calls cudaIpcGetMemHandle, which
         # is incompatible with the VMM addresses expandable segments use; some
@@ -709,7 +754,7 @@ class Worker(DistributedTorchRayActor):
         # 0.25-0.53s per rank at 235B and buys nothing. Under colocation an
         # inference engine wants the physical memory, so empty regardless.
         if engine.skyrl_empty_cache_after_send or self.cfg.placement.colocate_all:
-            torch.cuda.empty_cache()
+            device.empty_cache()
         torch.distributed.barrier()
 
     def forward(self, *args, **kwargs) -> WorkerOutput:
@@ -884,7 +929,8 @@ class PPORayActorGroup:
 
         # If no PG provided, create one internally
         if raw_pg is None and self._num_gpus_per_node > 1:
-            bundles = [{"GPU": self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
+            accel = device.accelerator_resource_name()
+            bundles = [{accel: self._num_gpus_per_node, "CPU": self._num_gpus_per_node} for _ in range(self._num_nodes)]
             if self._resources:
                 resources_name = list(self._resources.keys())[0]
                 for i in range(len(bundles)):
@@ -910,11 +956,7 @@ class PPORayActorGroup:
             return None
 
         sched = _scheduling_strategy_for_rank(0)
-        actor_options = {
-            "num_cpus": num_gpus_per_actor,
-            "num_gpus": num_gpus_per_actor,
-            "resources": self._resources,
-        }
+        actor_options = device.ray_actor_options(num_gpus_per_actor, self._resources)
         if sched is not None:
             actor_options["scheduling_strategy"] = sched
 
@@ -927,6 +969,7 @@ class PPORayActorGroup:
             master_port=None,
             sequence_parallel_size=self.sequence_parallel_size,
             record_memory=self.record_memory,
+            num_nodes=self._num_nodes,
         )
         self._actor_handlers = [master_actor]
 
@@ -936,11 +979,7 @@ class PPORayActorGroup:
                 local_rank = rank % self._num_gpus_per_node
 
                 sched = _scheduling_strategy_for_rank(rank)
-                actor_options = {
-                    "num_cpus": num_gpus_per_actor,
-                    "num_gpus": num_gpus_per_actor,
-                    "resources": self._resources,
-                }
+                actor_options = device.ray_actor_options(num_gpus_per_actor, self._resources)
                 if sched is not None:
                     actor_options["scheduling_strategy"] = sched
 
@@ -953,6 +992,7 @@ class PPORayActorGroup:
                     master_port=master_port,
                     sequence_parallel_size=self.sequence_parallel_size,
                     record_memory=self.record_memory,
+                    num_nodes=self._num_nodes,
                 )
                 self._actor_handlers.append(worker_actor)
 
@@ -1168,7 +1208,7 @@ class PolicyWorkerBase(Worker):
         """
         self.model.train()
 
-        experience.to_device(torch.cuda.current_device())
+        experience.to_device(device.current_device())
 
         sequences = experience.sequences
         old_action_log_probs = experience.action_log_probs
@@ -1485,7 +1525,7 @@ class PolicyWorkerBase(Worker):
                 ``loss_fn_outputs`` when callers read only ``metrics``.
         """
         self.model.eval()
-        experience.to_device(torch.cuda.current_device())
+        experience.to_device(device.current_device())
 
         sequences = experience.sequences
         old_action_log_probs = experience.action_log_probs
@@ -1574,8 +1614,8 @@ class PolicyWorkerBase(Worker):
         }
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
-        micro_batch.to(device)
+        dev = device.current_device()
+        micro_batch.to(dev)
         self.model.eval()
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
@@ -1736,7 +1776,7 @@ class CriticWorkerBase(Worker):
         """
         self.model.train()
 
-        experience.to_device(torch.cuda.current_device())
+        experience.to_device(device.current_device())
 
         sequences = experience.sequences
         old_values = experience.values
@@ -1808,8 +1848,8 @@ class CriticWorkerBase(Worker):
         micro_batch: TrainingInputBatch,
     ) -> TrainingOutputBatch:
         """Generates critic values."""
-        device = torch.cuda.current_device()
-        micro_batch.to(device)
+        dev = device.current_device()
+        micro_batch.to(dev)
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
@@ -1882,8 +1922,8 @@ class RefWorkerBase(Worker):
         return WorkerOutput(loss_fn_outputs=loss_fn_outputs, metrics={})
 
     def _forward_micro_batch(self, micro_batch: TrainingInputBatch) -> TrainingOutputBatch:
-        device = torch.cuda.current_device()
-        micro_batch.to(device)
+        dev = device.current_device()
+        micro_batch.to(dev)
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
