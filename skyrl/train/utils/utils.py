@@ -320,8 +320,8 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         if rope_keys:
             raise ValueError(
                 f"trainer.{worker_type}.megatron_config.model_config_kwargs.model_config sets {rope_keys}, which the "
-                "Megatron backend does not apply: Megatron-Bridge builds the model from the checkpoint's own config. "
-                "Remove the override."
+                "Megatron backend does not apply. Set RoPE overrides in "
+                f"trainer.{worker_type}.megatron_config.transformer_config_kwargs.rope_parameters instead."
             )
 
 

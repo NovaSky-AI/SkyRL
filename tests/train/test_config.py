@@ -563,7 +563,7 @@ def test_megatron_validation_rejects_rope_overrides_in_model_config(worker, key,
     cfg.trainer.strategy = "megatron"
     getattr(cfg.trainer, worker).megatron_config.model_config_kwargs = {"model_config": {key: value}}
 
-    with pytest.raises(ValueError, match=f"trainer.{worker}.megatron_config.model_config_kwargs.model_config"):
+    with pytest.raises(ValueError, match=f"trainer.{worker}.megatron_config.transformer_config_kwargs.rope_parameters"):
         train_utils.validate_megatron_cfg(cfg)
 
 
