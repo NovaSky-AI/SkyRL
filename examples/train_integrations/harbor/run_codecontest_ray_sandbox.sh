@@ -1,7 +1,7 @@
 set -ex
 
 # CodeContests training with Harbor trials in Ray sandboxes instead of Daytona.
-# No DAYTONA_API_KEY needed. Nodes need runsc; build them from Dockerfile.ray-sandbox.
+# No DAYTONA_API_KEY needed. Nodes need runsc; build them from docker/Dockerfile.ray-sandbox.
 #
 # Sandbox nodes advertise a custom resource so sandboxes stay off GPU nodes:
 #   ray start --address=<head> --resources='{"sandbox": 1000}'
@@ -14,7 +14,7 @@ set -ex
 IMAGE=${IMAGE:-python:3.12-slim}
 
 bash "$(dirname "$0")/run_codecontest.sh" \
-  harbor_trial_config.environment.import_path=examples.train_integrations.harbor.ray_sandbox_env:RaySandboxEnvironment \
+  harbor_trial_config.environment.import_path=skyrl.integration.ray_sandbox.harbor_env:RaySandboxEnvironment \
   harbor_trial_config.environment.kwargs.image=$IMAGE \
   harbor_trial_config.environment.kwargs.resources.sandbox=0.001 \
   "$@"

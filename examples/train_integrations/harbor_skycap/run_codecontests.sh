@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Harbor training on CodeContests, sandboxed on Daytona or Modal, through skycap or through
+# Harbor training on CodeContests, sandboxed on Daytona, Modal or Ray, through skycap or through
 # the sibling `harbor` integration (the baseline), to compare the two.
 #
 #   bash examples/train_integrations/harbor_skycap/run_codecontests.sh [extra overrides...]
@@ -23,7 +23,12 @@
 #                              alone and greedy decoding can't flip on batch-dependent numerics
 #   LOGGER=console|wandb       W&B (project harbor-compare, run named after the experiment) by
 #                              default when a key is found, else the console
-#   SANDBOX=daytona|modal      where Harbor runs each trial's sandbox (default daytona)
+#   SANDBOX=daytona|modal|ray  where Harbor runs each trial's sandbox (default daytona). ray runs
+#                              each one as a gVisor sandbox on this run's own Ray cluster
+#                              (skyrl.integration.ray_sandbox), so the node needs the tools in
+#                              docker/Dockerfile.ray-sandbox; RAY_SANDBOX_IMAGE is the prebuilt image
+#                              every task runs in (default python:3.12-slim), and
+#                              RAY_SANDBOX_CPUS the CPUs each sandbox reserves (default 0.25)
 #   STRATEGY=fsdp|megatron     the training backend (default fsdp); megatron takes MEGATRON_TP,
 #                              MEGATRON_PP, MEGATRON_EP (default 1; e.g. 8 for an MoE such as
 #                              Qwen3-30B-A3B on 8 GPUs) and MEGATRON_ETP, and OPTIMIZER_OFFLOAD=1
@@ -33,7 +38,8 @@
 #                              routed experts and Megatron replays them (needs STRATEGY=megatron)
 #
 # Needs: the GPUs, and the sandbox's credentials in a file: `DAYTONA_API_KEY=...`
-# (DAYTONA_KEY_FILE) or `MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...` (MODAL_KEY_FILE). For W&B,
+# (DAYTONA_KEY_FILE) or `MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...` (MODAL_KEY_FILE); ray needs
+# none. For W&B,
 # WANDB_API_KEY, or a file holding `WANDB_API_KEY=...` (WANDB_KEY_FILE).
 set -euo pipefail
 
@@ -46,6 +52,9 @@ cd "$REPO"
 SANDBOX="${SANDBOX:-daytona}"
 DAYTONA_KEY_FILE="${DAYTONA_KEY_FILE:-$HOME/default/daytona.key}"
 MODAL_KEY_FILE="${MODAL_KEY_FILE:-$HOME/default/model_key.key}"
+# terminus-2 runs tmux in the sandbox and apt-installs it if the image lacks it, which needs network.
+RAY_SANDBOX_IMAGE="${RAY_SANDBOX_IMAGE:-python:3.12-slim}"
+RAY_SANDBOX_CPUS="${RAY_SANDBOX_CPUS:-0.25}"
 WANDB_KEY_FILE="${WANDB_KEY_FILE:-$HOME/default/wandb_key.key}"
 GENERATOR="${GENERATOR:-skycap}"
 MODEL="${MODEL:-Qwen/Qwen3-8B}"
@@ -79,7 +88,7 @@ OPTIMIZER_OFFLOAD="${OPTIMIZER_OFFLOAD:-1}"
 DATA_ROOT="/tmp/harbor/data"
 TASKS_DIR="$DATA_ROOT/$(basename "$DATASET")"
 
-EXPERIMENT="harbor-$GENERATOR-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
+EXPERIMENT="harbor-$GENERATOR-$SANDBOX-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 RUN_DIR="/tmp/harbor/runs/$EXPERIMENT"
 SUBSET_DIR="$RUN_DIR/tasks"
 
@@ -155,25 +164,41 @@ fi
 case "$SANDBOX" in
   daytona) KEY_FILE="$DAYTONA_KEY_FILE" ;;
   modal) KEY_FILE="$MODAL_KEY_FILE" ;;
+  ray) KEY_FILE="" ;;
   *)
-    echo "SANDBOX must be daytona or modal, got $SANDBOX" >&2
+    echo "SANDBOX must be daytona, modal or ray, got $SANDBOX" >&2
     exit 1
     ;;
 esac
-if [[ ! -f "$KEY_FILE" ]]; then
-  echo "no $SANDBOX credentials at $KEY_FILE" >&2
-  exit 1
+if [[ -n "$KEY_FILE" ]]; then
+  if [[ ! -f "$KEY_FILE" ]]; then
+    echo "no $SANDBOX credentials at $KEY_FILE" >&2
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "$KEY_FILE"
+  set +a
 fi
-set -a
-# shellcheck disable=SC1090
-source "$KEY_FILE"
-set +a
-if [[ "$SANDBOX" == daytona ]]; then
-  : "${DAYTONA_API_KEY:?$KEY_FILE must set DAYTONA_API_KEY}"
-else
-  : "${MODAL_TOKEN_ID:?$KEY_FILE must set MODAL_TOKEN_ID}"
-  : "${MODAL_TOKEN_SECRET:?$KEY_FILE must set MODAL_TOKEN_SECRET}"
-fi
+case "$SANDBOX" in
+  daytona)
+    : "${DAYTONA_API_KEY:?$KEY_FILE must set DAYTONA_API_KEY}"
+    SANDBOX_ARGS=(harbor_trial_config.environment.type=daytona)
+    ;;
+  modal)
+    : "${MODAL_TOKEN_ID:?$KEY_FILE must set MODAL_TOKEN_ID}"
+    : "${MODAL_TOKEN_SECRET:?$KEY_FILE must set MODAL_TOKEN_SECRET}"
+    SANDBOX_ARGS=(harbor_trial_config.environment.type=modal)
+    ;;
+  ray)
+    # Harbor builds the environment from import_path, ahead of type.
+    SANDBOX_ARGS=(
+      harbor_trial_config.environment.import_path=skyrl.integration.ray_sandbox.harbor_env:RaySandboxEnvironment
+      harbor_trial_config.environment.kwargs.image="$RAY_SANDBOX_IMAGE"
+      harbor_trial_config.environment.kwargs.reserve_cpus="$RAY_SANDBOX_CPUS"
+    )
+    ;;
+esac
 
 # SkyRL reads the W&B key from the environment only.
 if [[ -z "${WANDB_API_KEY:-}" && -f "$WANDB_KEY_FILE" ]]; then
@@ -254,7 +279,7 @@ uv run --isolated --extra "$STRATEGY" "${EXTRAS[@]}" -m "$ENTRYPOINT" \
   trainer.hf_save_interval=-1 \
   trainer.resume_mode=none \
   harbor_trial_config.trials_dir="$RUN_DIR/trials" \
-  harbor_trial_config.environment.type="$SANDBOX" \
+  "${SANDBOX_ARGS[@]}" \
   harbor_trial_config.agent.kwargs.temperature="$TEMPERATURE" \
   harbor_trial_config.agent.kwargs.model_info.max_input_tokens="$MAX_MODEL_LEN" \
   harbor_trial_config.agent.kwargs.model_info.max_output_tokens="$MAX_MODEL_LEN" \

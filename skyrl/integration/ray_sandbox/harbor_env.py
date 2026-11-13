@@ -1,16 +1,16 @@
 """Harbor environment backed by Ray sandboxes (``ray.experimental.sandbox``).
 
-Each Harbor trial gets one ``HarborSandbox`` actor (ray_sandbox_actor.py), which
+Each Harbor trial gets one ``HarborSandbox`` actor (actor.py), which
 runs the task image in a gVisor container on whichever Ray node has room. Select it from the Harbor
 trial config::
 
     environment:
-      import_path: examples.train_integrations.harbor.ray_sandbox_env:RaySandboxEnvironment
+      import_path: skyrl.integration.ray_sandbox.harbor_env:RaySandboxEnvironment
 
 Requirements:
   * Ray nightly at the commit pinned in pyproject.toml, on every node.
   * Nodes that host sandboxes need ``runsc``, ``mkfs.erofs`` >= 1.7, and
-    ``slirp4netns`` (network="public" only). Dockerfile.ray-sandbox has all three.
+    ``slirp4netns`` (network="public" only). docker/Dockerfile.ray-sandbox has all three.
     For network="public" they also need /dev/net/tun; the actor creates it with
     passwordless sudo if it's missing.
   * Tasks must name a prebuilt, publicly pullable image (``[environment].docker_image``
@@ -31,13 +31,9 @@ from harbor.environments.capabilities import (
     EnvironmentResourceCapabilities,
 )
 from harbor.environments.definition import effective_exec_cwd, parse_dockerfile_workdir
-from harbor.models.task.config import NetworkMode
 from ray.experimental.sandbox import DOCKER_DEFAULT_CAPABILITIES, SandboxTimeoutError
 
-from examples.train_integrations.harbor.ray_sandbox_actor import (
-    SANDBOX_RUNTIME_ENV,
-    HarborSandbox,
-)
+from skyrl.integration.ray_sandbox.actor import SANDBOX_RUNTIME_ENV, HarborSandbox
 
 # Same exit code GNU ``timeout`` uses, which is what Harbor agents expect.
 _TIMEOUT_EXIT_CODE = 124
@@ -55,6 +51,7 @@ class RaySandboxEnvironment(BaseEnvironment):
         max_concurrency: int = 8,
         enforce_limits: bool | None = None,
         cidr_allowlist: list[str] | None = None,
+        reserve_cpus: float | None = None,
         **kwargs: Any,
     ):
         """
@@ -84,6 +81,10 @@ class RaySandboxEnvironment(BaseEnvironment):
                 reach a host inside the cluster, such as a model server an
                 agent in the sandbox calls, list it with the internet, e.g.
                 ``["internet", "10.0.12.34/32"]``.
+            reserve_cpus: CPUs the sandbox actor reserves in Ray, if not the
+                task's cpus. An agent's sandbox idles while the model
+                generates, so a fraction such as 0.25 packs more trials onto a
+                node. The task's cpus stay the cgroup limit.
         """
         # Drop provider kwargs from other backends' configs (e.g. Daytona's
         # auto_stop_interval_mins) so the same YAML can be reused.
@@ -99,6 +100,7 @@ class RaySandboxEnvironment(BaseEnvironment):
         self._max_concurrency = max_concurrency
         self._enforce_limits = enforce_limits
         self._cidr_allowlist = cidr_allowlist
+        self._reserve_cpus = reserve_cpus
         self._dockerfile_workdir = parse_dockerfile_workdir(self.environment_dir / "Dockerfile")
         self._sb = None
 
@@ -137,7 +139,7 @@ class RaySandboxEnvironment(BaseEnvironment):
         memory_mb = self._effective_memory_mb
         storage_mb = self._effective_storage_mb
         actor_options = {
-            "num_cpus": cpus,
+            "num_cpus": cpus if self._reserve_cpus is None else self._reserve_cpus,
             "runtime_env": SANDBOX_RUNTIME_ENV,
             "max_concurrency": self._max_concurrency,
         }

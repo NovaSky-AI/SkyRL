@@ -3,7 +3,7 @@
 Starts one sandbox the way a Harbor trial would, then runs a command, a timeout,
 two commands at once, and a file round trip.
 
-    uv run --isolated --extra fsdp -m examples.train_integrations.harbor.smoke_ray_sandbox_env
+    uv run --isolated --extra ray --extra harbor -m skyrl.integration.ray_sandbox.smoke
 """
 
 import asyncio
@@ -15,7 +15,7 @@ import ray
 from harbor.models.task.config import EnvironmentConfig
 from harbor.models.trial.paths import TrialPaths
 
-from examples.train_integrations.harbor.ray_sandbox_env import RaySandboxEnvironment
+from skyrl.integration.ray_sandbox.harbor_env import RaySandboxEnvironment
 
 
 async def main():

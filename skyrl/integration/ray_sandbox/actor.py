@@ -1,4 +1,4 @@
-"""Ray actor that owns one gVisor sandbox, for RaySandboxEnvironment.
+"""Ray actor that owns one gVisor sandbox, for harbor_env.RaySandboxEnvironment.
 
 Wraps ``SandboxRuntime`` instead of using ``ray.experimental.sandbox.Sandbox`` so it
 can prepare the node before creating the sandbox (``/dev/net/tun``) and pass
@@ -42,8 +42,7 @@ def _ensure_tun() -> None:
             "-n",
             "sh",
             "-c",
-            f"mkdir -p /dev/net && (test -e {_TUN_PATH} || mknod {_TUN_PATH} c 10 200)"
-            f" && chmod 666 {_TUN_PATH}",
+            f"mkdir -p /dev/net && (test -e {_TUN_PATH} || mknod {_TUN_PATH} c 10 200) && chmod 666 {_TUN_PATH}",
         ],
         capture_output=True,
         text=True,
@@ -66,9 +65,7 @@ class HarborSandbox:
     ):
         if network == "public":
             _ensure_tun()
-        if enforce_limits is False or (
-            enforce_limits is None and not os.environ.get("RAY_SANDBOX_CGROUP_PATH")
-        ):
+        if enforce_limits is False or (enforce_limits is None and not os.environ.get("RAY_SANDBOX_CGROUP_PATH")):
             # Ray enforces cpu and memory through a cgroup v2 subtree that the node
             # delegates to it (RAY_SANDBOX_CGROUP_PATH), and refuses them on a node
             # without one. The actor's reservation still applies either way.
@@ -89,9 +86,7 @@ class HarborSandbox:
         shell: Optional[str] = None,
         user: Optional[str] = None,
     ) -> ExecResult:
-        return self._runtime.exec(
-            self._id, command, timeout=timeout, cwd=cwd, env=env, shell=shell, user=user
-        )
+        return self._runtime.exec(self._id, command, timeout=timeout, cwd=cwd, env=env, shell=shell, user=user)
 
     def write_file(self, path: str, content: Union[str, bytes]) -> None:
         self._runtime.write_file(self._id, path, content)
