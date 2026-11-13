@@ -51,7 +51,10 @@ from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-from skyrl.backends.skyrl_train.workers.worker_utils import reduce_metrics
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    reduce_metrics,
+    select_forward_inputs,
+)
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
@@ -1376,19 +1379,7 @@ class RayPPOTrainer:
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size response_len"]
             - `["values"]`: Float[torch.Tensor, "batch_size response_len"]
         """
-        fwd_keys = ["sequences", "attention_mask"]
-        if training_input.get("rollout_expert_indices") is not None:
-            fwd_keys.append("rollout_expert_indices")
-        if training_input.get("router_padding_mask") is not None:
-            fwd_keys.append("router_padding_mask")
-        if training_input.get(SAMPLE_SUPPORT_FIELD) is not None:
-            # The scorer validates that captured support backs every loss-active target.
-            fwd_keys.extend([SAMPLE_SUPPORT_FIELD, "loss_mask"])
-        if training_input.get("pixel_values") is not None:
-            fwd_keys.append("pixel_values")
-        if training_input.get("image_grid_thw") is not None:
-            fwd_keys.append("image_grid_thw")
-        data_fwd_pass = training_input.select(keys=fwd_keys, metadata_keys=["response_length"])
+        data_fwd_pass = select_forward_inputs(training_input)
 
         values = None
         base_log_probs = None

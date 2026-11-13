@@ -1,13 +1,31 @@
-"""What a stored rollout carries in the object store, as opposed to the metadata the trainer reads."""
+"""Stored rollouts on their way to the trainer: what a payload carries, and one DP rank's shard of a mini-batch.
 
+The driver never loads a payload. It plans a mini-batch from per-row metadata and sends each policy
+DP rank a ``RolloutShard``: refs to that rank's stored trajectories, each row's length, and each row's
+advantage with the loss reduction already applied. The rank's workers plan their microbatches from
+the lengths alone and collate each one from its payloads only when they train it (``ShardRows``), so
+a node holds the payloads of the microbatches in flight, never a collated copy of the shard.
+"""
+
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+import ray
+import torch
+from ray import ObjectRef
 
+from skyrl.backends.skyrl_train.training_batch import (
+    REAL_SAMPLE_MASK,
+    TrainingInputBatch,
+    padding_rows,
+)
 from skyrl.backends.skyrl_train.utils.bit_packing import pack_ids, unpack_ids
 from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
+from skyrl.env_vars import SKYRL_PAYLOAD_FETCH_TIMEOUT_S
+from skyrl.train.dataset.preprocess import RowCollation, rows_to_training_input
 
 
 class RolloutPayloadKey(StrEnum):
@@ -106,3 +124,126 @@ def encode_payload(payload: Dict[str, list], *, support_id_bits: Optional[int] =
 def unpack_support(rows: List[Any]) -> List[Any]:
     """Stored sample-support rows as ``CompactSampleSupport``, the form collation reads."""
     return [row.unpack() if isinstance(row, StoredSampleSupport) else row for row in rows]
+
+
+@dataclass(frozen=True)
+class RolloutShard:
+    """One policy DP rank's rows of a mini-batch.
+
+    ``payload_refs`` are stored trajectories (each a dict of ``RolloutPayloadKey`` -> per-row list).
+    Rows are numbered across them, in order. ``row_advantages`` holds each row's advantage, already
+    scaled by the loss reduction, so a row's token advantages are this value over its response tokens.
+    """
+
+    payload_refs: Tuple[ObjectRef, ...]
+    # Rows of each payload; a step-wise trajectory's rows are adjacent, in step order.
+    payload_rows: Tuple[int, ...]
+    # Each row's prompt and response tokens, as the payload holds them.
+    prompt_lengths: Tuple[int, ...]
+    response_lengths: Tuple[int, ...]
+    row_advantages: Tuple[float, ...]
+    collation: RowCollation
+    # The rank has nothing to train this step: its rows are another rank's, marked as padding (as
+    # ``pad_training_input_batch`` marks them), so it still runs the step's collectives.
+    padding: bool = False
+
+
+def build_training_batch(shard: RolloutShard) -> TrainingInputBatch:
+    """Load all of ``shard``'s payloads and collate them at once: the batch its microbatches are rows of."""
+    rows = ShardRows(shard)
+    return rows.collate(range(rows.num_rows))
+
+
+def _support_unpacked(rows: Dict[str, list]) -> Dict[str, list]:
+    """Stored rows as collation reads them: only these rows' sample-support ids are unpacked."""
+    key = RolloutPayloadKey.ROLLOUT_SAMPLE_SUPPORT
+    return {**rows, key: unpack_support(rows[key])} if key in rows else rows
+
+
+def _with_advantages(batch: TrainingInputBatch, advantages: torch.Tensor, padding: bool) -> TrainingInputBatch:
+    """``batch`` with each row's advantage over its response tokens, or marked as padding."""
+    response_mask = batch["response_mask"]
+    batch["advantages"] = advantages[:, None] * response_mask.float()
+    batch.metadata["response_length"] = response_mask.shape[1]
+    if padding:
+        # Rows that train nothing, as ``pad_training_input_batch`` pads.
+        batch["advantages"] = torch.zeros_like(batch["advantages"])
+        batch["loss_mask"] = padding_rows("loss_mask", batch["loss_mask"], batch.batch_size)
+        if batch.get("router_padding_mask") is not None:
+            batch["router_padding_mask"] = padding_rows(
+                "router_padding_mask", batch["router_padding_mask"], batch.batch_size
+            )
+        batch[REAL_SAMPLE_MASK] = padding_rows(REAL_SAMPLE_MASK, batch.real_sample_mask, batch.batch_size)
+    return batch
+
+
+class ShardRows:
+    """A ``RolloutShard``'s rows on a worker that trains them, collated a microbatch at a time.
+
+    ``collate`` loads only the payloads holding the requested rows (zero-copy views of the node's
+    copy, which every worker there shares) and pads to the whole shard's widths, so a microbatch is
+    exactly those rows of ``build_training_batch(shard)``.
+    """
+
+    def __init__(self, shard: RolloutShard) -> None:
+        self.shard = shard
+        # Each row's (payload, row of that payload).
+        self._locations = [(payload, row) for payload, rows in enumerate(shard.payload_rows) for row in range(rows)]
+        self.token_counts = [p + r for p, r in zip(shard.prompt_lengths, shard.response_lengths)]
+        self.padded_shape = (max(self.token_counts), max(shard.response_lengths))
+        # Each row's pre-update logprobs, ``[rows, response_length]``, once a forward pass has them.
+        self.old_logprobs: Optional[torch.Tensor] = None
+
+    @property
+    def num_rows(self) -> int:
+        return len(self._locations)
+
+    def payload_refs(self, rows: Sequence[int]) -> List[ObjectRef]:
+        """The payloads holding ``rows``, each once."""
+        payloads = dict.fromkeys(self._locations[row][0] for row in rows)
+        return [self.shard.payload_refs[payload] for payload in payloads]
+
+    def collate(self, rows: Sequence[int]) -> TrainingInputBatch:
+        """``rows`` of the shard, in this order, as one padded batch with their advantages."""
+        indices = list(dict.fromkeys(self._locations[row][0] for row in rows))
+        payloads = dict(zip(indices, fetch_payloads([self.shard.payload_refs[i] for i in indices])))
+        keys = payloads[indices[0]].keys()
+        gathered = {key: [payloads[p][key][r] for p, r in (self._locations[row] for row in rows)] for key in keys}
+        del payloads
+        gathered = _support_unpacked(gathered)
+        batch = rows_to_training_input(gathered, self.shard.collation, padded_shape=self.padded_shape)
+        index = torch.tensor(list(rows), dtype=torch.long)
+        batch = _with_advantages(
+            batch, torch.tensor(self.shard.row_advantages, dtype=torch.float32)[index], self.shard.padding
+        )
+        if self.old_logprobs is not None:
+            batch["action_log_probs"] = self.old_logprobs[index]
+        return batch
+
+
+def fetch_payloads(refs: List[ObjectRef]) -> list:
+    """``ray.get`` stored payloads, failing loudly rather than stalling the step's collectives."""
+    try:
+        return ray.get(refs, timeout=SKYRL_PAYLOAD_FETCH_TIMEOUT_S)
+    except ray.exceptions.GetTimeoutError:
+        raise TimeoutError(
+            f"{len(refs)} stored rollouts did not arrive within SKYRL_PAYLOAD_FETCH_TIMEOUT_S="
+            f"{SKYRL_PAYLOAD_FETCH_TIMEOUT_S}s"
+        ) from None
+
+
+# Background pulls of the payloads of upcoming microbatches; see ``pull_payloads``.
+_PULLS: Optional[ThreadPoolExecutor] = None
+PULL_AHEAD_MICROBATCHES = 2
+
+
+def pull_payloads(refs: List[ObjectRef]) -> None:
+    """Start copying ``refs`` to this node without waiting for them.
+
+    The copies are the node's secondary copies: nothing here holds them, so Ray can evict them under
+    pressure (and ``fetch_payloads`` pulls again), and a failed pull surfaces there.
+    """
+    global _PULLS
+    if _PULLS is None:
+        _PULLS = ThreadPoolExecutor(max_workers=PULL_AHEAD_MICROBATCHES, thread_name_prefix="skyrl-payload-pull")
+    _PULLS.submit(ray.wait, refs, num_returns=len(refs), timeout=SKYRL_PAYLOAD_FETCH_TIMEOUT_S, fetch_local=True)

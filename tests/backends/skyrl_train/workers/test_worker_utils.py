@@ -7,11 +7,16 @@ uv run --isolated --extra dev pytest tests/backends/skyrl_train/workers/test_wor
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     all_reduce_metrics,
     reduce_metrics,
+    select_forward_inputs,
 )
+from tests.backends.skyrl_train.sample_support_helpers import ragged_support
 
 
 class TestReduceMetrics:
@@ -208,3 +213,22 @@ class TestAllReduceMetrics:
         assert result["is_ratio_min"] == 0.05  # 0.1 / 2 (min op)
         assert result["policy_loss"] == 6.0  # sum op
         assert result["entropy"] == 1.0  # 0.5 * 2 (mean op)
+
+
+@pytest.mark.parametrize("sample_support", [False, True])
+def test_forward_inputs_keep_the_loss_mask_only_for_support_scoring(sample_support):
+    batch = TrainingInputBatch(
+        {
+            "sequences": torch.tensor([[1, 2, 3]]),
+            "attention_mask": torch.ones((1, 3)),
+            "loss_mask": torch.tensor([[1, 0]]),
+        }
+    )
+    batch.metadata = {"response_length": 2}
+    if sample_support:
+        batch[SAMPLE_SUPPORT_FIELD] = ragged_support([[[2, 4], [3, 5]]])
+    selected = select_forward_inputs(batch)
+    assert ("loss_mask" in selected) == sample_support
+    if "loss_mask" in selected:
+        assert selected["loss_mask"] is batch["loss_mask"]
+    assert selected.metadata == batch.metadata
