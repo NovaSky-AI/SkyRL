@@ -6,10 +6,16 @@ group's trials end, the actor composes the group's rows and returns each traject
 Ray object owned by the caller, so the token payload never crosses HTTP or the caller's process.
 ``start_server_pool`` runs one such actor per placement-group bundle.
 
+Each server actor also watches its server's event loop: a tick that runs late means something held
+the loop, delaying every request on it, so the actor counts those stalls in the Ray metric
+``skyrl_skycap_loop_stall_seconds``, which ``RayGpuMonitor`` reports per step.
+
 Needs the ``skycap`` extra.
 """
 
+import asyncio
 import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, replace
 from typing import (
@@ -33,8 +39,25 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from skycap import CapturePool, CaptureService, Sample
 from skycap.client import RecordLocation, Trajectory
 from skyrl.train.generators.base import GeneratorOutput, StoredRolloutGroup
+from skyrl.utils import stage_trace
 
 ChecksT = TypeVar("ChecksT")
+
+# Event-loop stall watch: a tick every ``_LOOP_TICK_S`` that runs over ``_LOOP_STALL_S`` late is a stall.
+_LOOP_TICK_S = 0.05
+_LOOP_STALL_S = 0.1
+
+
+async def _watch_loop_stalls(counter: Any) -> None:
+    """Count, and trace as ``skycap.loop_stall``, every stretch the running loop was held."""
+    while True:
+        t0 = time.perf_counter()
+        await asyncio.sleep(_LOOP_TICK_S)
+        end = time.perf_counter()
+        late = end - t0 - _LOOP_TICK_S
+        if late > _LOOP_STALL_S:
+            counter.inc(late)
+            stage_trace.record("skycap.loop_stall", end - late, end)
 
 
 @dataclass(frozen=True)
@@ -191,8 +214,10 @@ class StoredCaptureServer(ABC):
     """
 
     def __init__(self, service: CaptureService) -> None:
+        stage_trace.configure(component="skycap")
         self.service = service
         self.samples = SampleCache()
+        self._stall_watch = None
 
     @abstractmethod
     def checks(self, samples: List[Sample]) -> Any:
@@ -203,9 +228,20 @@ class StoredCaptureServer(ABC):
         """A group's rows from its outcomes, each holding its samples."""
 
     def start(self) -> str:
-        return self.service.start()
+        from ray.util.metrics import Counter
+
+        url = self.service.start()
+        stalls = Counter(
+            "skyrl_skycap_loop_stall_seconds",
+            description="Seconds a skycap server's event loop was held past its tick (stalls over 0.1 s).",
+        )
+        # The service runs its loop on its own thread; ``_loop`` is set once ``start`` returns.
+        self._stall_watch = asyncio.run_coroutine_threadsafe(_watch_loop_stalls(stalls), self.service._loop)
+        return url
 
     def stop(self, timeout: float) -> bool:
+        if self._stall_watch is not None:
+            self._stall_watch.cancel()
         return self.service.stop(timeout)
 
     def finish_trajectory(
@@ -215,7 +251,8 @@ class StoredCaptureServer(ABC):
 
         Raises ``TimeoutError`` if the server's loop hasn't finished it within ``timeout`` seconds.
         """
-        result = self.service.finish(trajectory_id, annotations, timeout, paths=paths)
+        with stage_trace.span("skycap.finish_trajectory"):
+            result = self.service.finish(trajectory_id, annotations, timeout, paths=paths)
         self.samples.put(trajectory_id, result.samples)
         return CapturedFinish(
             result.id, result.status, result.unbridged_calls, self.checks(result.samples), record=result.record
@@ -241,7 +278,10 @@ class StoredCaptureServer(ABC):
         outcomes = [
             replace(o, samples=self.samples.take(o.capture_id)) if o.capture_id is not None else o for o in outcomes
         ]
-        return stored_group_returns(self.compose(outcomes, **compose_options), support_id_bits=support_id_bits)
+        with stage_trace.span("skycap.compose_group", trajectories=len(outcomes)):
+            output = self.compose(outcomes, **compose_options)
+        with stage_trace.span("skycap.split_group"):
+            return stored_group_returns(output, support_id_bits=support_id_bits)
 
 
 @dataclass

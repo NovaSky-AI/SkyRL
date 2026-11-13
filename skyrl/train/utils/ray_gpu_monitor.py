@@ -17,6 +17,19 @@ ray/gpu.util.avg                         Average GPU utilization across all GPUs
 ray/gpu.mem_used_gb.avg                  Average GPU memory used across all GPUs
 ray/cpu_ram_used_gb.avg                  Average CPU RAM used across all nodes
 
+Object store and streamed-rollout health
+----------------------------------------
+ray/node.<idx>.object_store_used_gb      Object store memory in use (GB) per node
+ray/node.<idx>.object_store_available_gb Object store memory free (GB) per node
+ray/object_store.used_frac               Object store in use over its capacity, whole cluster
+ray/object_store.spilled_gb              GB spilled to disk since the last flush, whole cluster
+ray/object_store.spills                  Spill requests since the last flush, whole cluster
+ray/object_store.restores                Restore requests since the last flush, whole cluster
+ray/skycap.loop_stall_s                  Seconds skycap servers' event loops stalled since the last flush
+
+The last four come from cumulative counters, so they are differences between the latest readings
+at consecutive flushes rather than averages.
+
 Inspired by: https://github.com/NVIDIA-NeMo/RL/blob/65683e0f071031a3b64b1dd44a6f2a5c97452597/nemo_rl/utils/logger.py#L478
 """
 
@@ -38,6 +51,21 @@ from skyrl.train.utils.vllm_metrics_scraper import (
 _GPU_UTIL = "ray_node_gpus_utilization"
 _GPU_MEM = "ray_node_gram_used"
 _RAM_USED = "ray_node_mem_used"
+_STORE_USED = "ray_object_store_used_memory"
+_STORE_AVAILABLE = "ray_object_store_available_memory"
+_SPILLED_BYTES = "ray_spill_manager_objects_bytes"
+_SPILL_REQUESTS = "ray_spill_manager_request_total"
+# ``skycap_store.StoredCaptureServer``'s counter, as Ray exports it.
+_SKYCAP_LOOP_STALL = "ray_skyrl_skycap_loop_stall_seconds_total"
+
+# Cumulative series, keyed ``cumulative.<metric>.node.<idx>``: reported as their increase per flush.
+_CUMULATIVE = "cumulative."
+_CUMULATIVE_OUT = {
+    "spilled_gb": "object_store.spilled_gb",
+    "spills": "object_store.spills",
+    "restores": "object_store.restores",
+    "skycap_loop_stall_s": "skycap.loop_stall_s",
+}
 
 
 class RayGpuMonitor:
@@ -57,6 +85,8 @@ class RayGpuMonitor:
         self._timeout = request_timeout_s
 
         self._buffer: List[Dict[str, float]] = []
+        # Each cumulative series' latest reading at the previous flush.
+        self._last_cumulative: Dict[str, float] = {}
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -114,11 +144,15 @@ class RayGpuMonitor:
             snapshots = self._buffer.copy()
             self._buffer.clear()
 
-        # Average each metric across all collected time-snapshots.
+        # Average each metric across all collected time-snapshots; keep cumulative ones' latest reading.
         totals: Dict[str, float] = defaultdict(float)
         counts: Dict[str, int] = defaultdict(int)
+        latest: Dict[str, float] = {}
         for snap in snapshots:
             for k, v in snap.items():
+                if k.startswith(_CUMULATIVE):
+                    latest[k] = v
+                    continue
                 totals[k] += v
                 counts[k] += 1
 
@@ -137,6 +171,20 @@ class RayGpuMonitor:
             out["ray/gpu.mem_used_gb.avg"] = sum(gpu_mem_vals) / len(gpu_mem_vals)
         if cpu_mem_vals:
             out["ray/cpu_ram_used_gb.avg"] = sum(cpu_mem_vals) / len(cpu_mem_vals)
+
+        store_used = [v for k, v in averaged.items() if k.endswith(".object_store_used_gb")]
+        store_available = [v for k, v in averaged.items() if k.endswith(".object_store_available_gb")]
+        if store_used and store_available:
+            out["ray/object_store.used_frac"] = sum(store_used) / max(sum(store_used) + sum(store_available), 1e-9)
+
+        # Increase of each cumulative series since the previous flush, summed over nodes. A series
+        # seen for the first time counts from zero (a counter starts at zero with its process).
+        increases: Dict[str, float] = defaultdict(float)
+        for k, v in latest.items():
+            increases[k.split(".")[1]] += max(v - self._last_cumulative.get(k, 0.0), 0.0)
+            self._last_cumulative[k] = v
+        for name, value in increases.items():
+            out[f"ray/{_CUMULATIVE_OUT[name]}"] = value
 
         return out
 
@@ -180,6 +228,19 @@ class RayGpuMonitor:
                     elif name == _RAM_USED:
                         # Ray reports mem_used in bytes; convert to GB (host CPU RAM utilized).
                         result[f"node.{node_idx}.cpu_ram_used_gb"] = value / (1024**3)
+                    elif name == _STORE_USED:
+                        result[f"node.{node_idx}.object_store_used_gb"] = value / (1024**3)
+                    elif name == _STORE_AVAILABLE:
+                        result[f"node.{node_idx}.object_store_available_gb"] = value / (1024**3)
+                    elif name == _SPILLED_BYTES and labels_dict.get("State") == "Spilled":
+                        result[f"{_CUMULATIVE}spilled_gb.node.{node_idx}"] = value / (1024**3)
+                    elif name == _SPILL_REQUESTS and labels_dict.get("Type") in ("Spilled", "Restored"):
+                        kind = "spills" if labels_dict["Type"] == "Spilled" else "restores"
+                        result[f"{_CUMULATIVE}{kind}.node.{node_idx}"] = value
+                    elif name == _SKYCAP_LOOP_STALL:
+                        key = f"{_CUMULATIVE}skycap_loop_stall_s.node.{node_idx}"
+                        # One series per server actor on the node.
+                        result[key] = result.get(key, 0.0) + value
             except Exception as exc:
                 logger.debug(f"RayGpuMonitor: failed to scrape or parse {url}: {exc}")
         return result
