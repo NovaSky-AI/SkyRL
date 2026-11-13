@@ -1,0 +1,66 @@
+# Non-colocated layout: Ray Sandbox's Modal-compatible gRPC facade as an Anyscale
+# service, with 9 x 16-CPU sandbox workers and one facade replica (Ray master's
+# facade keeps its exec table in memory). The edge must be Envoy (Envoy
+# Gateway), not ingress-nginx; see README.md.
+#
+#   anyscale service deploy -f examples/train_integrations/harbor/ray_sandbox/service.yaml \
+#     --env RAY_SANDBOX_API_TOKEN="$RAY_SANDBOX_API_TOKEN"
+name: ray-sandbox-modal-envoy
+image_uri: anyscale/image/ray-sandbox-modal-envoy:3
+# The facade checks RAY_SANDBOX_API_TOKEN on every call itself, so Anyscale's
+# token stays off; that lets the service route both of the SDK's gRPC services.
+query_auth_token_enabled: false
+compute_config:
+  cloud: <your-cloud>
+  cloud_resource: <your-cloud-resource>
+  # The head runs Serve's controller only. The facade replica (1 CPU) and
+  # sandboxes run on the workers: 144 CPUs, room for 128+ sandboxes at Harbor's
+  # 1 CPU each.
+  head_node:
+    required_resources:
+      CPU: 8
+      memory: 32Gi
+    resources: {CPU: 0}
+  worker_nodes:
+    - name: sandboxes
+      required_resources:
+        CPU: 16
+        memory: 64Gi
+      min_nodes: 9
+      max_nodes: 9
+      # gVisor's pod spec, as in the colocated job configs.
+      advanced_instance_config:
+        spec:
+          containers:
+          - name: ray
+            env:
+            - {name: RAY_SANDBOX_IGNORE_CGROUPS, value: '1'}
+            # runsc defaults GOMAXPROCS to every CPU of the pod; 2 helps when
+            # nodes saturate (gVisor's containerd shim uses 2 as well).
+            - {name: GOMAXPROCS, value: '2'}
+            volumeMounts:
+            - {name: sandbox-tun, mountPath: /dev/net/tun}
+            securityContext:
+              runAsUser: 0
+              appArmorProfile: {type: Unconfined}
+              capabilities:
+                add: [SYS_ADMIN]
+          volumes:
+          - name: sandbox-tun
+            hostPath: {path: /dev/net/tun, type: CharDevice}
+          securityContext:
+            sysctls:
+            - {name: net.ipv4.ip_unprivileged_port_start, value: '0'}
+  auto_select_worker_config: false
+grpc_options:
+  service_names:
+    - modal.client.ModalClient
+    - modal.task_command_router.TaskCommandRouter
+  grpc_servicer_functions:
+    - ray.experimental.sandbox.http.grpc_facade.add_servicers_to_server
+applications:
+  - name: sandbox-facade
+    route_prefix: /
+    import_path: ray.experimental.sandbox.http.grpc_app:build_app
+    args:
+      num_replicas: 1
