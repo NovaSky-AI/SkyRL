@@ -28,7 +28,7 @@ test_root=tests/backends/skyrl_train/gpu/gpu_ci
 # the rest of the shard's results; exit non-zero if any of them failed.
 status=0
 run() {
-    "$@" || status=1
+    "$@" || status=$?
 }
 
 if [[ "$shard" == models || "$shard" == all ]]; then
