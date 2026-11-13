@@ -332,9 +332,9 @@ class TestPackingValidation:
         assert cfg.remove_microbatch_padding is True
 
     def test_accepts_cp_gt_1(self):
-        # CP > 1 is supported: preprocess/postprocess zigzag-shard the packed
-        # THD per sub-seq, and the collator uses the same CP-safe alignment
-        # as preprocess_packed_seqs. _validate_packing_cfg must NOT raise.
+        # CP > 1 is supported: the worker's TokenLayout zigzag-shards the packed
+        # THD per sub-seq, and the collator uses the same CP-safe alignment.
+        # _validate_packing_cfg must NOT raise.
         cfg = SFTConfig(
             strategy="megatron",
             remove_microbatch_padding=True,

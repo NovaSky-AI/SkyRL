@@ -1,97 +1,125 @@
-import sys
-import types
-
 import numpy as np
 import pytest
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron import token_metadata
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packed_seq_align_size,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+    TokenLayout,
     TokenMetadataTrace,
 )
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertTrace
 
 
-@pytest.fixture
-def parallel_state(monkeypatch):
-    try:
-        import megatron.core.parallel_state as mpu
-    except ModuleNotFoundError:
-        megatron = types.ModuleType("megatron")
-        core = types.ModuleType("megatron.core")
-        mpu = types.ModuleType("megatron.core.parallel_state")
-        megatron.core = core
-        core.parallel_state = mpu
-        monkeypatch.setitem(sys.modules, "megatron", megatron)
-        monkeypatch.setitem(sys.modules, "megatron.core", core)
-        monkeypatch.setitem(sys.modules, "megatron.core.parallel_state", mpu)
-
-    monkeypatch.setattr(mpu, "get_tensor_model_parallel_world_size", lambda: 1, raising=False)
-    monkeypatch.setattr(mpu, "get_context_parallel_world_size", lambda: 1, raising=False)
-    monkeypatch.setattr(mpu, "get_context_parallel_rank", lambda: 0, raising=False)
-    return mpu
+def _align(monkeypatch, packed: int = 1, unpacked: int = 1) -> None:
+    """Fix the packed per-segment and the unpacked row alignment."""
+    monkeypatch.setattr(token_metadata, "get_packed_seq_align_size", lambda *args, **kwargs: packed)
+    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: unpacked)
 
 
-def test_microbatch_rows_share_one_packed_layout(monkeypatch, parallel_state):
-    monkeypatch.setattr(token_metadata, "get_packed_seq_align_size", lambda *args, **kwargs: 4)
+def test_rows_place_their_real_tokens_into_one_packed_layout(monkeypatch):
+    _align(monkeypatch, packed=4)
     attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
-    routes = torch.tensor(
-        [
-            [[[0, 1]], [[10, 11]], [[12, 13]], [[14, 15]]],
-            [[[0, 1]], [[0, 1]], [[20, 21]], [[22, 23]]],
-        ],
-        dtype=torch.int16,
-    )
     router_mask = torch.tensor([[1, 0, 0, 1], [1, 1, 0, 0]], dtype=torch.bool)
 
-    layout = token_metadata.build_token_metadata_layout(
-        attention_mask,
-        routes.device,
-        packed=True,
-        fp8_enabled=False,
-    )
-    packed_routes = token_metadata.align_token_metadata(
-        routes,
-        layout,
-        torch.tensor([0, 1], dtype=routes.dtype),
-    )
-    packed_mask = token_metadata.align_token_metadata(router_mask, layout, True)
+    layout = TokenLayout.build(attention_mask, packed=True, tp_size=1)
 
-    assert packed_routes[0, :, 0].tolist() == [
-        [10, 11],
-        [12, 13],
-        [14, 15],
-        [0, 1],
-        [20, 21],
-        [22, 23],
-        [0, 1],
-        [0, 1],
-    ]
-    assert packed_mask.tolist() == [[False, False, True, True, False, False, True, True]]
+    # Every segment is padded to the alignment.
     assert layout.cu_seqlens_padded.tolist() == [0, 4, 8]
+    assert layout.ordinals.tolist() == [[0, 1, 2, -1, 3, 4, -1, -1]]
+    assert layout.place(router_mask, True).tolist() == [[False, False, True, True, False, False, True, True]]
+    assert layout.padding_mask.tolist() == [[False, False, False, True, False, False, True, True]]
 
 
-def test_packed_layout_aligns_next_token_metadata_and_scatters_rows(monkeypatch, parallel_state):
-    monkeypatch.setattr(token_metadata, "get_packed_seq_align_size", lambda *args, **kwargs: 4)
+def test_packed_layout_places_next_tokens_and_scatters_predictions_back(monkeypatch):
+    _align(monkeypatch, packed=4)
     attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
     metadata = torch.tensor([[0, 10, 11, 12], [0, 0, 20, 21]], dtype=torch.int32)
-    layout = token_metadata.build_token_metadata_layout(
-        attention_mask,
-        metadata.device,
-        packed=True,
-        fp8_enabled=False,
-    )
+    layout = TokenLayout.build(attention_mask, packed=True, tp_size=1)
 
-    aligned = token_metadata.align_token_metadata(metadata, layout, -1, next_token=True)
-    batch_values = token_metadata.scatter_packed_token_values_to_batch(
-        torch.arange(1, 9, dtype=torch.float32).unsqueeze(0),
-        layout,
-        0,
-    )
+    aligned = layout.place(metadata, -1, next_token=True)
+    scatter = layout.packed_scatter()
+    batch_values = scatter.scatter(torch.arange(1, 9, dtype=torch.float32).unsqueeze(0), 0)
+    # Integer indices, computed on the host: scattering on the device takes no boolean mask, so no sync.
+    assert {scatter.positions.dtype, scatter.rows.dtype, scatter.cols.dtype} == {torch.int64}
 
     assert aligned.tolist() == [[11, 12, -1, -1, 21, -1, -1, -1]]
+    assert layout.next_token_mask().tolist() == [[True, True, False, False, True, False, False, False]]
+    # Position t predicts token t + 1: the predictions of packed positions 0, 1 and 4.
     assert batch_values.tolist() == [[0.0, 1.0, 2.0], [0.0, 0.0, 5.0]]
+
+
+def test_cp_fp8_segments_are_each_padded_to_the_fp8_alignment():
+    attention_mask = torch.tensor([[1, 1, 1, 1, 1, 1], [0, 1, 1, 1, 1, 1]])
+    align = get_packed_seq_align_size(1, 2, fp8_enabled=True)
+
+    layout = TokenLayout.build(attention_mask, packed=True, tp_size=1, cp_size=2, fp8_enabled=True)
+
+    assert layout.cu_seqlens_padded.tolist() == [0, align, 2 * align]
+    assert layout.ordinals.shape == (1, align)
+
+
+def test_cp_ranks_hold_a_front_and_a_mirrored_back_chunk_of_each_segment(monkeypatch):
+    _align(monkeypatch, packed=8)
+    attention_mask = torch.tensor([[1] * 7, [0, 0, 0, 1, 1, 1, 1]])
+    ids = torch.arange(14).reshape(2, 7)
+    layouts = [TokenLayout.build(attention_mask, packed=True, tp_size=1, cp_size=2, cp_rank=r) for r in (0, 1)]
+
+    # Segment 0 holds tokens 0..6 plus one pad, segment 1 tokens 10..13 plus four; chunks of 2.
+    assert layouts[0].place(ids, -1).tolist() == [[0, 1, 6, -1, 10, 11, -1, -1]]
+    assert layouts[1].place(ids, -1).tolist() == [[2, 3, 4, 5, 12, 13, -1, -1]]
+    assert layouts[0].full().place(ids, -1).tolist() == [[0, 1, 2, 3, 4, 5, 6, -1, 10, 11, 12, 13, -1, -1, -1, -1]]
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_per_token_rows_place_from_their_ordinals(monkeypatch, packed):
+    _align(monkeypatch, packed=4, unpacked=4)
+    attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
+    rows = torch.tensor([10, 11, 12, 20, 21], dtype=torch.int32)
+    layout = TokenLayout.build(attention_mask, packed=packed, tp_size=1)
+
+    aligned = layout.place_ordinals(rows, -1)
+
+    if packed:
+        assert aligned.tolist() == [[10, 11, 12, -1, 20, 21, -1, -1]]
+    else:
+        assert aligned.tolist() == [[10, 11, 12, -1], [20, 21, -1, -1]]
+    assert layout.to_batch(rows, -1).tolist() == [[-1, 10, 11, 12], [-1, -1, 20, 21]]
+
+
+def test_unpacked_layout_restores_canonical_rows(monkeypatch):
+    _align(monkeypatch, unpacked=4)
+    attention_mask = torch.tensor([[0, 1, 1, 1, 1], [0, 0, 0, 1, 1]])
+    layout = TokenLayout.build(attention_mask, packed=False, tp_size=1)
+
+    destination, source, counts = layout.recover()
+
+    assert layout.ordinals.tolist() == [[0, 1, 2, 3], [4, 5, -1, -1]]
+    assert destination.tolist() == [0, 1, 2, 3, 4, 5]
+    assert source.tolist() == [1, 2, 3, 4, 8, 9]
+    assert counts == [4, 2]
+
+
+def test_sub_sequences_are_segments_at_the_collator_row_offsets(monkeypatch):
+    _align(monkeypatch, packed=4)
+    ids = torch.tensor([[1, 2, 0, 0, 3, 4, 5, 0]])
+    attention_mask = ids != 0
+    layout = TokenLayout.build(attention_mask, packed=True, tp_size=1, sub_seq_lengths=[[2, 3]])
+
+    assert layout.cu_seqlens_padded.tolist() == [0, 4, 8]
+    assert layout.place(ids, -1).tolist() == [[1, 2, -1, -1, 3, 4, 5, -1]]
+    assert layout.place(ids, -1, next_token=True).tolist() == [[2, -1, -1, -1, 4, 5, -1, -1]]
+    with pytest.raises(ValueError, match="beyond the packed batch row"):
+        TokenLayout.build(attention_mask, packed=True, tp_size=1, sub_seq_lengths=[[2, 5]])
+
+
+def test_sub_sequences_under_cp_refuse_models_that_align_cp_chunks(monkeypatch):
+    monkeypatch.setattr(token_metadata, "get_cp_chunk_token_align", lambda: 4)
+    ids = torch.tensor([[1, 2, 0, 0, 3, 4, 5, 0]])
+    with pytest.raises(NotImplementedError, match="align CP chunks"):
+        TokenLayout.build(ids != 0, packed=True, tp_size=1, cp_size=2, sub_seq_lengths=[[2, 3]])
 
 
 def test_token_metadata_trace_chunks_and_independent_schema() -> None:
@@ -206,76 +234,6 @@ def test_routed_expert_trace_refuses_a_loss_active_target_without_a_row(active: 
         assert np.array_equal(result, routes(3).astype(result.dtype))
 
 
-@pytest.mark.parametrize("packed", [False, True])
-def test_align_token_rows_places_each_trajectory_from_its_own_row_source(monkeypatch, parallel_state, packed):
-    """``_align_token_rows`` is the one placement loop both alignment entry points share."""
-    monkeypatch.setattr(token_metadata, "get_packed_seq_align_size", lambda *args, **kwargs: 4)
-    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
-    attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
-    rows = [torch.tensor([10, 11, 12], dtype=torch.int32), torch.tensor([20, 21], dtype=torch.int32)]
-    layout = token_metadata.build_token_metadata_layout(
-        attention_mask,
-        rows[0].device,
-        packed=packed,
-        fp8_enabled=False,
-    )
-
-    aligned = token_metadata._align_token_rows(
-        rows.__getitem__,
-        rows[0],
-        (),
-        layout,
-        -1,
-    )
-
-    if packed:
-        assert aligned.tolist() == [[10, 11, 12, -1, 20, 21, -1, -1]]
-    else:
-        assert aligned.tolist() == [[10, 11, 12, -1], [20, 21, -1, -1]]
-
-
-@pytest.mark.parametrize("packed", [False, True])
-def test_align_packed_token_metadata_honours_per_segment_starts(monkeypatch, parallel_state, packed):
-    """A response-suffix channel covers part of a trajectory and needs its own start."""
-    monkeypatch.setattr(token_metadata, "get_packed_seq_align_size", lambda *args, **kwargs: 4)
-    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
-    attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
-    # Trajectory 0 keeps its last 2 of 3 real tokens; trajectory 1 keeps its last 1 of 2.
-    suffix = PackedTensor.from_segments(
-        [torch.tensor([11, 12], dtype=torch.int32), torch.tensor([21], dtype=torch.int32)]
-    )
-    layout = token_metadata.build_token_metadata_layout(
-        attention_mask,
-        suffix.device,
-        packed=packed,
-        fp8_enabled=False,
-    )
-
-    aligned = token_metadata.align_packed_token_metadata(suffix, layout, -1, segment_starts=[1, 1])
-
-    if packed:
-        assert aligned.tolist() == [[-1, 11, 12, -1, -1, 21, -1, -1]]
-    else:
-        assert aligned.tolist() == [[-1, 11, 12, -1], [-1, 21, -1, -1]]
-
-
-def test_align_packed_token_metadata_rejects_segments_that_leave_the_trajectory(monkeypatch, parallel_state):
-    monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
-    attention_mask = torch.tensor([[0, 1, 1, 1]])
-    suffix = PackedTensor.from_segments([torch.tensor([11, 12], dtype=torch.int32)])
-    layout = token_metadata.build_token_metadata_layout(
-        attention_mask,
-        suffix.device,
-        packed=False,
-        fp8_enabled=False,
-    )
-
-    with pytest.raises(ValueError, match="spans real tokens"):
-        token_metadata.align_packed_token_metadata(suffix, layout, -1, segment_starts=[2])
-    with pytest.raises(ValueError, match="do not match"):
-        token_metadata.align_packed_token_metadata(suffix, layout, -1)
-
-
 def test_append_padding_extends_the_established_schema():
     trace = token_metadata.TokenMetadataTrace()
     trace.append(np.array([[7, 8], [9, 10]], dtype=np.int32), expected_rows=2)
@@ -302,18 +260,103 @@ def test_append_padding_needs_a_schema_and_a_valid_count():
             trace.append_padding(count)
 
 
-def test_unpacked_layout_honors_extra_seq_align(monkeypatch, parallel_state):
-    # remove_left_padding(seq_align=...) pads unpacked microbatches to an extra alignment; the replay layout must
-    # pad to the same length or replayed routes cover fewer tokens than the model sees.
+def test_unpacked_layout_honors_extra_seq_align(monkeypatch):
+    # seq_align pads unpacked microbatches to an extra alignment (mlp_chunks_for_training, DSV4 compression ratios).
     monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 8)
     attention_mask = torch.ones((2, 211), dtype=torch.bool)
 
-    default = token_metadata.build_token_metadata_layout(
-        attention_mask, attention_mask.device, packed=False, fp8_enabled=False
-    )
-    aligned = token_metadata.build_token_metadata_layout(
-        attention_mask, attention_mask.device, packed=False, fp8_enabled=False, seq_align=128
-    )
+    default = token_metadata.TokenLayout.build(attention_mask, packed=False, tp_size=1)
+    aligned = token_metadata.TokenLayout.build(attention_mask, packed=False, tp_size=1, seq_align=128)
 
-    assert default.aligned_sequence_length == 216
-    assert aligned.aligned_sequence_length == 256
+    assert default.ordinals.shape == (2, 216)
+    assert aligned.ordinals.shape == (2, 256)
+
+
+def _collated_ids(sub_seq_lengths, align):
+    """Rows as the packed collator lays them out: sub-sequences at aligned offsets, unique nonzero ids."""
+    width = max(sum(length + (-length % align) for length in lengths) for lengths in sub_seq_lengths)
+    ids = torch.zeros((len(sub_seq_lengths), width), dtype=torch.long)
+    next_id = 1
+    for row, lengths in enumerate(sub_seq_lengths):
+        offset = 0
+        for length in lengths:
+            ids[row, offset : offset + length] = torch.arange(next_id, next_id + length)
+            next_id += length
+            offset += length + (-length % align)
+    return ids
+
+
+@pytest.mark.parametrize("fp8_enabled", [False, True])
+@pytest.mark.parametrize(
+    "tp_size,cp_size,sub_seq_lengths",
+    [
+        (1, 2, [[6, 5], [7, 3]]),
+        (2, 2, [[5, 9], [3, 6]]),
+        # Ranks 0..3 hold chunks {0, 7}, {1, 6}, {2, 5}, {3, 4} of every segment.
+        (1, 4, [[10, 6], [13, 3]]),
+        (1, 2, [[7], [10]]),
+    ],
+)
+def test_cp_shards_reassemble_into_the_full_packed_stream(tp_size, cp_size, sub_seq_lengths, fp8_enabled):
+    ids = _collated_ids(sub_seq_lengths, get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled))
+    layouts = [
+        TokenLayout.build(
+            ids != 0,
+            packed=True,
+            tp_size=tp_size,
+            cp_size=cp_size,
+            cp_rank=rank,
+            sub_seq_lengths=sub_seq_lengths,
+            fp8_enabled=fp8_enabled,
+        )
+        for rank in range(cp_size)
+    ]
+    shards = [layout.place(ids, 0).squeeze(0) for layout in layouts]
+    cu = layouts[0].cu_seqlens_padded.tolist()
+    assert all(shard.numel() == cu[-1] // cp_size for shard in shards)
+    if fp8_enabled:
+        assert shards[0].numel() % 16 == 0
+
+    # Undo the zigzag: rank r holds chunk r and its mirror 2 * CP - 1 - r of each segment.
+    first_id = 1
+    lengths = [length for row in sub_seq_lengths for length in row]
+    for start, end, length in zip(cu[:-1], cu[1:], lengths):
+        local = (end - start) // cp_size
+        halves = [shard[start // cp_size : start // cp_size + local].chunk(2) for shard in shards]
+        segment = torch.cat([front for front, _ in halves] + [back for _, back in reversed(halves)])
+        expected = torch.zeros(end - start, dtype=torch.long)
+        expected[:length] = torch.arange(first_id, first_id + length)
+        assert torch.equal(segment, expected)
+        first_id += length
+
+
+@pytest.mark.parametrize("tp_size,cp_size,real_tokens", [(4, 2, 2), (4, 2, 1), (2, 2, 2), (1, 2, 2)])
+def test_segments_shorter_than_the_cp_alignment_pack(tp_size, cp_size, real_tokens):
+    attention_mask = torch.ones((2, 32), dtype=torch.bool)
+    attention_mask[0, real_tokens:] = False
+    ids = torch.arange(1, 65).reshape(2, 32) * attention_mask
+
+    shards = [
+        TokenLayout.build(attention_mask, packed=True, tp_size=tp_size, cp_size=cp_size, cp_rank=rank, fp8_enabled=True)
+        for rank in range(cp_size)
+    ]
+
+    assert shards[0].cu_seqlens_padded[-1] % (16 * cp_size) == 0
+    for layout in shards:
+        assert layout.ordinals.shape[1] % 16 == 0
+    placed = torch.cat([layout.place(ids, 0) for layout in shards], dim=1)
+    assert sorted(placed[placed != 0].tolist()) == ids[attention_mask].tolist()
+
+
+@pytest.mark.parametrize(
+    "tp_size,fp8_enabled,real_tokens,width",
+    [(1, False, 6541, 6541), (1, True, 6541, 6544), (2, True, 8552, 8704)],
+)
+def test_unpacked_width_aligns_for_tp_and_fp8(tp_size, fp8_enabled, real_tokens, width):
+    attention_mask = torch.zeros((1, real_tokens + 500), dtype=torch.bool)
+    attention_mask[0, :real_tokens] = True
+
+    layout = TokenLayout.build(attention_mask, packed=False, tp_size=tp_size, fp8_enabled=fp8_enabled)
+
+    assert layout.ordinals.shape == (1, width)
+    assert int((~layout.padding_mask).sum()) == real_tokens

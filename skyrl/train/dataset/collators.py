@@ -147,8 +147,8 @@ class PackedDataCollator:
         #     128-token blocks (so the global segment includes the TP and CP
         #     shard factors); fp8_recipe=mxfp8 quantizes in 1x32 tiles, so the
         #     TP=1 slab grows to 32.
-        # This MUST stay in lockstep with the worker's preprocess_packed_seqs
-        # (megatron_utils.py): if the divisors drift, the per-rank CP/SP
+        # This MUST stay in lockstep with the worker's TokenLayout.build
+        # (token_metadata.py): if the divisors drift, the per-rank CP/SP
         # gather/scatter offsets silently corrupt loss/grads (no crash).
         align_size = get_packed_seq_align_size(
             tp_size, cp_size, fp8_enabled=self.fp8_enabled, fp8_recipe=self.fp8_recipe
@@ -233,7 +233,7 @@ class PackedDataCollator:
         for bin_indices in flat_bins:
             subseq_lens = [seq_lengths[idx] for idx in bin_indices]
             # Each sub-seq's length is independently aligned to align_size
-            # (matches preprocess_packed_seqs behavior).
+            # (matches TokenLayout.build).
             packed_len = sum(_round_up(s, align_size) for s in subseq_lens)
             bin_packed_lengths.append(packed_len)
             bin_subseq_lengths.append(subseq_lens)
@@ -290,7 +290,7 @@ class PackedDataCollator:
                     if n_write > 0:
                         loss_mask_np[row_idx, row_offset:write_end] = full_loss_masks[ex_idx][1 : 1 + n_write]
 
-                # Match the aligned footprint consumed by preprocess_packed_seqs.
+                # Match the aligned footprint TokenLayout.build reads back.
                 row_offset += _round_up(s, align_size)
 
         # Count response-token loss slots before normalization. The vectorized
@@ -318,7 +318,7 @@ class PackedDataCollator:
         # ``TensorList`` (one 1-D int tensor per bin, ragged across bins — same
         # pattern as ``image_grid_thw``) so ``MeshDispatch`` shards it per-DP
         # rank automatically alongside ``sequences``/``attention_mask``,
-        # eliminating the worker-side per-rank slice. ``preprocess_packed_seqs``
+        # eliminating the worker-side per-rank slice. ``TokenLayout.build``
         # and the Megatron packed-logprob scatter want ``list[list[int]]``, so a
         # ``.tolist()`` happens at the ``forward_step`` boundary.
         sub_seq_lengths = TensorList([torch.tensor(lens, dtype=torch.long) for lens in bin_subseq_lengths])

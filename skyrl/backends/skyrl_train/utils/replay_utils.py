@@ -2,15 +2,13 @@
 Utility functions for MoE Router Replay.
 """
 
+from collections.abc import Sequence
 from contextlib import contextmanager
+from typing import Optional
 
 import torch
 
-from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
-    TokenMetadataLayout,
-    align_packed_token_metadata,
-    align_token_metadata,
-)
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import TokenLayout
 from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
 
 
@@ -77,35 +75,17 @@ def patch_topk_router_layer_number():
     TopKRouter._set_layer_number_patched = True
 
 
-def _split_replay_indices(rollout_expert_indices: torch.Tensor) -> list[torch.Tensor]:
-    # Megatron flattens router logits in [sequence, batch] order.
-    per_layer = rollout_expert_indices.permute(2, 1, 0, 3).contiguous().to(torch.int32)
-    return list(per_layer.flatten(1, 2).unbind(0))
+def model_scatters_router_padding_mask(model) -> bool:
+    """Whether the model scatters ``padding_mask`` to its sequence-parallel layout itself.
 
-
-def scatter_router_padding_mask_for_model(
-    router_padding_mask: torch.Tensor | None,
-    model,
-    model_config,
-) -> torch.Tensor | None:
-    """Match the mask layout to sequence-parallel hidden states at model entry."""
-    if router_padding_mask is None or not model_config.sequence_parallel:
-        return router_padding_mask
-
+    GPTModel scatters its mask beside the embedding on the first PP stage. HybridModel
+    scatters only the embedding, so its mask must always arrive already scattered.
+    """
     from megatron.core.models.hybrid.hybrid_model import HybridModel
-    from megatron.core.tensor_parallel import scatter_to_sequence_parallel_region
     from megatron.core.utils import unwrap_model
 
     unwrapped_model = unwrap_model(model)
-    # GPTModel scatters its mask beside the embedding on the first PP stage. HybridModel
-    # scatters only the embedding, so its mask must always be scattered here.
-    if not isinstance(unwrapped_model, HybridModel) and unwrapped_model.pre_process:
-        return router_padding_mask
-    return (
-        scatter_to_sequence_parallel_region(router_padding_mask.transpose(0, 1).contiguous())
-        .transpose(0, 1)
-        .contiguous()
-    )
+    return not isinstance(unwrapped_model, HybridModel) and bool(unwrapped_model.pre_process)
 
 
 def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
@@ -125,8 +105,13 @@ def _get_current_pp_stage_layer_range(model_config) -> tuple[int, int]:
     return offset, num_layers
 
 
-def _get_local_router_layer_indices(model_config, global_num_layers: int, instances: list) -> list[int]:
-    local_layer_offset, local_num_layers = _get_current_pp_stage_layer_range(model_config)
+def _get_local_router_layer_indices(
+    stage_layer_range: tuple[int, int],
+    hybrid_layer_pattern: Optional[str],
+    global_num_layers: int,
+    instances: Sequence,
+) -> list[int]:
+    local_layer_offset, local_num_layers = stage_layer_range
     if local_num_layers == len(instances):
         layer_indices = list(range(local_layer_offset, local_layer_offset + local_num_layers))
     else:
@@ -142,7 +127,7 @@ def _get_local_router_layer_indices(model_config, global_num_layers: int, instan
                 layer_index = local_layer_offset + local_router_index + (local_num_layers - len(instances))
             layer_indices.append(layer_index)
 
-    layer_indices = _hybrid_to_decoder_layer_indices(model_config, global_num_layers, layer_indices)
+    layer_indices = _hybrid_to_decoder_layer_indices(hybrid_layer_pattern, global_num_layers, layer_indices)
     if any(layer_index < 0 or layer_index >= global_num_layers for layer_index in layer_indices):
         raise ValueError(
             f"Router replay layer indices {layer_indices} out of range for data with {global_num_layers} layers"
@@ -155,7 +140,9 @@ def _get_local_router_layer_indices(model_config, global_num_layers: int, instan
 _HYBRID_ATTENTION_SYMBOLS = frozenset("*D+CHW")
 
 
-def _hybrid_to_decoder_layer_indices(model_config, global_num_layers: int, layer_indices: list[int]) -> list[int]:
+def _hybrid_to_decoder_layer_indices(
+    hybrid_layer_pattern: Optional[str], global_num_layers: int, layer_indices: list[int]
+) -> list[int]:
     """Map HybridModel layer indices to the inference engine's decoder-layer indices.
 
     Router ``layer_number`` counts hybrid layers, and vLLM returns routed experts per HF decoder layer. Models whose
@@ -165,119 +152,102 @@ def _hybrid_to_decoder_layer_indices(model_config, global_num_layers: int, layer
     pattern[:h + 1]) - 1``. Decided from the pattern, not the indices: under pipeline parallelism an early stage's
     hybrid indices all fit below the decoder-layer count and still need mapping.
     """
-    pattern = getattr(model_config, "hybrid_layer_pattern", None)
-    if not pattern:
+    if not hybrid_layer_pattern:
         return layer_indices
-    flat = pattern.split("/")[0].replace("|", "")
+    flat = hybrid_layer_pattern.split("/")[0].replace("|", "")
     attention = [symbol in _HYBRID_ATTENTION_SYMBOLS for symbol in flat]
     if global_num_layers == len(flat) or global_num_layers != sum(attention):
         return layer_indices
     return [sum(attention[: h + 1]) - 1 for h in layer_indices]
 
 
-def setup_per_microbatch_replay_forward(
+def select_rank_replay_routes(
     rollout_expert_indices: PackedTensor,
     router_padding_mask: torch.Tensor | None,
-    attention_mask: torch.Tensor,
-    model,
-    model_config,
-    metadata_layout: TokenMetadataLayout,
-    remove_microbatch_padding: bool = False,
-) -> dict[str, torch.Tensor]:
-    """Set up router replay and return its model-facing keyword arguments.
+    layout: TokenLayout,
+    *,
+    router_replay_instances: Sequence,
+    stage_layer_range: Optional[tuple[int, int]],
+    hybrid_layer_pattern: Optional[str],
+    tp_size: int,
+    tp_rank: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select the routes this rank's routers replay, and align the router padding mask.
 
-    Replay indices arrive packed to their real tokens (``[sum(seqlen), layers, topk]`` plus
-    ``cu_seqlens``) while the router padding mask arrives batch-major; both undergo matching
-    padding removal or packing and CP sharding against the shared layout. Their destinations
-    then differ: indices are TP-sliced and installed into per-layer ``RouterReplay``
-    instances, while the mask follows Megatron's model-specific sequence-parallel
-    path and is passed to the model as ``padding_mask``.
+    Runs on the host, before the microbatch is uploaded. Replay indices arrive packed to their
+    real tokens (``[sum(seqlen), layers, topk]`` plus ``cu_seqlens``) while the router padding
+    mask arrives batch-major; both are laid out against the microbatch's ``layout``, which
+    already carries the packing and the CP front/back chunk split.
 
-    Handles context parallelism: when CP > 1, the sequence is split into
-    2*cp_size chunks with each CP rank receiving a front chunk and a back
-    chunk (for causal-mask load balancing). Replay indices are split using
-    the same pattern so they stay aligned with the tokens each rank sees.
+    Returns ``(routes, mask)``:
 
-    Handles sequence parallelism: when TP > 1, the sequence is split across
-    TP ranks, so each rank's MoE router only sees its local chunk of tokens.
+    - ``routes`` is ``[local_layers, router_tokens, topk]`` in the compact rollout dtype. It
+      holds only the layers of ``router_replay_instances`` (this PP stage), and only the
+      contiguous sequence-parallel chunk ``tp_rank`` of the tokens, flattened sequence major
+      (Megatron's router token order). Padding tokens route to ``replay_padding_row``.
+    - ``mask`` is the router padding mask in the model's token layout, before any
+      sequence-parallel slice.
 
-    Handles dense-layer mismatch: DeepSeek V3-style models have dense FFN
-    layers before the MoE layers. vLLM reports routing indices for ALL
-    transformer layers, but Megatron only has RouterReplay instances for MoE
-    layers. We use each instance's global layer_number (set by the patched
-    TopKRouter.set_layer_number) to index into the correct slice of the data.
-
-    Handles pipeline parallelism: when PP > 1, transformer layers are split
-    across PP ranks, so each rank only sees its local RouterReplay instances. In cases
-    where the number of local RouterReplay instances does not match the local
-    layer count, indicating that the model has dense layers before MoE layers,
-    we use the global layer_number to index into the correct slice of the data.
-
+    Handles dense-layer mismatch: DeepSeek V3-style models have dense FFN layers before the
+    MoE layers. vLLM reports routing indices for ALL transformer layers, but Megatron only has
+    RouterReplay instances for MoE layers. Each instance's global layer_number (set by the
+    patched TopKRouter.set_layer_number) indexes the correct slice of the data, also when
+    pipeline parallelism splits the layers across stages.
     """
-    import megatron.core.parallel_state as mpu
+    if router_padding_mask is None:
+        raise ValueError("router_padding_mask is required with rollout_expert_indices")
+    if len(rollout_expert_indices.row_shape) != 2:
+        raise ValueError(f"Expected [tokens, layers, topk] replay indices, got {rollout_expert_indices!r}")
+    if tuple(router_padding_mask.shape) != layout.batch_shape:
+        raise ValueError(
+            f"router_padding_mask shape {tuple(router_padding_mask.shape)} does not match "
+            f"the batch {layout.batch_shape}"
+        )
+    if not torch.equal(rollout_expert_indices.cu_seqlens.to(torch.long), layout.cu_lengths):
+        raise ValueError(
+            f"Replay indices hold segments {rollout_expert_indices.sequence_lengths.tolist()} for "
+            f"trajectories of {layout.sequence_lengths} tokens"
+        )
+    if stage_layer_range is None:
+        raise ValueError("rollout_expert_indices were given, but the model builds no MoE layers to replay them")
+
+    num_captured_layers, topk = rollout_expert_indices.row_shape
+    local_layer_indices = _get_local_router_layer_indices(
+        stage_layer_range, hybrid_layer_pattern, num_captured_layers, router_replay_instances
+    )
+    aligned_router_padding_mask = layout.place(router_padding_mask.to(torch.bool), True)
+
+    # A route row is its token's ordinal, so lay out ordinals rather than the routes themselves
+    # and gather only the rows this rank replays; NO_TOKEN marks a padding token.
+    values = rollout_expert_indices.values
+    aligned_rows = layout.ordinals
+    # Sequence parallelism: each TP rank's routers see one contiguous chunk of the sequence.
+    # Megatron flattens router tokens in [sequence, batch] order.
+    chunk_size = aligned_rows.shape[1] // tp_size
+    rows = aligned_rows[:, tp_rank * chunk_size : (tp_rank + 1) * chunk_size].transpose(0, 1).reshape(-1)
+
+    layers = torch.tensor(local_layer_indices, dtype=torch.long, device=values.device)
+    padding_row = replay_padding_row(topk, dtype=values.dtype, device=values.device)
+    if values.shape[0] == 0:
+        local = padding_row.expand(rows.shape[0], len(local_layer_indices), topk).clone()
+    else:
+        local = values[rows.clamp(min=0)[:, None], layers[None, :]]
+        local[rows < 0] = padding_row
+    return local.transpose(0, 1).contiguous(), aligned_router_padding_mask
+
+
+def install_replay_forward(routes: torch.Tensor) -> None:
+    """Install one microbatch's ``[local_layers, router_tokens, topk]`` routes for replay.
+
+    Widens the compact rollout dtype to the int32 Megatron's routers consume.
+    """
     from megatron.core.transformer.moe.router_replay import (
         RouterReplay,
         RouterReplayAction,
     )
 
-    if router_padding_mask is None:
-        raise ValueError("router_padding_mask is required with rollout_expert_indices")
-    if len(rollout_expert_indices.row_shape) != 2:
-        raise ValueError(f"Expected [tokens, layers, topk] replay indices, got {rollout_expert_indices!r}")
-
-    if router_padding_mask.shape != attention_mask.shape:
-        raise ValueError(
-            f"router_padding_mask shape {router_padding_mask.shape} does not match "
-            f"attention_mask shape {attention_mask.shape}"
-        )
-    if router_padding_mask.device != rollout_expert_indices.device:
-        raise ValueError("rollout_expert_indices and router_padding_mask must be on the same device")
-
-    num_captured_layers, topk = rollout_expert_indices.row_shape
-    instances = RouterReplay.global_router_replay_instances
-    local_layer_indices = _get_local_router_layer_indices(
-        model_config,
-        num_captured_layers,
-        instances,
-    )
-    layer_index = torch.tensor(local_layer_indices, dtype=torch.long, device=rollout_expert_indices.device)
-    local_rollout_expert_indices = PackedTensor(
-        rollout_expert_indices.values.index_select(1, layer_index),
-        rollout_expert_indices.cu_seqlens,
-    )
-
-    if (metadata_layout.padded_sequence_lengths is not None) != remove_microbatch_padding:
-        raise ValueError("Shared token metadata layout does not match the model packing mode")
-    aligned_router_padding_mask = align_token_metadata(router_padding_mask.to(torch.bool), metadata_layout, True)
-    route_padding = replay_padding_row(
-        topk,
-        dtype=rollout_expert_indices.dtype,
-        device=rollout_expert_indices.device,
-    )
-    aligned_rollout_expert_indices = align_packed_token_metadata(
-        local_rollout_expert_indices,
-        metadata_layout,
-        route_padding,
-    )
-
-    # TP splitting: sequence parallelism across the tensor model parallel region
-    tp_size = mpu.get_tensor_model_parallel_world_size()
-    if tp_size > 1:
-        tp_rank = mpu.get_tensor_model_parallel_rank()
-        seq_len = aligned_rollout_expert_indices.shape[1]
-        chunk_size = seq_len // tp_size
-        aligned_rollout_expert_indices = aligned_rollout_expert_indices[
-            :, tp_rank * chunk_size : (tp_rank + 1) * chunk_size, :, :
-        ]
-    RouterReplay.set_replay_data(_split_replay_indices(aligned_rollout_expert_indices))
+    RouterReplay.set_replay_data(list(routes.to(torch.int32).unbind(0)))
     RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
-
-    model_router_padding_mask = scatter_router_padding_mask_for_model(
-        aligned_router_padding_mask,
-        model,
-        model_config,
-    )
-    return {"padding_mask": model_router_padding_mask}
 
 
 def setup_per_microbatch_replay_backward() -> None:

@@ -4,8 +4,8 @@ so the draft head looks *confidently wrong* on real training data.
 
 The existing `test_mtp_replay_vs_native` calls the model DIRECTLY
 (`self.actor_module[0](sequences, position_ids, attention_mask)`), i.e. the BSHD path.
-Real training defaults to `remove_microbatch_padding=True`, which routes through
-`preprocess_packed_seqs` (THD packing). So the clean probe is structurally blind to the
+Real training defaults to `remove_microbatch_padding=True`, which packs each microbatch
+into a THD stream (`TokenLayout`). So the clean probe is structurally blind to the
 packed path. This probe runs BOTH on the SAME content and reports soft-CE at the real
 positions for each, plus replay-vs-native divergence under packing:
 
@@ -43,9 +43,8 @@ class _ProbeMegatronPolicyWorker(MegatronPolicyWorkerBase):
     def probe_packed_vs_unpacked(self, token_ids_list) -> dict:
         import megatron.core.parallel_state as mpu
 
-        from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-            recover_left_padding,
-            remove_left_padding,
+        from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
+            TokenLayout,
         )
         from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits
         from skyrl.backends.skyrl_train.mtp.hidden_capture import (
@@ -101,9 +100,9 @@ class _ProbeMegatronPolicyWorker(MegatronPolicyWorkerBase):
         # =========================================================================
         # (1) UNPACKED baseline: run each sequence alone (no padding), BSHD path.
         # =========================================================================
-        # Skip the raw single-seq baseline under SP/TP>1: it bypasses remove_left_padding's
+        # Skip the raw single-seq baseline under SP/TP>1: it bypasses the unpacked layout's
         # seq-length padding to a TP multiple, so odd-length seqs trip the SP scatter. The batched
-        # path below uses remove_left_padding and is the one that matters for the TP>1 (158) case.
+        # path below uses that layout and is the one that matters for the TP>1 (158) case.
         unpacked_soft_ce = []
         for ids in token_ids_list if tp_size == 1 else []:
             seq = torch.tensor(ids, device=device, dtype=torch.long).unsqueeze(0)
@@ -121,7 +120,7 @@ class _ProbeMegatronPolicyWorker(MegatronPolicyWorkerBase):
             )
 
         # =========================================================================
-        # (2) BATCHED LEFT-PADDED, non-packed (remove_left_padding) -- the ACTUAL
+        # (2) BATCHED LEFT-PADDED, non-packed (unpacked TokenLayout) -- the ACTUAL
         # Qwen3.5 MTP training path (its recipes set REMOVE_MICROBATCH_PADDING=false).
         # =========================================================================
         B = len(token_ids_list)
@@ -137,13 +136,20 @@ class _ProbeMegatronPolicyWorker(MegatronPolicyWorkerBase):
 
         am_bool = attention_mask.to(bool)
         is_first = mpu.is_pipeline_first_stage(ignore_virtual=True)
-        new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
-            sequences, am_bool, position_ids, pre_process=is_first
+        layout = TokenLayout.build(
+            am_bool,
+            packed=False,
+            tp_size=mpu.get_tensor_model_parallel_world_size(),
+            cp_size=mpu.get_context_parallel_world_size(),
         )
+        new_sequences = layout.place(sequences, 0) if is_first else sequences
+        new_attention_mask = ~layout.padding_mask
+        new_position_ids = layout.place(position_ids, 0)
         is_last = mpu.is_pipeline_last_stage(ignore_virtual=True)
 
         def depad(t):
-            return recover_left_padding(t, new_attention_mask, am_bool, L, post_process=is_last)
+            # Back to canonical [B, L, ...], zeros at padding.
+            return layout.to_batch(t[new_attention_mask], 0) if is_last else t
 
         # capture in-forward NATIVE mtp output via hook, alongside our replay
         inforward = {}

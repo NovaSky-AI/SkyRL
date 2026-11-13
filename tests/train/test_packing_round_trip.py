@@ -1,246 +1,61 @@
-"""Collator -> preprocess layout tests for packed SFT.
+"""Collator -> worker layout tests for packed SFT.
 
-These tests exercise the *collator output -> preprocess* path with
-multi-subseq rows under both ``mbs > 1`` and ``tp_size > 1``, asserting the
-invariants at that interface:
-
-  preprocess — the controller-side collator advances
-    ``row_offset += round_up(s, align_size)`` between sub-seqs in the
-    same row. ``preprocess_packed_seqs`` advances by the same padded
-    length, so for ``tp_size > 1`` and multi-subseq rows sub-seq
-    ``i > 0`` starts past the TP-alignment pad gap of sub-seq ``i - 1``.
-
-The configuration here (``mbs=2``, ``tp_size=4``, two multi-subseq rows
-with sub-seq lengths ``[7, 5]`` and ``[3, 11]``) exercises both at once.
+The controller-side collator writes each sub-sequence of a bin row at its aligned row offset; the
+worker's ``TokenLayout`` reads them back from those offsets into the packed THD stream.
 
 Run with:
-  uv run --extra dev --extra megatron -- pytest \
-      tests/train/test_packing_round_trip.py
+  uv run --isolated --extra dev -- pytest tests/train/test_packing_round_trip.py
 """
 
-from __future__ import annotations
-
-import sys
-from dataclasses import dataclass
-from types import ModuleType
-from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-import torch
 
-from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
-    get_packed_seq_align_size,
-)
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import TokenLayout
+from skyrl.train.dataset.collators import PackedDataCollator
 
 
-# ---------------------------------------------------------------------------
-# Mock the megatron-core surface that the preprocess utils import
-# at the top of the module. Same recipe as
-# tests/backends/skyrl_train/distributed/test_preprocess_packed_seqs_multiseq.py
-# ---------------------------------------------------------------------------
-@dataclass
-class _PackedSeqParams:
-    qkv_format: str = ""
-    cu_seqlens_q: Any = None
-    max_seqlen_q: Any = None
-    cu_seqlens_kv: Any = None
-    max_seqlen_kv: Any = None
-    cu_seqlens_q_padded: Any = None
-    cu_seqlens_kv_padded: Any = None
-    total_tokens: Any = None
+class TestCollatedPackedRows:
+    """Collator output -> packed layout checks."""
 
-
-_MEGATRON_MODULES = [
-    "megatron",
-    "megatron.core",
-    "megatron.core.parallel_state",
-    "megatron.core.distributed",
-    "megatron.core.optimizer",
-    "megatron.core.packed_seq_params",
-    "megatron.core.transformer",
-    "megatron.core.transformer.module",
-    "megatron.core.transformer.moe",
-    "megatron.core.transformer.moe.moe_utils",
-    "megatron.core.utils",
-]
-_mock_modules: dict[str, ModuleType] = {}
-for _name in _MEGATRON_MODULES:
-    _mock_modules[_name] = ModuleType(_name)
-_mock_modules["megatron.core"].parallel_state = _mock_modules["megatron.core.parallel_state"]
-_mock_modules["megatron.core.packed_seq_params"].PackedSeqParams = _PackedSeqParams
-_mock_modules["megatron.core.distributed"].DistributedDataParallel = MagicMock
-_mock_modules["megatron.core.optimizer"].ChainedOptimizer = MagicMock
-_mock_modules["megatron.core.transformer.module"].Float16Module = MagicMock
-_mock_modules["megatron.core.transformer.moe.moe_utils"].clear_aux_losses_tracker = MagicMock()
-_mock_modules["megatron.core.transformer.moe.moe_utils"].get_moe_layer_wise_logging_tracker = MagicMock()
-_mock_modules["megatron.core.transformer.moe.moe_utils"].reduce_aux_losses_tracker_across_ranks = MagicMock()
-_mock_modules["megatron.core.utils"].get_attr_wrapped_model = MagicMock()
-_mock_modules["megatron.core.utils"].unwrap_model = MagicMock()
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _stub_megatron_modules():
-    """Install the mock ``megatron`` modules for this module's tests only.
-
-    The stubs are injected into ``sys.modules`` at module setup and removed at
-    teardown so they do not leak into other test files in the same pytest
-    session. Only the megatron entries are touched: evicting everything this
-    module imported (e.g. ``vllm``) would force a re-import whose module-level
-    side effects are not idempotent.
-    """
-    saved = {_name: sys.modules.get(_name) for _name in _MEGATRON_MODULES}
-    sys.modules.update(_mock_modules)
-    try:
-        yield
-    finally:
-        for _name in _MEGATRON_MODULES:
-            if saved[_name] is None:
-                sys.modules.pop(_name, None)
-            else:
-                sys.modules[_name] = saved[_name]
-
-
-def _mock_mpu(tp_size: int = 1, cp_size: int = 1, cp_rank: int = 0):
-    mock = MagicMock()
-    mock.get_tensor_model_parallel_world_size.return_value = tp_size
-    mock.get_context_parallel_world_size.return_value = cp_size
-    mock.get_context_parallel_rank.return_value = cp_rank
-    return mock
-
-
-def _get_align_size(tp_size: int, cp_size: int, fp8_enabled: bool = False) -> int:
-    return get_packed_seq_align_size(tp_size, cp_size, fp8_enabled=fp8_enabled)
-
-
-def _build_collator_layout(
-    sub_seq_token_lists: list[list[list[int]]],
-    *,
-    align_size: int,
-    pad_token_id: int = 0,
-):
-    """Construct the (sequences, attention_mask) tensor pair that the
-    controller-side collator produces for the given per-row sub-seq token
-    lists. Mirrors ``PackedDataCollator`` exactly:
-    write each sub-seq's tokens at ``row_offset``, advance row_offset by
-    ``_round_up(len(subseq), align_size)`` between sub-seqs in the same
-    row, and set ``attention_mask=1`` only at the valid (non-pad) slots.
-    """
-
-    def _round_up(x: int, m: int) -> int:
-        return ((x + m - 1) // m) * m
-
-    batch_size = len(sub_seq_token_lists)
-    sub_seq_lengths: list[list[int]] = [[len(s) for s in row] for row in sub_seq_token_lists]
-    bin_packed_lengths: list[int] = [sum(_round_up(s, align_size) for s in row) for row in sub_seq_lengths]
-    max_packed_len = max(bin_packed_lengths) if bin_packed_lengths else 0
-
-    sequences = torch.full((batch_size, max_packed_len), pad_token_id, dtype=torch.long)
-    attention_mask = torch.zeros((batch_size, max_packed_len), dtype=torch.bool)
-    for r, row in enumerate(sub_seq_token_lists):
-        row_offset = 0
-        for tokens in row:
-            s = len(tokens)
-            sequences[r, row_offset : row_offset + s] = torch.tensor(tokens)
-            attention_mask[r, row_offset : row_offset + s] = True
-            row_offset += _round_up(s, align_size)
-    return sequences, attention_mask, sub_seq_lengths
-
-
-class TestPreprocessPackedRows:
-    """Collator output -> preprocess layout checks."""
-
-    def test_mbs2_tp4_multisubseq_rows_pack_correctly(self):
-        """The exact configuration that would have caught both bugs.
-
-        - ``mbs = 2`` so the THD offset stride matters per micro-batch row.
-        - ``tp_size = 4`` so the TP-alignment padding inside rows kicks in.
-        - Multi-subseq rows ``[(7, 5)]`` and ``[(3, 11)]`` to expose offset
-          mismatches in both directions (none of the lengths are alignment
-          multiples, and row 1's first sub-seq is shorter than its second).
-        """
-        from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-            preprocess_packed_seqs,
+    @pytest.mark.parametrize("tp_size,cp_size", [(4, 1), (1, 2), (2, 2)])
+    def test_every_collated_sub_sequence_is_one_packed_segment(self, tp_size, cp_size):
+        # No length is an alignment multiple, so a misread offset shifts tokens across a segment seam.
+        lengths = [7, 5, 3, 11]
+        examples = [
+            {
+                "input_ids": list(range(100 * (k + 1), 100 * (k + 1) + n)),
+                "attention_mask": [1] * n,
+                "num_actions": n - 1,
+                "loss_mask": [1] * (n - 1),
+            }
+            for k, n in enumerate(lengths)
+        ]
+        collator = PackedDataCollator(
+            MagicMock(pad_token_id=0),
+            max_tokens_per_microbatch=16,
+            tp_size=tp_size,
+            pp_size=1,
+            cp_size=cp_size,
+            dp_size=1,
+            batch_size=len(examples),
+            micro_train_batch_size_per_gpu=1,
         )
+        batch = collator(examples, batch_size=len(examples))
+        sub_seq_lengths = [t.tolist() for t in batch["sub_seq_lengths"]]
+        assert max(len(row) for row in sub_seq_lengths) > 1
 
-        tp_size = 4
-        align_size = _get_align_size(tp_size, cp_size=1, fp8_enabled=True)
-        # Distinct unique tokens per sub-seq so we can spot off-by-one bugs.
-        row_0_sub_0 = [101, 102, 103, 104, 105, 106, 107]  # len 7
-        row_0_sub_1 = [201, 202, 203, 204, 205]  # len 5
-        row_1_sub_0 = [301, 302, 303]  # len 3
-        row_1_sub_1 = [401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411]  # len 11
+        layout = TokenLayout.build(
+            batch["attention_mask"], packed=True, tp_size=tp_size, cp_size=cp_size, sub_seq_lengths=sub_seq_lengths
+        ).full()
+        stream = layout.place(batch["sequences"], 0).squeeze(0)
+        cu = layout.cu_seqlens_padded.tolist()
+        segments = [stream[start:end] for start, end in zip(cu[:-1], cu[1:])]
 
-        sequences, attention_mask, sub_seq_lengths = _build_collator_layout(
-            [[row_0_sub_0, row_0_sub_1], [row_1_sub_0, row_1_sub_1]],
-            align_size=align_size,
-        )
-
-        # Sanity: collator layout matches what PackedDataCollator does.
-        assert sequences.shape == (2, 2 * align_size)
-        assert sequences[0, :7].tolist() == row_0_sub_0
-        assert sequences[0, 7:align_size].tolist() == [0] * (align_size - 7)
-        assert sequences[0, align_size : align_size + 5].tolist() == row_0_sub_1
-        assert sequences[1, :3].tolist() == row_1_sub_0
-        assert sequences[1, 3:align_size].tolist() == [0] * (align_size - 3)
-        assert sequences[1, align_size : align_size + 11].tolist() == row_1_sub_1
-        # attention_mask is True ONLY at valid slots (NOT at TP-alignment gaps).
-        assert attention_mask[0, 7:align_size].any().item() is False
-        assert attention_mask[0].sum().item() == 7 + 5
-        assert attention_mask[1].sum().item() == 3 + 11
-
-        # ------------------------------------------------------------------
-        # preprocess: pack the row tensors into a THD slab.
-        # ------------------------------------------------------------------
-        with patch(
-            "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu",
-            _mock_mpu(tp_size=tp_size, cp_size=1),
-        ):
-            packed, params = preprocess_packed_seqs(
-                sequences,
-                attention_mask,
-                pre_process=True,
-                sub_seq_lengths=sub_seq_lengths,
-                fp8_enabled=True,
-            )
-
-        # cu_seqlens_q (== cu_seqlens_q_padded for THD) enumerates 4 sub-seqs:
-        assert params.cu_seqlens_q.tolist() == [i * align_size for i in range(5)]
-        # Verify valid tokens are read from offsets produced by alignment padding.
-        assert packed.shape == (1, 4 * align_size)
-        assert packed[0, :7].tolist() == row_0_sub_0
-        assert packed[0, 7:align_size].tolist() == [0] * (align_size - 7)
-        assert packed[0, align_size : align_size + 5].tolist() == row_0_sub_1
-        assert packed[0, 2 * align_size : 2 * align_size + 3].tolist() == row_1_sub_0
-        assert packed[0, 3 * align_size : 3 * align_size + 11].tolist() == row_1_sub_1
-
-    def test_mbs2_tp1_singlesubseq_rows_match_legacy_preprocess_path(self):
-        """No regression in the legacy path: when each row has 1 sub-seq and tp_size=1."""
-        from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-            preprocess_packed_seqs,
-        )
-
-        sequences, attention_mask, sub_seq_lengths = _build_collator_layout(
-            [[[1, 2, 3, 4, 5]], [[10, 11, 12]]], align_size=_get_align_size(1, 1, fp8_enabled=True)
-        )
-
-        with patch(
-            "skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.mpu",
-            _mock_mpu(tp_size=1, cp_size=1),
-        ):
-            packed_multi, params_multi = preprocess_packed_seqs(
-                sequences,
-                attention_mask,
-                pre_process=True,
-                sub_seq_lengths=sub_seq_lengths,
-                fp8_enabled=True,
-            )
-            packed_legacy, params_legacy = preprocess_packed_seqs(
-                sequences, attention_mask, pre_process=True, fp8_enabled=True
-            )
-
-        assert torch.equal(packed_multi, packed_legacy)
-        assert torch.equal(params_multi.cu_seqlens_q, params_legacy.cu_seqlens_q)
+        # Each segment is one example's tokens, then only padding.
+        assert sorted(segment[segment != 0].tolist() for segment in segments) == [e["input_ids"] for e in examples]
+        for segment in segments:
+            assert not segment[int(segment.count_nonzero()) :].any()
 
     def test_mbs2_tp4_multisubseq_loss_mask_is_zero_at_alignment_pad(self):
         """The collator zeros ``loss_mask`` at every TP-alignment pad slot

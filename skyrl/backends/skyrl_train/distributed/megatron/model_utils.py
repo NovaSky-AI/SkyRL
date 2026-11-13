@@ -588,7 +588,7 @@ def _fused_lm_head_logprob_apply(
     else:
         logprobs = result
     if active_mask is not None:
-        active_mask = active_mask.to(device=logprobs.device, dtype=torch.bool)
+        active_mask = active_mask.to(torch.bool)
         logprobs = logprobs.masked_fill(~active_mask, 0.0)
     if not compute_entropy:
         return logprobs  # type: ignore[no-any-return]
@@ -689,14 +689,19 @@ def from_parallel_logits_to_logprobs_packed_sequences(
     chunk_size: Optional[int] = None,
     attention_mask: Optional[torch.Tensor] = None,
     sub_seq_lengths: Optional[list[list[int]]] = None,
+    targets_rolled: bool = False,
 ) -> torch.Tensor:
     """Get log probabilities from TP sharded vocab logits for packed sequences.
+
+    Every tensor argument is already on the logits' device; Megatron uploads them with the
+    microbatch.
 
     Args:
         vocab_parallel_logits (torch.Tensor): Packed logits tensor with shape [1, T // CP, vocab_size//TP]
             where T is the total number of tokens across all packed sequences.
         target (torch.Tensor): Packed target token indices with shape [1, T].
-            NOTE: Must be the unmodified targets as this function will shift them internally.
+            NOTE: Must be the unmodified targets as this function will shift them internally,
+            unless ``targets_rolled``.
         cu_seqlens (torch.Tensor): Cumulative sequence lengths tensor with shape [batch_size + 1].
             cu_seqlens[i] indicates the start position of sequence i in the packed format.
         unpacked_seqlen (int): The length of the unpacked sequence tensor.
@@ -711,6 +716,8 @@ def from_parallel_logits_to_logprobs_packed_sequences(
         sub_seq_lengths (list[list[int]], optional): Per-row sub-sequence lengths for controller-side sequence packing.
             When provided, ``cu_seqlens_padded`` is interpreted as one entry per sub-sequence, and output values are
             scattered back to the row offsets used by ``PackedDataCollator``.
+        targets_rolled (bool, optional): ``target`` is already this CP rank's ``[1, T // CP]`` next-token
+            targets, as built by :func:`packed_rolled_targets`.
 
     Returns:
         torch.Tensor: Unpacked log probabilities tensor with shape [batch_size, unpacked_seqlen-1].
@@ -725,23 +732,10 @@ def from_parallel_logits_to_logprobs_packed_sequences(
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
     cp_rank = 0 if cp_group is None else torch.distributed.get_rank(cp_group)
     if attention_mask is not None:
-        attention_mask = attention_mask.to(device=target.device, dtype=torch.bool)
+        attention_mask = attention_mask.to(torch.bool)
 
-    cu_seqlens_padded, _, seq_indices, seq_offsets, seq_lens_padded = _packed_sequence_indices(
-        cu_seqlens_padded, target.shape[0], target.device
-    )
-
-    next_offsets = torch.remainder(seq_offsets + 1, seq_lens_padded[seq_indices])
-    rolled_targets_full = target[cu_seqlens_padded[seq_indices] + next_offsets]
-    if cp_size > 1:
-        cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(
-            cu_seqlens_padded, seq_indices, seq_offsets, seq_lens_padded, cp_size
-        )
-        rolled_targets = torch.empty(target.shape[0] // cp_size, dtype=target.dtype, device=target.device)
-        current_rank_mask = cp_rank_for_token == cp_rank
-        rolled_targets[local_indices[current_rank_mask]] = rolled_targets_full[current_rank_mask]
-    else:
-        rolled_targets = rolled_targets_full
+    cu_seqlens_padded = cu_seqlens_padded.to(torch.long)
+    rolled_targets = target if targets_rolled else packed_rolled_targets(target, cu_seqlens_padded, cp_size, cp_rank)
 
     # Add batch dimension back for DistributedLogprob
     rolled_targets = rolled_targets.unsqueeze(0)
@@ -864,7 +858,7 @@ def from_parallel_hidden_to_logprobs(
         expected_shape = (target.shape[0], target.shape[1] - 1)
         if active_mask.shape != expected_shape:
             raise ValueError(f"Expected active_mask shape {expected_shape}, got {tuple(active_mask.shape)}")
-        active_mask = torch.nn.functional.pad(active_mask.to(device=target.device, dtype=torch.bool), (0, 1))
+        active_mask = torch.nn.functional.pad(active_mask.to(torch.bool), (0, 1))
 
     target = target.roll(shifts=-1, dims=-1)
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
@@ -976,6 +970,7 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     sub_seq_lengths: Optional[list[list[int]]] = None,
     temperature: float = 1.0,
     fused_backend: str = "torch",
+    targets_rolled: bool = False,
     active_mask: Optional[torch.Tensor] = None,
     return_entropy: bool = False,
     entropy_requires_grad: bool = False,
@@ -998,36 +993,21 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     if active_mask is not None:
         if active_mask.shape != target.shape:
             raise ValueError(f"Expected packed active_mask shape {tuple(target.shape)}, got {tuple(active_mask.shape)}")
-        active_mask = active_mask.to(device=target.device, dtype=torch.bool).squeeze(0)
+        active_mask = active_mask.to(torch.bool).squeeze(0)
     hidden = hidden.squeeze(0)
     target = target.squeeze(0)
 
     cp_size = 1 if cp_group is None else torch.distributed.get_world_size(cp_group)
     cp_rank = 0 if cp_group is None else torch.distributed.get_rank(cp_group)
     if attention_mask is not None:
-        attention_mask = attention_mask.to(device=target.device, dtype=torch.bool)
+        attention_mask = attention_mask.to(torch.bool)
 
-    cu_seqlens_padded, _, seq_indices, seq_offsets, seq_lens_padded = _packed_sequence_indices(
-        cu_seqlens_padded, target.shape[0], target.device
-    )
-
-    next_offsets = torch.remainder(seq_offsets + 1, seq_lens_padded[seq_indices])
-    rolled_targets_full = target[cu_seqlens_padded[seq_indices] + next_offsets]
-    if cp_size > 1:
-        cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(
-            cu_seqlens_padded, seq_indices, seq_offsets, seq_lens_padded, cp_size
-        )
-        rolled_targets = torch.empty(target.shape[0] // cp_size, dtype=target.dtype, device=target.device)
-        current_rank_mask = cp_rank_for_token == cp_rank
-        rolled_targets[local_indices[current_rank_mask]] = rolled_targets_full[current_rank_mask]
-    else:
-        rolled_targets = rolled_targets_full
+    cu_seqlens_padded = cu_seqlens_padded.to(torch.long)
+    rolled_targets = target if targets_rolled else packed_rolled_targets(target, cu_seqlens_padded, cp_size, cp_rank)
 
     if active_mask is not None:
-        if cp_size > 1:
-            local_active_mask = torch.zeros_like(rolled_targets, dtype=torch.bool)
-            local_active_mask[local_indices[current_rank_mask]] = active_mask[current_rank_mask]
-            active_mask = local_active_mask
+        if cp_size > 1 and not targets_rolled:
+            active_mask = packed_cp_local_values(active_mask, cu_seqlens_padded, cp_size, cp_rank)
         active_mask = active_mask.unsqueeze(0)
 
     # Add batch dimension back for the fused logprob op after CP-local scatters,
@@ -1102,6 +1082,38 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     return logprobs
 
 
+def packed_cp_local_values(
+    values: torch.Tensor, cu_seqlens_padded: torch.Tensor, cp_size: int, cp_rank: int
+) -> torch.Tensor:
+    """Select this CP rank's mirrored chunks from a full packed ``[T]`` tensor."""
+    if cp_size <= 1:
+        return values
+    cu_seqlens_padded, _, seq_indices, seq_offsets, seq_lens_padded = _packed_sequence_indices(
+        cu_seqlens_padded, values.shape[0], values.device
+    )
+    cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(
+        cu_seqlens_padded, seq_indices, seq_offsets, seq_lens_padded, cp_size
+    )
+    local = torch.empty(values.shape[0] // cp_size, dtype=values.dtype, device=values.device)
+    selected = cp_rank_for_token == cp_rank
+    local[local_indices[selected]] = values[selected]
+    return local
+
+
+def packed_rolled_targets(
+    target: torch.Tensor, cu_seqlens_padded: torch.Tensor, cp_size: int, cp_rank: int
+) -> torch.Tensor:
+    """Roll each packed segment one token ahead into next-token targets and select this CP rank's rows.
+    Offset ``o`` of a segment of padded length ``n`` gets the segment's token at ``(o + 1) % n``; the caller
+    masks the labels past a segment's last real token."""
+    cu_seqlens_padded, _, seq_indices, seq_offsets, seq_lens_padded = _packed_sequence_indices(
+        cu_seqlens_padded, target.shape[0], target.device
+    )
+    next_offsets = torch.remainder(seq_offsets + 1, seq_lens_padded[seq_indices])
+    rolled = target[cu_seqlens_padded[seq_indices] + next_offsets]
+    return packed_cp_local_values(rolled, cu_seqlens_padded, cp_size, cp_rank)
+
+
 def _packed_subseq_row_indices_offsets_and_lens(
     cu_seqlens_padded: torch.Tensor, sub_seq_lengths: list[list[int]], device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1139,7 +1151,7 @@ def _packed_subseq_row_indices_offsets_and_lens(
 def _packed_sequence_indices(
     cu_seqlens_padded: torch.Tensor, total_tokens: int, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    cu_seqlens_padded = cu_seqlens_padded.to(device=device, dtype=torch.long)
+    cu_seqlens_padded = cu_seqlens_padded.to(torch.long)
     token_indices = torch.arange(total_tokens, device=device)
     seq_indices = torch.searchsorted(cu_seqlens_padded[1:], token_indices, right=True)
     seq_offsets = token_indices - cu_seqlens_padded[seq_indices]
@@ -1239,15 +1251,15 @@ def vocab_parallel_entropy_packed_sequences(
     device = vocab_parallel_logits.device
     dtype = vocab_parallel_logits.dtype
 
-    attention_mask = attention_mask.to(device=device, dtype=torch.bool)
-    cu_seqlens_padded = cu_seqlens_padded.to(device=device, dtype=torch.long)
+    attention_mask = attention_mask.to(torch.bool)
+    cu_seqlens_padded = cu_seqlens_padded.to(torch.long)
     batch_size = attention_mask.shape[0]
 
     action_weights = torch.zeros((batch_size, unpacked_seqlen - 1), dtype=dtype, device=device)
     if loss_mask is None:
         action_weights[:, -num_actions:] = 1.0
     else:
-        action_weights[:, -num_actions:] = loss_mask.to(device=device, dtype=dtype)
+        action_weights[:, -num_actions:] = loss_mask.to(dtype)
 
     packed_weights = torch.zeros((int(cu_seqlens_padded[-1].item()),), dtype=dtype, device=device)
     if sub_seq_lengths is not None:

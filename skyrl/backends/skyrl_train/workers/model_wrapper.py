@@ -23,9 +23,7 @@ from transformers import (
     BitsAndBytesConfig,
 )
 
-from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
-    canonical_token_metadata_layout,
-)
+from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import TokenLayout
 from skyrl.backends.skyrl_train.distributed.ulysses.utils import (
     gather_outputs_and_unpad,
     ulysses_pad_and_slice_inputs,
@@ -69,7 +67,7 @@ class _SampleSupportChannels:
         loss_mask: torch.Tensor,
     ) -> "_SampleSupportChannels":
         """Place channels in canonical ``[batch, seq_len]`` positions."""
-        layout = canonical_token_metadata_layout(attention_mask)
+        layout = TokenLayout.build(attention_mask, packed=False, tp_size=1)
         target_loss_mask = torch.zeros_like(sequences, dtype=torch.bool)
         target_loss_mask[:, sequences.shape[1] - loss_mask.shape[1] :] = loss_mask.to(torch.bool)
         return cls(

@@ -62,6 +62,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     validate_fp8_exclude_modules_matched,
     validate_mxfp8_gdn_tp_alignment,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.rank_microbatch import (
+    HostMicrobatch,
+    LossTensors,
+)
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
 )
@@ -105,14 +109,8 @@ from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
 )
 from skyrl.backends.skyrl_train.training_batch import (
-    PACKED_BATCH_FIELD_TYPES,
-    REAL_SAMPLE_MASK,
-    TensorList,
     TrainingInputBatch,
     TrainingOutputBatch,
-    append_packed_field_padding,
-    append_tensor_list_padding,
-    packed_dummy_row_segments,
 )
 from skyrl.backends.skyrl_train.utils.lora_targets import (
     check_lora_group_flags,
@@ -120,11 +118,9 @@ from skyrl.backends.skyrl_train.utils.lora_targets import (
     megatron_all_linear_target_modules,
 )
 from skyrl.backends.skyrl_train.utils.loss_normalization import (
-    MINIBATCH_LOSS_NORMALIZATION,
     MinibatchLossNormalization,
 )
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
-from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.weight_sync import (
     LoraLoadRequest,
     get_transfer_strategy,
@@ -160,6 +156,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 from skyrl.env_vars import SKYRL_MEGATRON_RANDOM_INIT, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
 from skyrl.tinker import types
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
+from skyrl.train.dataset.replay_buffer import Experience
 from skyrl.train.utils.utils import update_model_config
 from skyrl.utils.tok import get_tokenizer
 
@@ -870,58 +867,28 @@ class MegatronWorker:
         else:
             microbatch_iterator = None
 
-        # Build micro-batch dicts expected by policy.forward_mini_batch
-        micro_dicts = []
-
         if microbatch_iterator is not None:
             micro_batches = microbatch_iterator
         else:
             micro_batches = data.chunk(self.cfg.micro_forward_batch_size_per_gpu)
-
-        for micro in micro_batches:
-            attention_mask = micro["attention_mask"]
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 0)
-            rollout_expert_indices = micro.get("rollout_expert_indices")
-
-            vlm_inputs = {}
-            if micro.get("pixel_values") is not None:
-                vlm_inputs["pixel_values"] = micro.get("pixel_values")
-            if micro.get("image_grid_thw") is not None:
-                vlm_inputs["image_grid_thw"] = micro.get("image_grid_thw")
-
-            micro_dicts.append(
-                {
-                    "sequences": micro["sequences"],
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids,
-                    "num_actions": micro.metadata["response_length"],
-                    "rollout_expert_indices": (rollout_expert_indices if self.enable_router_replay else None),
-                    "router_padding_mask": micro.get("router_padding_mask") if self.enable_router_replay else None,
-                    SAMPLE_SUPPORT_FIELD: (
-                        micro.get(SAMPLE_SUPPORT_FIELD) if self.enable_sample_support_replay else None
-                    ),
-                    # The support scorer validates loss-active targets against captured support.
-                    "loss_mask": micro.get("loss_mask") if self.enable_sample_support_replay else None,
-                    "sub_seq_lengths": micro.get("sub_seq_lengths"),
-                    **vlm_inputs,
-                }
-            )
+        host_microbatches = [
+            self._host_microbatch(BaseBatchIterator.batch_to_experience(micro), scores_only=True)
+            for micro in micro_batches
+        ]
 
         if use_token_batching:
             # Pad microbatches to uniform batch size for Megatron compatibility
-            max_micro_bsz = max(m["sequences"].shape[0] for m in micro_dicts) if micro_dicts else 1
-            for i, m in enumerate(micro_dicts):
-                micro_dicts[i] = self._pad_microbatch_to_size(m, max_micro_bsz)
+            max_micro_bsz = max(m.batch_size for m in host_microbatches) if host_microbatches else 1
+            host_microbatches = [m.padded(max_micro_bsz) for m in host_microbatches]
             mbs = max_micro_bsz
         else:
-            mbs = micro_dicts[0]["sequences"].shape[0] if micro_dicts else 1
+            mbs = host_microbatches[0].batch_size if host_microbatches else 1
 
         self.model.eval()
-        seq_len = micro_dicts[0]["sequences"].shape[1]
+        seq_len = host_microbatches[0].sequences.shape[1]
         with torch.no_grad():
             log_probs = self.model.forward(
-                micro_batches=micro_dicts,
+                micro_batches=host_microbatches,
                 seq_len=seq_len,
                 micro_batch_size=mbs,
                 temperature=self.cfg.algorithm.temperature,
@@ -935,7 +902,7 @@ class MegatronWorker:
             output.metadata = data.metadata
             # The output from Megatron is concatenated across microbatches.
             # We need to extract only the real (non-padded) samples and reorder.
-            output = self._reorder_megatron_forward_output(output, microbatch_iterator, micro_dicts, mbs)
+            output = self._reorder_megatron_forward_output(output, microbatch_iterator, mbs)
         else:
             output = TrainingOutputBatch({"output": log_probs})
             output.metadata = data.metadata
@@ -943,7 +910,7 @@ class MegatronWorker:
         return output["output"]
 
     def _reorder_megatron_forward_output(
-        self, output: TrainingOutputBatch, microbatch_iterator, micro_dicts, padded_mbs
+        self, output: TrainingOutputBatch, microbatch_iterator, padded_mbs
     ) -> TrainingOutputBatch:
         """Reorder forward output from token-based microbatching back to original sample order."""
         if not isinstance(microbatch_iterator, TokenBasedBatchIterator):
@@ -975,70 +942,53 @@ class MegatronWorker:
         result.metadata = output.metadata
         return result
 
-    def _pad_microbatch_to_size(self, micro_dict: dict, target_batch_size: int) -> dict:
-        """Pad a forward or forward_backward micro-batch dict to target_batch_size with dummy samples.
+    def _host_microbatch(
+        self,
+        experience: Experience,
+        loss_normalization: Optional[MinibatchLossNormalization] = None,
+        *,
+        scores_only: bool = False,
+    ) -> HostMicrobatch:
+        """The host microbatch of ``experience``'s rows, from which the model wrapper builds each rank's part.
 
-        Padded samples have loss_mask/response_mask=0 so they don't contribute to the loss
-        (forward micro-batches carry neither key, so this is inert there). This is needed
-        because Megatron's forward_backward_func requires uniform micro_batch_size across all
-        microbatches (especially with PP > 1). Scalar keys (``num_actions``
-        and ``num_microbatches``) are passed through unchanged.
-        Ragged per-sample fields carried as a ``TensorList`` (``sub_seq_lengths``,
-        ``pixel_values``, ``image_grid_thw``) grow by ``append_tensor_list_padding``.
-
-        Defined on the base worker so the shared ``_forward_logprobs`` path works for
-        policy, ref, and critic workers alike.
+        ``scores_only`` (a logprob forward) carries no loss input but the loss mask, and that only where
+        scoring reads it. Defined on the base worker, so policy, ref and critic workers share it.
         """
-        current_bsz = micro_dict["sequences"].shape[0]
-        if current_bsz >= target_batch_size:
-            return micro_dict
-
-        pad_count = target_batch_size - current_bsz
-        device = micro_dict["sequences"].device
-
-        padded = {}
-        for key, value in micro_dict.items():
-            if key in ("num_actions", "num_microbatches"):
-                padded[key] = value
-                continue
-            if value is None:
-                padded[key] = None
-                continue
-            if isinstance(value, PACKED_BATCH_FIELD_TYPES):
-                # Per-token fields cover the dummy attended token; response fields do not.
-                padded[key] = append_packed_field_padding(
-                    key, value, segment_lengths=packed_dummy_row_segments(key, pad_count)
-                )
-                continue
-            if isinstance(value, torch.Tensor):
-                if key in ("loss_mask", REAL_SAMPLE_MASK):
-                    # Pad with zeros so padded samples don't contribute to loss
-                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
-                elif key == "attention_mask":
-                    # Give each dummy row a single valid token, so the row is non-degenerate:
-                    # it avoids a fully-masked row (NaN in dense attention's softmax) and a
-                    # zero-length cu_seqlens segment (rejected by the packed/THD kernel).
-                    # The row is still excluded from the loss via loss_mask/response_mask=0.
-                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
-                    pad_tensor[:, 0] = 1
-                elif key == "position_ids":
-                    # position_ids for padded samples
-                    seq_len = value.shape[1]
-                    pad_tensor = torch.arange(seq_len, device=device).unsqueeze(0).expand(pad_count, -1)
-                elif key == "router_padding_mask":
-                    pad_tensor = torch.ones((pad_count, *value.shape[1:]), dtype=torch.bool, device=device)
-                elif key == "response_mask":
-                    # response_mask should be zeros for padded samples
-                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
-                else:
-                    pad_tensor = torch.zeros((pad_count, *value.shape[1:]), dtype=value.dtype, device=device)
-                padded[key] = torch.cat([value, pad_tensor], dim=0)
-            elif isinstance(value, TensorList):
-                padded[key] = append_tensor_list_padding(key, value, pad_count)
-            else:
-                padded[key] = value
-
-        return padded
+        attention_mask = experience.attention_mask
+        position_ids = attention_mask.long().cumsum(-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 0)
+        # Keep the compact rollout dtype (uint8/int16) while micro-batches stage on the
+        # host: build_rank_microbatch selects this rank's rows/slots, and the upload widens to int32.
+        routes = experience.rollout_expert_indices if self.enable_router_replay else None
+        if scores_only:
+            # Sample-support replay validates loss-active targets against the captured support.
+            loss = LossTensors(loss_mask=experience.loss_mask if self.enable_sample_support_replay else None)
+        else:
+            loss = LossTensors(
+                old_action_log_probs=experience.action_log_probs,
+                base_action_log_probs=experience.base_action_log_probs,
+                advantages=experience.advantages,
+                loss_mask=experience.loss_mask,
+                rollout_action_logprobs=experience.rollout_logprobs,
+                response_mask=experience.response_mask,
+                real_sample_mask=experience.real_sample_mask,
+                loss_normalization=loss_normalization,
+            )
+        return HostMicrobatch(
+            sequences=experience.sequences,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            num_actions=experience.num_actions,
+            # Global sequence packing's segments (None when token-based batching is active).
+            sub_seq_lengths=experience.sub_seq_lengths,
+            rollout_expert_indices=routes,
+            router_padding_mask=experience.router_padding_mask if self.enable_router_replay else None,
+            rollout_sample_support=experience.rollout_sample_support if self.enable_sample_support_replay else None,
+            pixel_values=experience.pixel_values,
+            image_grid_thw=experience.image_grid_thw,
+            is_padding_batch=bool(experience.metadata and experience.metadata.get("is_padding_batch", False)),
+            loss=loss,
+        )
 
     def save_hf_model(self, export_dir: str, tokenizer):
         sync_params_for_export(self.actor_module, getattr(self, "optimizer", None))
@@ -1318,54 +1268,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         loss_normalization = MinibatchLossNormalization.from_batch(
             data, dp_group=mpu.get_data_parallel_group(with_context_parallel=False)
         )
-
-        # Build micro-batch dicts expected by forward_backward_mini_batch
-        micro_buffer = []
-        for experience in BatchIterator(data, micro_batch_size, drop_last=False):
-            sequences = experience.sequences
-            attention_mask = experience.attention_mask
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 0)
-            rollout_expert_indices = experience.rollout_expert_indices
-
-            vlm_inputs = {}
-            if experience.pixel_values is not None:
-                vlm_inputs["pixel_values"] = experience.pixel_values
-            if experience.image_grid_thw is not None:
-                vlm_inputs["image_grid_thw"] = experience.image_grid_thw
-
-            micro_buffer.append(
-                {
-                    "sequences": sequences,
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids,
-                    "num_actions": experience.num_actions,
-                    "old_action_log_probs": experience.action_log_probs,
-                    REAL_SAMPLE_MASK: experience.real_sample_mask,
-                    MINIBATCH_LOSS_NORMALIZATION: loss_normalization,
-                    "base_action_log_probs": experience.base_action_log_probs,
-                    "advantages": experience.advantages,
-                    "loss_mask": experience.loss_mask,
-                    "rollout_action_logprobs": experience.rollout_logprobs,
-                    "response_mask": experience.response_mask,
-                    "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
-                    "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
-                    SAMPLE_SUPPORT_FIELD: (
-                        experience.rollout_sample_support if self.enable_sample_support_replay else None
-                    ),
-                    "sub_seq_lengths": experience.sub_seq_lengths,
-                    **vlm_inputs,
-                }
-            )
-
+        micro_buffer = [
+            self._host_microbatch(experience, loss_normalization)
+            for experience in BatchIterator(data, micro_batch_size, drop_last=False)
+        ]
         for m_batch in micro_buffer:
-            m_batch["num_microbatches"] = len(micro_buffer)
+            m_batch.loss.num_microbatches = len(micro_buffer)
 
         if not micro_buffer:
             return WorkerOutput()
 
-        seq_len = micro_buffer[0]["sequences"].shape[1]
-        micro_bsz = micro_buffer[0]["sequences"].shape[0]
+        seq_len = micro_buffer[0].sequences.shape[1]
+        micro_bsz = micro_buffer[0].batch_size
 
         with torch.no_grad():
             metrics_list = self.model.forward_backward_mini_batch(
@@ -1397,7 +1311,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
-    def _set_per_token_loss_counts(self, micro_buffer: List[dict]) -> None:
+    def _set_per_token_loss_counts(self, micro_buffer: List[HostMicrobatch]) -> None:
         """Attach token counts for Megatron's per-token loss normalization, if it is on."""
         if not getattr(get_model_config(self.actor_module[0]), "calculate_per_token_loss", False):
             return
@@ -1413,17 +1327,17 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         )
         local_counts = []
         for m_batch in micro_buffer:
-            if m_batch.get("sub_seq_lengths") is not None:
-                seqlens = [int(n) for row in m_batch["sub_seq_lengths"] for n in row.tolist()]
+            if m_batch.sub_seq_lengths is not None:
+                seqlens = [int(n) for row in m_batch.sub_seq_lengths for n in row.tolist()]
             else:
-                seqlens = m_batch["attention_mask"].sum(dim=-1).tolist()
+                seqlens = m_batch.attention_mask.sum(dim=-1).tolist()
             padded_total = sum(-(-int(n) // align) * align for n in seqlens)
             local_counts.append(padded_total // cp_size)
         total = torch.tensor(sum(local_counts), dtype=torch.int64, device=torch.cuda.current_device())
         torch.distributed.all_reduce(total, group=mpu.get_data_parallel_group(with_context_parallel=True))
         for m_batch, count in zip(micro_buffer, local_counts):
-            m_batch["num_tokens_local"] = count
-            m_batch["num_tokens_global"] = int(total.item())
+            m_batch.loss.num_tokens_local = count
+            m_batch.loss.num_tokens_global = int(total.item())
 
     @_counts_train_compute
     def forward_backward(
@@ -1478,70 +1392,31 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             )
 
         # Both iterator modes share the same batch-to-experience conversion.
-        micro_buffer = []
-
-        experiences = (BaseBatchIterator.batch_to_experience(mb) for mb in microbatch_iterator)
-
-        for experience in experiences:
-            attention_mask = experience.attention_mask
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 0)
-            rollout_expert_indices = experience.rollout_expert_indices
-
-            vlm_inputs = {}
-            if experience.pixel_values is not None:
-                vlm_inputs["pixel_values"] = experience.pixel_values
-            if experience.image_grid_thw is not None:
-                vlm_inputs["image_grid_thw"] = experience.image_grid_thw
-
-            micro_buffer.append(
-                {
-                    "sequences": experience.sequences,
-                    "attention_mask": attention_mask,
-                    "position_ids": position_ids,
-                    "num_actions": experience.num_actions,
-                    "old_action_log_probs": experience.action_log_probs,
-                    REAL_SAMPLE_MASK: experience.real_sample_mask,
-                    MINIBATCH_LOSS_NORMALIZATION: loss_normalization,
-                    "base_action_log_probs": experience.base_action_log_probs,
-                    "advantages": experience.advantages,
-                    "loss_mask": experience.loss_mask,
-                    "rollout_action_logprobs": experience.rollout_logprobs,
-                    "response_mask": experience.response_mask,
-                    "rollout_expert_indices": rollout_expert_indices if self.enable_router_replay else None,
-                    "router_padding_mask": experience.router_padding_mask if self.enable_router_replay else None,
-                    SAMPLE_SUPPORT_FIELD: (
-                        experience.rollout_sample_support if self.enable_sample_support_replay else None
-                    ),
-                    # used with global sequence packing (None when token-based batching is active)
-                    "sub_seq_lengths": experience.sub_seq_lengths,
-                    "is_padding_batch": (
-                        experience.metadata.get("is_padding_batch", False) if experience.metadata else False
-                    ),
-                    **vlm_inputs,
-                }
-            )
+        micro_buffer = [
+            self._host_microbatch(BaseBatchIterator.batch_to_experience(mb), loss_normalization)
+            for mb in microbatch_iterator
+        ]
 
         num_padding_microbatches = microbatch_iterator.num_padding_microbatches
         for m_batch in micro_buffer:
-            m_batch["num_microbatches"] = len(micro_buffer)
+            m_batch.loss.num_microbatches = len(micro_buffer)
 
         if not micro_buffer:
             # Still join the per-token count all-reduce so ranks with microbatches don't hang.
             self._set_per_token_loss_counts(micro_buffer)
             return WorkerOutput()
 
-        seq_len = micro_buffer[0]["sequences"].shape[1]
+        seq_len = micro_buffer[0].sequences.shape[1]
 
         if use_token_batching:
             # With token-based batching, microbatches may have different batch sizes.
             # Megatron's forward_backward_func requires uniform micro_batch_size,
             # so pad all microbatches to the max batch size across microbatches.
-            max_micro_bsz = max(m["sequences"].shape[0] for m in micro_buffer)
-            micro_buffer = [self._pad_microbatch_to_size(m, max_micro_bsz) for m in micro_buffer]
+            max_micro_bsz = max(m.batch_size for m in micro_buffer)
+            micro_buffer = [m.padded(max_micro_bsz) for m in micro_buffer]
             micro_bsz = max_micro_bsz
         else:
-            micro_bsz = micro_buffer[0]["sequences"].shape[0]
+            micro_bsz = micro_buffer[0].batch_size
 
         self._set_per_token_loss_counts(micro_buffer)
 
@@ -1552,7 +1427,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             and mpu.get_pipeline_model_parallel_rank() == 0
             and mpu.get_context_parallel_rank() == 0
         ):
-            real_tokens = int(sum(int(mb["attention_mask"].sum().item()) for mb in micro_buffer))
+            real_tokens = int(sum(int(mb.attention_mask.sum().item()) for mb in micro_buffer))
             num_microbatches = len(micro_buffer)
             dp_rank = mpu.get_data_parallel_rank()
             logger.info(
@@ -1585,7 +1460,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # ...) are meaningless and would drag down the mean-reduced metrics. Summed
             # metrics (e.g. policy_loss) are unaffected since padding contributes 0, but
             # excluding them here keeps both reductions correct.
-            if m_batch["is_padding_batch"]:
+            if m_batch.is_padding_batch:
                 continue
             for k, v in metrics.items():
                 all_metrics[k].append(v)

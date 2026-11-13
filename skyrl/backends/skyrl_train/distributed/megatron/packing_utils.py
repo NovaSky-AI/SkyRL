@@ -30,7 +30,7 @@ def _fp8_token_align(tp_size: int, cp_size: int, fp8_recipe: Any) -> int:
     # segment when tp>1) and 16-token local slabs at TP=1.
     #
     # An unresolved "auto" must never fall through to either branch. The
-    # controller's collator and the worker's preprocess_packed_seqs have to
+    # controller's collator and the worker's TokenLayout have to
     # derive the *same* align_size -- the collator advances
     # ``row_offset += round_up(length, align_size)`` between sub-sequences and
     # the worker re-derives those offsets to gather them back -- so any

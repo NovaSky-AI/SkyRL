@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
-    TokenMetadataLayout,
+    TokenLayout,
 )
 from skyrl.backends.skyrl_train.utils import sample_support_replay
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
@@ -34,10 +34,11 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
 )
 from skyrl.backends.skyrl_train.utils.sample_support_replay import (
     SampleSupportScores,
-    compute_sample_support_scores,
+    prepare_sample_support_inputs,
     reject_unsupported_sample_support_packing,
     sample_support_scores,
     score_centering_loss_inputs,
+    score_prepared_sample_support,
 )
 from skyrl.train.config import AlgorithmConfig, CISPOConfig, DPPOConfig
 from tests.backends.skyrl_train.sample_support_helpers import ragged_support
@@ -445,22 +446,8 @@ def _attention_mask(lengths: List[Tuple[int, int]]) -> torch.Tensor:
     return mask
 
 
-def _layout(lengths: List[Tuple[int, int]], *, packed: bool = False) -> TokenMetadataLayout:
-    mask = _attention_mask(lengths)
-    totals = [prompt + response for prompt, response in lengths]
-    if not packed:
-        return TokenMetadataLayout(
-            attention_mask=mask,
-            sequence_lengths=totals,
-            aligned_sequence_length=max(totals),
-        )
-    return TokenMetadataLayout(
-        attention_mask=mask,
-        sequence_lengths=totals,
-        aligned_sequence_length=sum(totals),
-        padded_sequence_lengths=totals,
-        cu_seqlens_padded=cu_seqlens_from_lengths(totals),
-    )
+def _layout(lengths: List[Tuple[int, int]], *, packed: bool = False) -> TokenLayout:
+    return TokenLayout.build(_attention_mask(lengths), packed=packed, tp_size=1)
 
 
 def _support(lengths: List[Tuple[int, int]]) -> PackedTensor:
@@ -511,16 +498,10 @@ def _scores(lengths, *, packed=False, support=None, **overrides):
     if packed:
         logits = torch.cat([logits[row, mask[row]] for row in range(logits.shape[0])], dim=0).unsqueeze(0)
     field = _support(lengths) if support is None else support
-    return compute_sample_support_scores(
-        logits,
-        sequences,
-        loss_mask,
-        ragged_support(field),
-        num_actions,
-        packed=packed,
-        metadata_layout=_layout(lengths, packed=packed),
-        **DENSE_SCORER_KWARGS,
+    prepared = prepare_sample_support_inputs(
+        sequences, loss_mask, ragged_support(field), num_actions, _layout(lengths, packed=packed)
     )
+    return score_prepared_sample_support(logits, prepared, **DENSE_SCORER_KWARGS)
 
 
 def test_row_id_join_scores_the_response_suffix_domain():
@@ -561,43 +542,16 @@ def test_multiple_loss_active_tokens_without_support_are_rejected():
 
 def test_replay_requires_support_a_loss_mask_and_a_layout():
     lengths = [(3, 3)]
-    sequences, _, loss_mask, num_actions, logits = _batch_tensors(lengths)
+    sequences, _, loss_mask, num_actions, _ = _batch_tensors(lengths)
 
     with pytest.raises(ValueError) as missing_support:
-        compute_sample_support_scores(
-            logits,
-            sequences,
-            loss_mask,
-            None,
-            num_actions,
-            packed=False,
-            metadata_layout=_layout(lengths),
-            **DENSE_SCORER_KWARGS,
-        )
+        prepare_sample_support_inputs(sequences, loss_mask, None, num_actions, _layout(lengths))
     assert "generator.inference_engine.enable_return_sample_support_set" in str(missing_support.value)
     assert "SkyRLGymGenerator" in str(missing_support.value)
     with pytest.raises(ValueError, match="response loss mask"):
-        compute_sample_support_scores(
-            logits,
-            sequences,
-            None,
-            ragged_support(_support(lengths)),
-            num_actions,
-            packed=False,
-            metadata_layout=_layout(lengths),
-            **DENSE_SCORER_KWARGS,
-        )
-    with pytest.raises(ValueError, match="token metadata layout"):
-        compute_sample_support_scores(
-            logits,
-            sequences,
-            loss_mask,
-            ragged_support(_support(lengths)),
-            num_actions,
-            packed=False,
-            metadata_layout=None,
-            **DENSE_SCORER_KWARGS,
-        )
+        prepare_sample_support_inputs(sequences, None, ragged_support(_support(lengths)), num_actions, _layout(lengths))
+    with pytest.raises(ValueError, match="token layout"):
+        prepare_sample_support_inputs(sequences, loss_mask, ragged_support(_support(lengths)), num_actions, None)
 
 
 # Include empty, singleton, partially filled, and full rows.
@@ -643,16 +597,10 @@ def _sized_scores(lengths, member_counts, *, packed=False, **overrides):
     support, sequences, mask, loss_mask, num_actions, logits = _sized_batch(lengths, member_counts)
     if packed:
         logits = torch.cat([logits[row, mask[row]] for row in range(logits.shape[0])], dim=0).unsqueeze(0)
-    return compute_sample_support_scores(
-        logits,
-        sequences,
-        loss_mask,
-        ragged_support(support),
-        num_actions,
-        packed=packed,
-        metadata_layout=_layout(lengths, packed=packed),
-        **{**DENSE_SCORER_KWARGS, **overrides},
+    prepared = prepare_sample_support_inputs(
+        sequences, loss_mask, ragged_support(support), num_actions, _layout(lengths, packed=packed)
     )
+    return score_prepared_sample_support(logits, prepared, **{**DENSE_SCORER_KWARGS, **overrides})
 
 
 @pytest.mark.parametrize("packed", [False, True])
@@ -668,19 +616,11 @@ def test_csr_scores_logprobs_entropy_and_masks(megatron_parallel_state, packed):
 def test_csr_scores_have_gradients():
     support, sequences, _, loss_mask, num_actions, logits = _sized_batch(RAGGED_LENGTHS, RAGGED_MEMBER_COUNTS)
     source = logits.detach().clone().requires_grad_(True)
-    scores = compute_sample_support_scores(
-        source,
-        sequences,
-        loss_mask,
-        ragged_support(support),
-        num_actions,
-        packed=False,
-        metadata_layout=_layout(RAGGED_LENGTHS),
-        **{
-            **DENSE_SCORER_KWARGS,
-            "compute_entropy": True,
-            "entropy_requires_grad": True,
-        },
+    prepared = prepare_sample_support_inputs(
+        sequences, loss_mask, ragged_support(support), num_actions, _layout(RAGGED_LENGTHS)
+    )
+    scores = score_prepared_sample_support(
+        source, prepared, **DENSE_SCORER_KWARGS, compute_entropy=True, entropy_requires_grad=True
     )
     assert scores.entropy is not None
     (scores.logprobs + scores.entropy).sum().backward()
@@ -712,17 +652,11 @@ def test_loss_active_empty_rows_are_rejected(member_counts):
     lengths = [(3, 3)]
     support, sequences, _, loss_mask, num_actions, logits = _sized_batch(lengths, member_counts)
     loss_mask[:] = True
+    prepared = prepare_sample_support_inputs(
+        sequences, loss_mask, ragged_support(support), num_actions, _layout(lengths)
+    )
     with pytest.raises(ValueError, match="every loss-active token"):
-        compute_sample_support_scores(
-            logits,
-            sequences,
-            loss_mask,
-            ragged_support(support),
-            num_actions,
-            packed=False,
-            metadata_layout=_layout(lengths),
-            **DENSE_SCORER_KWARGS,
-        )
+        score_prepared_sample_support(logits, prepared, **DENSE_SCORER_KWARGS)
 
 
 def test_an_all_padding_microbatch_scores_nothing_in_the_ragged_form():
@@ -734,15 +668,15 @@ def test_an_all_padding_microbatch_scores_nothing_in_the_ragged_form():
     mask = torch.zeros((1, 4), dtype=torch.bool)
     mask[0, 0] = True
 
-    scores = compute_sample_support_scores(
-        torch.randn((1, 4, VOCAB), dtype=torch.float64),
+    prepared = prepare_sample_support_inputs(
         torch.zeros((1, 4), dtype=torch.long),
         torch.zeros((1, 2), dtype=torch.bool),
         support,
         2,
-        packed=False,
-        metadata_layout=TokenMetadataLayout(attention_mask=mask, sequence_lengths=[1], aligned_sequence_length=4),
-        **DENSE_SCORER_KWARGS,
+        TokenLayout.build(mask, packed=False, tp_size=1),
+    )
+    scores = score_prepared_sample_support(
+        torch.randn((1, 4, VOCAB), dtype=torch.float64), prepared, **DENSE_SCORER_KWARGS
     )
 
     assert not scores.valid_mask.any()
@@ -1232,17 +1166,14 @@ def _centering_scores(lengths, *, packed):
     field = _support(lengths)
     grids = [field.segment(index).numpy() for index in range(len(field))]
     member_logprobs = [-0.5 - 0.1 * np.arange(grid.size, dtype=np.float32).reshape(grid.shape) for grid in grids]
-    return compute_sample_support_scores(
-        logits,
+    prepared = prepare_sample_support_inputs(
         sequences,
         loss_mask,
         ragged_support(grids, logprobs=member_logprobs),
         num_actions,
-        packed=packed,
-        metadata_layout=_layout(lengths, packed=packed),
-        **DENSE_SCORER_KWARGS,
-        centering_weight=SC_BAND,
+        _layout(lengths, packed=packed),
     )
+    return score_prepared_sample_support(logits, prepared, **DENSE_SCORER_KWARGS, centering_weight=SC_BAND)
 
 
 def test_packed_and_unpacked_centering_land_in_the_same_canonical_positions(
