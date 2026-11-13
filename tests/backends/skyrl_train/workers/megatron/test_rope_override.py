@@ -87,15 +87,20 @@ def test_rope_override_reaches_the_provider_or_raises(tmp_path, make_config, ove
             check_rope_override(provider, override, bridge_name)
 
 
+def _bridge_with_top_level_rope_theta(tmp_path):
+    bridge = _bridge(_qwen2(), tmp_path)
+    # On the loaded config: transformers v5 folds a saved top-level rope_theta into rope_parameters on load.
+    bridge.hf_pretrained.config.rope_theta = 10_000.0
+    return bridge
+
+
 def test_theta_written_only_into_rope_parameters_loses_to_a_top_level_rope_theta(tmp_path):
-    # A top-level rope_theta (remote-code configs keep one) beats a theta written only into rope_parameters.
-    config = _qwen2()
-    config.rope_theta = 10_000.0
-    bridge = _bridge(config, tmp_path)
+    # A top-level rope_theta attribute (remote-code configs keep one) beats a theta written only into rope_parameters.
+    bridge = _bridge_with_top_level_rope_theta(tmp_path)
     bridge.hf_pretrained.config.rope_parameters = dict(YARN)
     with pytest.raises(ValueError, match="Qwen2Bridge does not translate it"):
         check_rope_override(bridge.to_megatron_provider(load_weights=False), YARN, "Qwen2Bridge")
 
-    bridge = _bridge(config, tmp_path)
+    bridge = _bridge_with_top_level_rope_theta(tmp_path)
     apply_rope_override(bridge, YARN)
     check_rope_override(bridge.to_megatron_provider(load_weights=False), YARN, "Qwen2Bridge")
