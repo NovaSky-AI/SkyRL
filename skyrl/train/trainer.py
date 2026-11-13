@@ -27,7 +27,6 @@ from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
 from skyrl.backends.skyrl_train.training_batch import (
-    TensorList,
     TrainingInputBatch,
     pad_training_input_batch,
 )
@@ -57,10 +56,10 @@ from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
 from skyrl.train.dataset.preprocess import (
+    RowCollation,
     compute_prompt_boundaries,
     compute_prompt_mini_batch_boundaries,
-    convert_prompts_responses_to_batch_tensors,
-    make_router_padding_mask,
+    rows_to_training_input,
 )
 from skyrl.train.evaluate import evaluate
 from skyrl.train.generators.base import (
@@ -942,6 +941,17 @@ class RayPPOTrainer:
         self.dispatch.init_weight_sync_state(self.inference_engine_client)
         logger.info("Initialized weight sync state for policy model and inference engines.")
 
+    def _row_collation(self) -> RowCollation:
+        """How generated rows become a padded training batch."""
+        algorithm = self.cfg.trainer.algorithm
+        off_policy_correction = algorithm.off_policy_correction
+        return RowCollation(
+            pad_token_id=self.tokenizer.pad_token_id,
+            max_seq_len=algorithm.max_seq_len,
+            require_rollout_logprobs=off_policy_correction.tis_ratio_type is not None
+            or off_policy_correction.sequence_mask_metric is not None,
+        )
+
     def convert_to_training_input(self, generator_output: GeneratorOutput, uids: List[str]) -> TrainingInputBatch:
         """Converts lists to a padded batch of tensors for training
 
@@ -953,83 +963,9 @@ class RayPPOTrainer:
             training_input (TrainingInputBatch): Padded batch of tensors for training. It preserves the
                 order of `generator_output` and hence `uids`.
         """
-        # 1. Extract generator output fields.
-        prompt_ids: List[List[int]] = generator_output["prompt_token_ids"]
-        response_ids: List[List[int]] = generator_output["response_ids"]
-        rewards: List[List[float]] = generator_output["rewards"]
-        loss_masks: List[List[int]] = generator_output["loss_masks"]
-
-        logprobs: Optional[List[List[float]]] = generator_output.get("rollout_logprobs", None)
-        rollout_expert_indices = generator_output.get("rollout_expert_indices", None)
-        rollout_sample_support = generator_output.get("rollout_sample_support", None)
-
-        pixel_values = generator_output.get("pixel_values", None)
-        image_grid_thw = generator_output.get("image_grid_thw", None)
-        if pixel_values is not None:
-            assert (
-                pixel_values is not None and image_grid_thw is not None
-            ), "Both pixel_values and image_grid_thw must exist for multi-modal inputs"
-            assert len(pixel_values) == len(
-                image_grid_thw
-            ), "Number of pixel values should match number of image grid thw"
-            pixel_values = TensorList(pixel_values)
-            image_grid_thw = TensorList(image_grid_thw)
-
-        # 2. Convert to tensors.
-        (
-            sequences_tensor,
-            attention_masks_tensor,
-            response_masks_tensor,
-            rewards_tensor,
-            loss_masks_tensor,
-            rollout_logprobs_tensor,
-            rollout_expert_indices_tensor,
-            rollout_sample_support_tensor,
-        ) = convert_prompts_responses_to_batch_tensors(
-            self.tokenizer.pad_token_id,
-            prompt_ids,
-            response_ids,
-            rewards,
-            loss_masks,
-            logprobs,
-            rollout_expert_indices,
-            rollout_sample_support,
-            max_seq_len=self.cfg.trainer.algorithm.max_seq_len,
-        )
-        router_padding_mask = None
-        if rollout_expert_indices is not None:
-            router_padding_mask = make_router_padding_mask(
-                attention_masks_tensor,
-                [len(indices) for indices in rollout_expert_indices],
-            )
-
-        # sanity check for off_policy_correction
-        off_policy_correction = self.cfg.trainer.algorithm.off_policy_correction
-        tis_ratio_type = off_policy_correction.tis_ratio_type
-        sequence_mask_metric = off_policy_correction.sequence_mask_metric
-        if tis_ratio_type is not None or sequence_mask_metric is not None:
-            assert (
-                rollout_logprobs_tensor is not None
-            ), "expected non-null rollout logprobs tensor when off_policy_correction is enabled"
-            assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
-
-        # 3. Create training input batch.
-        training_input = TrainingInputBatch(
-            {
-                "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
-                "attention_mask": attention_masks_tensor,
-                "response_mask": response_masks_tensor,
-                "rewards": rewards_tensor,
-                "loss_mask": loss_masks_tensor,
-                "rollout_logprobs": rollout_logprobs_tensor,
-                "rollout_expert_indices": rollout_expert_indices_tensor,
-                "router_padding_mask": router_padding_mask,
-                SAMPLE_SUPPORT_FIELD: rollout_sample_support_tensor,
-                "pixel_values": pixel_values,
-                "image_grid_thw": image_grid_thw,
-            },
-        )
-        training_input.metadata = {"uids": uids}
+        # 1-3. Collate the rows into a padded batch.
+        training_input = rows_to_training_input(generator_output, self._row_collation())
+        training_input.metadata["uids"] = uids
         if generator_output.get("is_last_step", None) is not None:
             training_input.metadata["is_last_step"] = generator_output["is_last_step"]
 
@@ -1050,14 +986,16 @@ class RayPPOTrainer:
             )
 
         # 5. Record metadata and metrics.
-        training_input.metadata["response_length"] = response_masks_tensor.shape[1]
-        batch_num_seq, batch_padded_seq_len = sequences_tensor.shape
+        training_input.metadata["response_length"] = training_input["response_mask"].shape[1]
+        batch_num_seq, batch_padded_seq_len = training_input["sequences"].shape
         logger.info(f"batch_num_seq: {batch_num_seq}, batch_padded_seq_len: {batch_padded_seq_len}")
         batch_metrics = {
             "generate/batch_num_seq": batch_num_seq,
             "generate/batch_padded_seq_len": batch_padded_seq_len,
         }
         # Add metrics for sample support replay if enabled
+        rollout_sample_support_tensor = training_input[SAMPLE_SUPPORT_FIELD]
+        rollout_sample_support = generator_output.get(SAMPLE_SUPPORT_FIELD)
         if rollout_sample_support_tensor is not None:
             # Rows without captured support (padding, masked tokens) are excluded.
             support_sizes = rollout_sample_support_tensor.row_lengths
@@ -1072,6 +1010,7 @@ class RayPPOTrainer:
                     }
                 )
         self.all_metrics.update(batch_metrics)
+        response_ids = generator_output["response_ids"]
         training_input.metadata["avg_response_length"] = sum(
             len(sample_response_ids) for sample_response_ids in response_ids
         ) / len(response_ids)
