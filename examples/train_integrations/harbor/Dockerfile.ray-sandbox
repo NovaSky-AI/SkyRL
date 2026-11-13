@@ -141,7 +141,7 @@ RUN curl -fsSL https://claude.ai/install.sh | bash && sudo apt-get update && sud
 ENV CLAUDE_CONFIG_DIR=/home/ray/default/.claude-home
 
 # ---------- Ray Sandboxes ----------
-ARG GVISOR_VERSION=20260921.0
+ARG GVISOR_VERSION=20261019.0
 ARG SLIRP4NETNS_VERSION=1.3.5
 ARG EROFS_UTILS_VERSION=1.9.4
 
@@ -153,10 +153,12 @@ RUN sudo wget -qO- "https://storage.googleapis.com/gvisor/releases/release/${GVI
         "https://github.com/rootless-containers/slirp4netns/releases/download/v${SLIRP4NETNS_VERSION}/slirp4netns-$(uname -m)" \
     && sudo chmod a+rx /usr/local/bin/slirp4netns
 
-# erofs-utils from source: Ubuntu 22.04's package (1.4) is too old.
+# erofs-utils from source: Ubuntu 22.04's package (1.4) is too old. Ray sets up
+# network="public" sandboxes with nft (nftables) plus util-linux's nsenter and
+# setpriv, and checks for all three.
 RUN sudo apt-get update \
     && sudo apt-get install -y --no-install-recommends autoconf automake bzip2 libtool \
-        liblz4-dev pkg-config uuid-dev \
+        liblz4-dev pkg-config uuid-dev nftables util-linux \
     && wget -qO- "https://github.com/erofs/erofs-utils/archive/refs/tags/v${EROFS_UTILS_VERSION}.tar.gz" \
         | tar -xz -C /tmp \
     && cd "/tmp/erofs-utils-${EROFS_UTILS_VERSION}" \
@@ -172,14 +174,14 @@ ENV ANYSCALE_DISABLE_OPTIMIZED_RAY=1
 # Must be the same commit as the ray override in SkyRL's pyproject.toml: every
 # nightly reports version 3.0.0.dev0, so Ray will not catch a commit mismatch
 # between the cluster and the job's uv environment.
-ARG RAY_COMMIT=a1a2cc64ee092f63495c382b1ab35aa1d9abd131
+ARG RAY_COMMIT=78e4b1f71314fa46ca9bd2907d6aab4ec536909c
 # --no-deps: the nightly base already has Ray's deps; force-reinstalling them could
 # move packages the torch stack above depends on.
 RUN pip uninstall -y ray && pip install --force-reinstall --no-deps --no-cache-dir \
     "https://s3-us-west-2.amazonaws.com/ray-wheels/master/${RAY_COMMIT}/ray-3.0.0.dev0-cp312-cp312-manylinux2014_$(uname -m).whl"
 
 # Fail the build, not the first sandbox, if a tool is missing or a shared lib is absent.
-RUN runsc --version && mkfs.erofs --version && slirp4netns --version \
+RUN runsc --version && mkfs.erofs --version && slirp4netns --version && nft --version \
     && python -c "import ray, ray.experimental.sandbox; assert ray.__commit__ == '${RAY_COMMIT}', ray.__commit__"
 
 # ---------- Warm SkyRL's uv cache ----------

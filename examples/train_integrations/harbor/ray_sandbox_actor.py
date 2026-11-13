@@ -57,9 +57,23 @@ def _ensure_tun() -> None:
 
 @ray.remote
 class HarborSandbox:
-    def __init__(self, image: str, network: str = "none", **create_kwargs):
+    def __init__(
+        self,
+        image: str,
+        network: str = "none",
+        enforce_limits: Optional[bool] = None,
+        **create_kwargs,
+    ):
         if network == "public":
             _ensure_tun()
+        if enforce_limits is False or (
+            enforce_limits is None and not os.environ.get("RAY_SANDBOX_CGROUP_PATH")
+        ):
+            # Ray enforces cpu and memory through a cgroup v2 subtree that the node
+            # delegates to it (RAY_SANDBOX_CGROUP_PATH), and refuses them on a node
+            # without one. The actor's reservation still applies either way.
+            create_kwargs.pop("cpu", None)
+            create_kwargs.pop("memory", None)
         self._runtime = SandboxRuntime()
         self._id = self._runtime.create(image=image, network=network, **create_kwargs)
 

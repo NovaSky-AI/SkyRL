@@ -1,13 +1,14 @@
 """Smoke test for RaySandboxEnvironment without training.
 
 Starts one sandbox the way a Harbor trial would, then runs a command, a timeout,
-and a file round trip.
+two commands at once, and a file round trip.
 
     uv run --isolated --extra fsdp -m examples.train_integrations.harbor.smoke_ray_sandbox_env
 """
 
 import asyncio
 import tempfile
+import time
 from pathlib import Path
 
 import ray
@@ -35,6 +36,12 @@ async def main():
 
         r = await env.exec("sleep 10", timeout_sec=1)
         assert r.return_code == 124, r
+
+        # The actor runs calls concurrently, so two 2 s commands take ~2 s.
+        start = time.monotonic()
+        results = await asyncio.gather(env.exec("sleep 2"), env.exec("sleep 2"))
+        assert all(r.return_code == 0 for r in results), results
+        assert time.monotonic() - start < 3.5, time.monotonic() - start
 
         src = tmp / "src"
         (src / "sub").mkdir(parents=True)

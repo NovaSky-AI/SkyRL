@@ -216,6 +216,10 @@ miniswe = [
 ]
 harbor = [
     "harbor[daytona,modal]",
+    # The Ray sandbox environment reads the task Dockerfile's WORKDIR with
+    # Harbor's parse_dockerfile_workdir, which imports dockerfile_parse; only
+    # Harbor's e2b, islo, runloop and novita extras install it.
+    "dockerfile-parse>=2.0.1",
 ]
 # skycap, capturing each rollout's exact tokens in token mode (examples/train_integrations/harbor_skycap).
 skycap = [
@@ -292,16 +296,16 @@ no-build-isolation-package = [
 # override unnecessary dependencies and pin versions to override Megatron-Bridge
 # unpinned dependencies.
 override-dependencies = [
-    # Ray nightly (master @ a1a2cc64ee) for ray.experimental.sandbox fixes newer than
+    # Ray nightly (master @ 78e4b1f713) for ray.experimental.sandbox fixes newer than
     # 2.59.0. Pinned to one commit's wheels: the cluster image must run the same
     # commit, since every nightly reports version 3.0.0.dev0. No macOS nightlies.
     "ray[default]==2.59.0; sys_platform == 'darwin'",
-    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp312-cp312-manylinux2014_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
-    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp312-cp312-manylinux2014_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
-    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp313-cp313-manylinux2014_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'",
-    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp313-cp313-manylinux2014_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'",
-    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp314-cp314-manylinux2014_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'",
-    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/a1a2cc64ee092f63495c382b1ab35aa1d9abd131/ray-3.0.0.dev0-cp314-cp314-manylinux2014_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/78e4b1f71314fa46ca9bd2907d6aab4ec536909c/ray-3.0.0.dev0-cp312-cp312-manylinux2014_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.12'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/78e4b1f71314fa46ca9bd2907d6aab4ec536909c/ray-3.0.0.dev0-cp312-cp312-manylinux2014_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.12'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/78e4b1f71314fa46ca9bd2907d6aab4ec536909c/ray-3.0.0.dev0-cp313-cp313-manylinux2014_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.13'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/78e4b1f71314fa46ca9bd2907d6aab4ec536909c/ray-3.0.0.dev0-cp313-cp313-manylinux2014_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.13'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/78e4b1f71314fa46ca9bd2907d6aab4ec536909c/ray-3.0.0.dev0-cp314-cp314-manylinux2014_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.14'",
+    "ray[default] @ https://s3-us-west-2.amazonaws.com/ray-wheels/master/78e4b1f71314fa46ca9bd2907d6aab4ec536909c/ray-3.0.0.dev0-cp314-cp314-manylinux2014_aarch64.whl ; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version == '3.14'",
     "transformer-engine[pytorch]==2.19.0; sys_platform == 'linux'",
     "transformers>=5.6.1,<=5.16.1; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",

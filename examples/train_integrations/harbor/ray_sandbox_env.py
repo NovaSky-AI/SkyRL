@@ -49,9 +49,12 @@ class RaySandboxEnvironment(BaseEnvironment):
         *args,
         image: str | None = None,
         resources: dict[str, float] | None = None,
-        ttl_seconds: int | None = 3600,
+        ttl_seconds: int | None = 86400,
         shell: str | None = None,
         network: str | None = None,
+        max_concurrency: int = 8,
+        enforce_limits: bool | None = None,
+        cidr_allowlist: list[str] | None = None,
         **kwargs: Any,
     ):
         """
@@ -61,11 +64,26 @@ class RaySandboxEnvironment(BaseEnvironment):
             resources: Extra Ray resources for the sandbox actor, e.g.
                 ``{"sandbox": 0.001}`` to pin sandboxes to nodes labelled with
                 a custom ``sandbox`` resource (and keep them off GPU nodes).
-            ttl_seconds: Wall-clock safety net in case ``stop`` never runs.
+            ttl_seconds: Wall-clock safety net in case ``stop`` never runs. It
+                must outlast the agent and verifier timeouts, which reach 5400 s
+                for SWE-bench tasks. The sandbox also stops when its actor dies.
             shell: Shell for string commands (Ray's default is /bin/bash).
             network: Ray network mode for every trial, e.g. "none" to cut
                 network even for tasks that allow it. Defaults to "none" for
                 no-network tasks and "public" otherwise.
+            max_concurrency: Calls the sandbox actor runs at once, so a
+                long command doesn't hold up the agent's other commands and
+                file transfers.
+            enforce_limits: Whether the task's cpu and memory also become the
+                sandbox's cgroup limits. None (the default) enforces them on
+                nodes that delegate a cgroup v2 subtree to Ray (set
+                ``RAY_SANDBOX_CGROUP_PATH``) and only reserves them elsewhere;
+                True fails a trial on a node without one.
+            cidr_allowlist: Egress allowlist for "public" sandboxes. None
+                (the default) is Ray's: the public internet only. To also
+                reach a host inside the cluster, such as a model server an
+                agent in the sandbox calls, list it with the internet, e.g.
+                ``["internet", "10.0.12.34/32"]``.
         """
         # Drop provider kwargs from other backends' configs (e.g. Daytona's
         # auto_stop_interval_mins) so the same YAML can be reused.
@@ -78,9 +96,10 @@ class RaySandboxEnvironment(BaseEnvironment):
         self._ttl_seconds = ttl_seconds
         self._shell = shell
         self._network = network
-        self._dockerfile_workdir = parse_dockerfile_workdir(
-            self.environment_dir / "Dockerfile"
-        )
+        self._max_concurrency = max_concurrency
+        self._enforce_limits = enforce_limits
+        self._cidr_allowlist = cidr_allowlist
+        self._dockerfile_workdir = parse_dockerfile_workdir(self.environment_dir / "Dockerfile")
         self._sb = None
 
     @staticmethod
@@ -89,10 +108,9 @@ class RaySandboxEnvironment(BaseEnvironment):
 
     @classmethod
     def resource_capabilities(cls) -> EnvironmentResourceCapabilities:
-        # cpu/memory become both a Ray reservation and a cgroup limit.
-        return EnvironmentResourceCapabilities(
-            cpu_limit=True, cpu_request=True, memory_limit=True, memory_request=True
-        )
+        # cpu/memory become a Ray reservation, and a cgroup limit on nodes that
+        # delegate one to Ray.
+        return EnvironmentResourceCapabilities(cpu_limit=True, cpu_request=True, memory_limit=True, memory_request=True)
 
     @property
     def capabilities(self) -> EnvironmentCapabilities:
@@ -117,16 +135,25 @@ class RaySandboxEnvironment(BaseEnvironment):
     async def start(self, force_build: bool) -> None:
         cpus = float(self._effective_cpus or 1)
         memory_mb = self._effective_memory_mb
-        actor_options = {"num_cpus": cpus, "runtime_env": SANDBOX_RUNTIME_ENV}
+        storage_mb = self._effective_storage_mb
+        actor_options = {
+            "num_cpus": cpus,
+            "runtime_env": SANDBOX_RUNTIME_ENV,
+            "max_concurrency": self._max_concurrency,
+        }
         if memory_mb:
             actor_options["memory"] = memory_mb * 1024 * 1024
         if self._resources:
             actor_options["resources"] = self._resources
         self._sb = HarborSandbox.options(**actor_options).remote(
             image=self._image,
+            enforce_limits=self._enforce_limits,
             # The same cpu/memory also become the sandbox's cgroup limits.
             cpu=cpus,
             memory=f"{memory_mb}Mi" if memory_mb else 0,
+            # The task's storage caps the writable rootfs (writes past it get
+            # ENOSPC). Unlike cpu and memory, this needs nothing from the node.
+            disk=f"{storage_mb}Mi" if storage_mb else 0,
             env=self._persistent_env or None,
             workdir=self._workdir(),
             ttl_seconds=self._ttl_seconds,
@@ -135,10 +162,12 @@ class RaySandboxEnvironment(BaseEnvironment):
             # Agents write all over the filesystem; writes go to a per-sandbox
             # copy-on-write overlay that is discarded on delete.
             readonly=False,
-            # "public" has its own network namespace but can still reach anything
-            # the node can, including the Ray GCS. Only use it for trusted tasks or
-            # on a dedicated sandbox cluster; pass network="none" otherwise.
+            # "public" has its own network namespace with egress to the public
+            # internet only: Ray leaves out internal addresses (the Ray GCS and
+            # other nodes, as a best effort) and always blocks instance metadata
+            # and the Kubernetes API. cidr_allowlist changes what it can reach.
             network=self._network or ("none" if self._network_disabled else "public"),
+            cidr_allowlist=self._cidr_allowlist,
             # First pull of an image on a node includes download + EROFS build.
             timeout_seconds=self.task_env_config.build_timeout_sec,
         )
@@ -186,17 +215,13 @@ class RaySandboxEnvironment(BaseEnvironment):
             )
         except SandboxTimeoutError as e:
             return ExecResult(stdout=None, stderr=str(e), return_code=_TIMEOUT_EXIT_CODE)
-        return ExecResult(
-            stdout=result.stdout, stderr=result.stderr, return_code=result.exit_code
-        )
+        return ExecResult(stdout=result.stdout, stderr=result.stderr, return_code=result.exit_code)
 
     # File transfer: bytes are shipped through Ray, since the actor runs on
     # another node.
 
     async def upload_file(self, source_path: Path | str, target_path: str):
-        await self._require_sandbox().write_file.remote(
-            target_path, Path(source_path).read_bytes()
-        )
+        await self._require_sandbox().write_file.remote(target_path, Path(source_path).read_bytes())
 
     async def upload_dir(self, source_dir: Path | str, target_dir: str):
         buf = io.BytesIO()
@@ -206,8 +231,7 @@ class RaySandboxEnvironment(BaseEnvironment):
         await self._require_sandbox().write_file.remote(remote_tar, buf.getvalue())
         q = shlex.quote
         result = await self.exec(
-            f"mkdir -p {q(target_dir)} && tar -xzf {remote_tar} -C {q(target_dir)}"
-            f" && rm -f {remote_tar}",
+            f"mkdir -p {q(target_dir)} && tar -xzf {remote_tar} -C {q(target_dir)} && rm -f {remote_tar}",
             user="root",
         )
         if result.return_code != 0:
@@ -220,9 +244,7 @@ class RaySandboxEnvironment(BaseEnvironment):
 
     async def download_dir(self, source_dir: str, target_dir: Path | str):
         remote_tar = f"/tmp/.hb-download-{uuid.uuid4().hex}.tar.gz"
-        result = await self.exec(
-            f"tar -czf {remote_tar} -C {shlex.quote(source_dir)} .", user="root"
-        )
+        result = await self.exec(f"tar -czf {remote_tar} -C {shlex.quote(source_dir)} .", user="root")
         if result.return_code != 0:
             raise RuntimeError(f"download_dir of {source_dir} failed: {result.stderr}")
         sb = self._require_sandbox()
