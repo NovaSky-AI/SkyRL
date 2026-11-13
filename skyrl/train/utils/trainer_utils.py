@@ -330,7 +330,7 @@ def get_group_completion_metrics(
 
 
 def dump_per_dataset_eval_results(
-    dump_dir_path: Path,
+    dump_dir_path: str | Path,
     tokenizer: AutoTokenizer,
     concat_generator_outputs: GeneratorOutput,
     concat_data_sources: List[str],
@@ -338,7 +338,8 @@ def dump_per_dataset_eval_results(
     concat_env_extras: List[Dict[str, Any]],
     eval_metrics: Dict[str, float],
 ):
-    """Dump evaluation results per dataset and overall aggregated results."""
+    """Write per-dataset and aggregate evaluation results through native storage I/O."""
+    io.makedirs(str(dump_dir_path), exist_ok=True)
 
     # Prepare common data
     input_prompts = [tokenizer.decode(prompt) for prompt in concat_generator_outputs["prompt_token_ids"]]
@@ -356,9 +357,9 @@ def dump_per_dataset_eval_results(
     # Dump per-dataset files
     for data_source, indices in data_source_indices.items():
         sanitized_data_source = sanitize_data_source(data_source)
-        filename = dump_dir_path / f"{sanitized_data_source}.jsonl"
+        filename = os.path.join(dump_dir_path, f"{sanitized_data_source}.jsonl")
 
-        with open(filename, "w") as f:
+        with io.open_file(filename, "w") as f:
             for i in indices:
                 entry = {
                     "input_prompt": input_prompts[i],
@@ -374,8 +375,8 @@ def dump_per_dataset_eval_results(
         logger.info(f"Dumped eval data for {data_source} to {filename}")
 
     # Dump aggregated results file
-    aggregated_filename = dump_dir_path / "aggregated_results.jsonl"
-    with open(aggregated_filename, "w") as f:
+    aggregated_filename = os.path.join(dump_dir_path, "aggregated_results.jsonl")
+    with io.open_file(aggregated_filename, "w") as f:
         f.write(json.dumps(eval_metrics, ensure_ascii=False) + "\n")
 
     logger.info(f"Dumped aggregated eval metrics to {aggregated_filename}")
