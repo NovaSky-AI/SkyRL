@@ -113,8 +113,9 @@ async def test_qwen38_qsa_long_context_logprobs(tp, cp, num_gpus, threshold, mon
     ep, inference_tp = num_gpus, num_gpus
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name)):
         # Skips rows that need more GPUs than the cluster has (the 8-GPU rows on a 4xH100 node).
+        # A cluster reporting no GPUs (e.g. GPU workers not yet scaled up) does not skip.
         cluster_gpus = int(ray.cluster_resources().get("GPU", 0))
-        if cluster_gpus < num_gpus:
+        if 0 < cluster_gpus < num_gpus:
             pytest.skip(f"needs {num_gpus} GPUs, cluster has {cluster_gpus}")
         cfg = get_test_actor_config(model_name=model_name)
         cfg.trainer.strategy = "megatron"
