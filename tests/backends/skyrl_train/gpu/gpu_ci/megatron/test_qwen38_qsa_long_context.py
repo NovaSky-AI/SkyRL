@@ -93,8 +93,8 @@ def _long_context_input(model_name, tokenizer):
         pytest.param(1, 1, 4, 1e-1, id="qwen3.8-flash-next-4layer_h100_ep4_qsa8k"),
         # Sequence parallelism: the indexer selects on the TP-gathered sequence.
         pytest.param(2, 1, 4, 1e-1, id="qwen3.8-flash-next-4layer_h100_tp2_ep4_qsa8k"),
-        # Context parallelism (split-K cuDNN QSA: Blackwell only). The ep4 row above is its CP=1
-        # reference on the same 4 GPUs (same vLLM TP, so the same greedy rollouts).
+        # Context parallelism (split-K cuDNN QSA: Blackwell only). The ep4 row above is the same
+        # configuration at CP=1.
         pytest.param(
             1,
             4,
