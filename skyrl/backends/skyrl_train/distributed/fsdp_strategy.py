@@ -35,6 +35,7 @@ from skyrl.backends.skyrl_train.distributed.fsdp_utils import (
 )
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.distributed.utils import ModelOrModelOptimPair
+from skyrl.backends.skyrl_train.utils import device as accel
 from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.backends.skyrl_train.workers.model_wrapper import HFModelWrapper
 from skyrl.train.config import FSDPConfig, ModelConfig, OptimizerConfig
@@ -99,14 +100,14 @@ class FSDPStrategy(DistributedStrategy):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+        accel.manual_seed_all(seed)
 
     def setup_distributed(self) -> None:
         self.set_seed(self.seed)
 
         local_rank = int(os.environ.get("LOCAL_RANK", "-1"))
         if local_rank != -1:
-            torch.cuda.set_device(local_rank)
+            accel.set_device(local_rank)
 
         # Initializes the distributed backend which will take care of synchronizing nodes/GPUs
         self.world_size = dist.get_world_size()
@@ -129,8 +130,8 @@ class FSDPStrategy(DistributedStrategy):
             if optimizer is not None and self.manual_offload_optimizer and offload_optimizer:
                 offload_fsdp_optimizer(optimizer)
 
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        accel.synchronize()
+        accel.empty_cache()
 
     def backload_to_gpu(self, model, optimizer, backload_optimizer=True, backload_model=True):
         """Reload model weights back to GPU."""
@@ -141,9 +142,9 @@ class FSDPStrategy(DistributedStrategy):
             if backload_model:
                 load_fsdp2_model_to_gpu(model)
             if optimizer is not None and self.manual_offload_optimizer and backload_optimizer:
-                load_fsdp_optimizer(optimizer, torch.cuda.current_device())
+                load_fsdp_optimizer(optimizer, accel.current_device())
 
-        torch.cuda.synchronize()
+        accel.synchronize()
 
     def backward(self, loss: torch.Tensor, model, optimizer: optim.Optimizer, **kwargs) -> None:
         """Perform backward pass"""
@@ -449,7 +450,7 @@ class FSDPStrategy(DistributedStrategy):
 
         # Final barrier to ensure all operations complete
         dist.barrier()
-        torch.cuda.synchronize()
+        accel.synchronize()
         self.print(f"[rank-{rank}]: Checkpoint saved to {ckpt_dir}")
 
     def load_checkpoint(

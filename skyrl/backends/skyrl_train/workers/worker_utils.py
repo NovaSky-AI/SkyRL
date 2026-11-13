@@ -366,8 +366,10 @@ class TokenBasedBatchIterator(BaseBatchIterator):
             return local_num_microbatches
 
         # Get the maximum number of batches across all DP workers
-        if torch.cuda.is_available():
-            device = torch.cuda.current_device()
+        from skyrl.backends.skyrl_train.utils import device as accel
+
+        if accel.is_available():
+            device = accel.current_device()
         else:
             device = torch.device("cpu")
         num_microbatches_tensor = torch.tensor(local_num_microbatches, dtype=torch.long, device=device)
