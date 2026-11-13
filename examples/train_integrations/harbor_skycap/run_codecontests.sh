@@ -34,7 +34,6 @@
 #   CKPT_INTERVAL, MAX_CKPTS   steps between checkpoints and how many to keep (default 5, 5)
 #   EXPORT_INTERVAL            steps between merged HF exports (default: steps per epoch); the
 #                              trainer also exports at every epoch end
-#   AGENT_TIMEOUT_SEC          Harbor's time limit per trial (default 1200)
 #   EPOCHS, LR                 passes over the training tasks, learning rate (default 1, 1e-6)
 #   TEMPERATURE=0              greedy, so a baseline run and a skycap run can be diffed
 #                              token for token with compare_runs.py
@@ -83,7 +82,6 @@ EVAL_INTERVAL="${EVAL_INTERVAL:-10}"
 SPLIT_SEED="${SPLIT_SEED:-0}"
 CKPT_INTERVAL="${CKPT_INTERVAL:-5}"
 MAX_CKPTS="${MAX_CKPTS:-5}"
-AGENT_TIMEOUT_SEC="${AGENT_TIMEOUT_SEC:-1200}"
 EPOCHS="${EPOCHS:-1}"
 LR="${LR:-1.0e-6}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
@@ -303,7 +301,6 @@ uv run --isolated --extra "$STRATEGY" "${EXTRAS[@]}" -m "$ENTRYPOINT" \
   trainer.hf_save_interval="$EXPORT_INTERVAL" \
   trainer.resume_mode=latest \
   harbor_trial_config.trials_dir="$RUN_DIR/trials" \
-  harbor_trial_config.agent.override_timeout_sec="$AGENT_TIMEOUT_SEC" \
   harbor_trial_config.environment.type="$SANDBOX" \
   harbor_trial_config.agent.kwargs.temperature="$TEMPERATURE" \
   harbor_trial_config.agent.kwargs.model_info.max_input_tokens="$MAX_MODEL_LEN" \
