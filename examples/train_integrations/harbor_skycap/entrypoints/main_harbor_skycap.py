@@ -106,11 +106,6 @@ class SkycapConfig:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
-    train_on_timeouts: bool = False
-    """Train on a trial that hit Harbor's time limit with reward 0, as a failure. Off (default, as in the sibling
-    integration): it masks every trial of its task, like a trial the infrastructure lost. On suits a harness whose
-    timeouts are spent generating (a model looping on tool calls), so the loop gets a negative advantage and the
-    task's other trials still train."""
     include_images: bool = False
     """The model takes images (a vision-language model on a task whose prompts carry them). skycap renders them
     with the model's processor and its default settings (so the engine takes no ``mm_processor_kwargs``),
@@ -237,7 +232,6 @@ class HarborSkycapExp(HarborExp):
             train_paths=cfg.skycap.train_paths,
             records=self.records,
             include_images=cfg.skycap.include_images,
-            train_on_timeouts=cfg.skycap.train_on_timeouts,
         )
         return self.generator
 

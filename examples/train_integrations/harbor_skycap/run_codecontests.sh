@@ -123,12 +123,10 @@ case "$GENERATOR" in
     EXTRAS=(--extra harbor --extra skycap)
     # Each row is already a complete path; merging could fuse two paths. Thinking stays in
     # history the way it does for the baseline because skycap answers with raw content
-    # (skycap.use_raw_content, on by default): see SkycapConfig. A trial that runs out of time
-    # trains as a failure (reward 0) instead of masking its task.
+    # (skycap.use_raw_content, on by default): see SkycapConfig.
     ARM_ARGS=(
       skycap.record_dir="$RUN_DIR/skycap"
       skycap.num_servers="$SKYCAP_SERVERS"
-      skycap.train_on_timeouts=true
       generator.merge_stepwise_output=false
     )
     ;;
