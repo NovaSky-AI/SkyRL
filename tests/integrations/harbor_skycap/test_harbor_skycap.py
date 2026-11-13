@@ -3,6 +3,7 @@ server in token mode, which calls a mock SkyRL router."""
 
 import asyncio
 import re
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -32,16 +33,22 @@ from skycap import CaptureService, Sample, record  # noqa: E402
 from skycap.graph import MessageGraph  # noqa: E402
 from skycap.paths import Row, final_path  # noqa: E402
 from skycap.tokens.engine import EngineError  # noqa: E402
+from skycap.tokens.renderer import Media  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
+    pack_sample_support_logprobs,  # noqa: E402
 )
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
 from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
+from skyrl.train.utils.rate_limiter import RateLimiterConfig  # noqa: E402
 from skyrl.train.utils.trainer_utils import validate_generator_output  # noqa: E402
+from tests.backends.skyrl_train.sample_support_helpers import csr, dense  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
     AGENT,
     EXPERTS_PER_TOKEN,
     LAYERS,
+    NEIGHBOUR_LOGPROB,
+    SAMPLED_LOGPROB,
     SETUP,
     START_TIMEOUT,
     TOP_K,
@@ -82,7 +89,8 @@ def generator_cfg(**overrides):
         merge_stepwise_output=False,
         use_cache_salt=True,
         apply_overlong_filtering=False,
-        rate_limit=None,
+        # The default Harbor config runs sandboxes on Daytona, which needs a cap.
+        rate_limit=RateLimiterConfig(enabled=True, max_concurrency=64),
         inference_engine=SimpleNamespace(served_model_name="policy"),
         sampling_params=SimpleNamespace(top_k=TOP_K),
     )
@@ -119,12 +127,12 @@ def skycap(router, tmp_path):
     service.stop()
 
 
-def service_for(router, record_dir, **options) -> CaptureService:
+def service_for(router, record_dir, engine: SkyRLEngine | None = None, **options) -> CaptureService:
     return CaptureService(
         router.url,
         mode="tokens",
         renderer=FakeRenderer(),
-        engine=SkyRLEngine(),
+        engine=engine or SkyRLEngine(),
         model="policy",
         record_dir=str(record_dir),
         host="127.0.0.1",
@@ -133,8 +141,9 @@ def service_for(router, record_dir, **options) -> CaptureService:
 
 
 @pytest.fixture
-def trials(monkeypatch):
+def trials(monkeypatch, tmp_path):
     FakeTrial.configs = []
+    FakeTrial.trials_root = tmp_path
     monkeypatch.setattr(harbor_generator, "Trial", FakeTrial)
     return FakeTrial
 
@@ -158,7 +167,7 @@ async def generator(skycap):
     """Makes generators against the test's skycap, and closes each one's pool when the test ends."""
     made = []
 
-    def make(train_paths: str = "all", **cfg) -> HarborSkycapGenerator:
+    def make(train_paths: str = "all", check_first_batch: bool = True, **cfg) -> HarborSkycapGenerator:
         made.append(
             HarborSkycapGenerator(
                 generator_cfg(**cfg),
@@ -166,6 +175,7 @@ async def generator(skycap):
                 [skycap.url],
                 SimpleNamespace(weight_version=7),
                 train_paths=train_paths,
+                check_first_batch=check_first_batch,
             )
         )
         return made[-1]
@@ -203,7 +213,7 @@ async def test_a_linear_trial_is_one_complete_multi_turn_row(skycap, router, tri
         routed = node.tokens.routed_experts
         assert routed.shape == (len(node.tokens.token_ids), LAYERS, EXPERTS_PER_TOKEN)
     # Support rows line up with the response: the sampled token first, none where untrained.
-    support = out["rollout_sample_support"][0]
+    support = dense(out["rollout_sample_support"][0])
     assert support.shape == (len(response), TOP_K)
     for token, trained, row in zip(response, mask, support):
         assert (row[0] == token) if trained else (row == -1).all()
@@ -221,6 +231,33 @@ async def test_the_generator_keeps_one_pool_across_batches(skycap, trials, gener
         out = await gen.generate(batch("linear"), disable_tqdm=True)
         assert out["rewards"] == [1.0]
     assert gen.pool is pool
+
+
+@pytest.mark.asyncio
+async def test_a_trajectory_opens_only_once_its_trial_may_run(skycap, trials, generator) -> None:
+    """A trial queued behind the rate limiter must not hold an open trajectory: skycap abandons one idle past its ttl."""
+    gen = generator()
+    events = []
+    limiter, open_trajectory = gen._rate_limiter, gen.pool.trajectory
+
+    class Recording:
+        async def __aenter__(self):
+            await limiter.__aenter__()
+            events.append("slot")
+
+        async def __aexit__(self, *exc):
+            events.append("release")
+            return await limiter.__aexit__(*exc)
+
+    def trajectory(*args, **kwargs):
+        events.append("open")
+        return open_trajectory(*args, **kwargs)
+
+    gen._rate_limiter = Recording()
+    gen.pool.trajectory = trajectory
+    out = await gen.generate(batch("linear"), disable_tqdm=True)
+    assert out["rewards"] == [1.0]
+    assert events == ["slot", "open", "release"]
 
 
 @pytest.mark.asyncio
@@ -309,7 +346,7 @@ async def test_a_custom_rule_by_import_path_picks_the_rows_and_is_recorded(skyca
 
 @pytest.mark.asyncio
 async def test_a_failing_path_rule_masks_the_trial_without_running_it_again(skycap, trials, generator) -> None:
-    out = await generator(train_paths=BROKEN).generate(batch("linear"), disable_tqdm=True)
+    out = await generator(train_paths=BROKEN, check_first_batch=False).generate(batch("linear"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     assert len(trials.configs) == 1
@@ -321,7 +358,7 @@ async def test_a_failing_path_rule_masks_the_trial_without_running_it_again(skyc
 
 @pytest.mark.asyncio
 async def test_a_crashing_trial_is_finished_with_the_configured_rule(skycap, trials, generator) -> None:
-    await generator(train_paths="final").generate(batch("crash"), disable_tqdm=True)
+    await generator(train_paths="final", check_first_batch=False).generate(batch("crash"), disable_tqdm=True)
 
     ids = list(record.list_ids(skycap.server.record_dir))
     assert len(ids) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
@@ -380,8 +417,20 @@ async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> 
 
 
 @pytest.mark.asyncio
+async def test_an_agent_that_exits_on_skycaps_context_length_error_is_a_context_length_trial(
+    skycap, trials, generator
+) -> None:
+    out = await generator(apply_overlong_filtering=True).generate(batch("overflow", "linear"), disable_tqdm=True)
+
+    overflow = out["trajectory_ids"].index(TrajectoryID("overflow", 0))
+    # Not the verifier's reward: the agent stopped, it didn't finish.
+    assert out["rewards"][overflow] == 0.0 and out["stop_reasons"][overflow] == "context_length"
+    assert not any(out["loss_masks"][overflow])
+
+
+@pytest.mark.asyncio
 async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(skycap, trials, generator) -> None:
-    out = await generator().generate(batch("crash"), disable_tqdm=True)
+    out = await generator(check_first_batch=False).generate(batch("crash"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     urls = [config["agent"]["kwargs"]["api_base"] for config in trials.configs]
@@ -431,11 +480,35 @@ async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_reward
     assert metrics["generate/harbor/environment_setup_time_mean"] == pytest.approx(SETUP)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "batches, check, stops",
+    [
+        ([("silent",)], True, True),
+        ([("silent",)], False, False),
+        ([("silent", "linear")], True, False),
+        ([("linear",), ("silent",)], True, False),
+    ],
+    ids=["nothing trains", "check off", "one trajectory trains", "a later batch"],
+)
+async def test_a_first_batch_with_nothing_to_train_stops_the_run(skycap, trials, generator, batches, check, stops):
+    gen = generator(check_first_batch=check)
+    *earlier, last = batches
+    for scripts in earlier:
+        await gen.generate(batch(*scripts), disable_tqdm=True)
+    if stops:
+        with pytest.raises(RuntimeError, match=r"first batch \(1\).*~/trials.*skycap\.check_first_batch=false"):
+            await gen.generate(batch(*last), disable_tqdm=True)
+    else:
+        out = await gen.generate(batch(*last), disable_tqdm=True)
+        assert len(out["trajectory_ids"]) == len(last)
+
+
 def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
     outcome = TrialOutcome(trajectory_id=TrajectoryID("a", 0), stop_reason="error")
 
     support = compose([outcome], overlong_filtering=False, top_k=TOP_K, sample_support=True)["rollout_sample_support"]
-    assert [array.shape for array in support] == [(1, TOP_K)]
+    assert [(len(rows), rows.top_k) for rows in support] == [(1, TOP_K)]
     assert compose([outcome], overlong_filtering=False, top_k=TOP_K)["rollout_sample_support"] is None
 
 
@@ -476,7 +549,7 @@ async def test_with_r3_a_masked_instance_gets_distinct_dummy_routes(generator, t
 @pytest.mark.asyncio
 async def test_with_r3_a_trial_without_routes_is_retried_then_masked(generator, router, trials) -> None:
     router.routes = False
-    out = await generator(inference_engine=R3).generate(batch("linear"), disable_tqdm=True)
+    out = await generator(inference_engine=R3, check_first_batch=False).generate(batch("linear"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     assert len(trials.configs) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
@@ -520,7 +593,7 @@ def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(m
 
 
 def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None:
-    support = pack_sample_support(np.zeros((1, TOP_K), dtype=np.int32))
+    support = pack_sample_support(csr(np.zeros((1, TOP_K), dtype=np.int32)))
     body = {
         "choices": [
             {
@@ -535,10 +608,66 @@ def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None
         SkyRLEngine().parse(body)
 
 
+@pytest.mark.asyncio
+async def test_with_score_centering_support_carries_the_sampler_logprob_of_each_member(
+    router, trials, tmp_path
+) -> None:
+    service = service_for(
+        router,
+        tmp_path / "record",
+        engine=SkyRLEngine(sample_support_logprobs=True),
+        sampling_overrides={"top_k": TOP_K},
+        sampling_mask=True,
+    )
+    service.start()
+    generator = HarborSkycapGenerator(
+        generator_cfg(), harbor_cfg(), [service.url], SimpleNamespace(weight_version=7), train_paths="all"
+    )
+    try:
+        out = await generator.generate(batch("linear"), disable_tqdm=True)
+    finally:
+        await generator.close()
+        service.stop()
+    validate_generator_output(1, out, step_wise=True, support_expected=True, support_scores_expected=True)
+
+    assert all(r["return_sample_support_logprobs"] is True for r in router.requests)
+    (support,) = out["rollout_sample_support"]
+    mask = out["loss_masks"][0]
+    # Each trained token's row is the sampled token and its neighbour, scored as the engine scored them.
+    assert support.row_lengths.tolist() == [2 if trained else 0 for trained in mask]
+    expected = np.tile(np.array([SAMPLED_LOGPROB, NEIGHBOUR_LOGPROB], dtype=np.float32), sum(mask))
+    np.testing.assert_array_equal(support.logprobs, expected)
+
+
+def test_without_score_centering_support_carries_no_logprobs() -> None:
+    support = csr(np.array([[4, 5, -1]], dtype=np.int32), np.array([[-0.25, -1.5, 0.0]], dtype=np.float32))
+    body = {
+        "choices": [
+            {
+                "token_ids": [4],
+                "logprobs": {"content": [{"logprob": -0.25}]},
+                "rollout_sample_support": pack_sample_support(support),
+            }
+        ]
+    }
+    assert SkyRLEngine().parse(body).sampling_mask_logprobs is None
+    with pytest.raises(EngineError, match="without the sampler's member logprobs"):
+        SkyRLEngine(sample_support_logprobs=True).parse(body)
+    body["choices"][0]["rollout_sample_support_logprobs"] = pack_sample_support_logprobs(support)
+    assert SkyRLEngine(sample_support_logprobs=True).parse(body).sampling_mask_logprobs == [[-0.25, -1.5]]
+
+
 def test_the_engine_asks_for_support_only_with_a_sampling_mask() -> None:
     kwargs = dict(prompt_ids=[1], sampling={"top_k": 3}, model="policy", cache_salt="s")
     assert SkyRLEngine().request(sampling_mask=True, **kwargs)["return_sample_support"] is True
     assert "return_sample_support" not in SkyRLEngine().request(sampling_mask=False, **kwargs)
+
+
+def test_images_go_to_the_packed_route_with_their_features() -> None:
+    kwargs = dict(prompt_ids=[1], sampling={"top_k": 3}, model="policy", cache_salt=None, features={"mm_hashes": {}})
+    body = SkyRLEngine().request(sampling_mask=True, **kwargs)
+    assert SkyRLEngine().generate_path == "/skyrl/v1/generate"
+    assert body["features"] == {"mm_hashes": {}} and body["return_sample_support"] is True
 
 
 def test_with_r3_an_overlong_filtered_trial_needs_no_routes() -> None:
@@ -608,3 +737,52 @@ async def test_thinking_survives_litellm_so_the_replayed_history_stays_one_path(
         assert len(graph.paths()) == 1
     finally:
         await asyncio.to_thread(service.stop)
+
+
+def _image(offset: int, patches: int, grid: list) -> Media:
+    data = {"pixel_values": np.full((patches, 4), offset, np.float32), "image_grid_thw": np.array([grid])}
+    return Media(modality="image", offset=offset, length=patches // 4, hash=f"h{offset}", data=data)
+
+
+def test_with_images_each_row_carries_its_paths_vision_features_and_a_masked_row_none() -> None:
+    first, second = _image(1, 8, [1, 2, 4]), _image(4, 4, [1, 2, 2])
+    sample = Sample(
+        leaf=1,
+        path=[0, 1],
+        messages=[],
+        targets=[1],
+        input_ids=list(range(8)),
+        loss_mask=[0] * 6 + [1, 1],
+        logprobs=[0.0] * 8,
+        media=[first, second],
+    )
+    trained = TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=1.0)
+    masked = TrialOutcome(trajectory_id=TrajectoryID("b", 0), stop_reason="error")
+
+    out = compose([trained, masked], overlong_filtering=False, include_images=True)
+
+    assert [tuple(t.shape) for t in out["pixel_values"]] == [(12, 4), (0, 4)]
+    assert out["pixel_values"][0][:8].eq(1).all() and out["pixel_values"][0][8:].eq(4).all()
+    assert out["image_grid_thw"][0].tolist() == [[1, 2, 4], [1, 2, 2]]
+    assert tuple(out["image_grid_thw"][1].shape) == (0, 3)
+    assert compose([masked], overlong_filtering=False, include_images=True)["pixel_values"] is None
+
+
+def test_images_fail_the_step_unless_the_trainer_can_take_them() -> None:
+    def outcome(image: Media) -> TrialOutcome:
+        sample = Sample(
+            leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=list(range(8)),
+            loss_mask=[0] * 6 + [1, 1], logprobs=[0.0] * 8, media=[image],
+        )  # fmt: skip
+        return TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=1.0)
+
+    image = _image(1, 8, [1, 2, 4])
+    # The servers send the images whatever the flag says: off, the rows would train on bare placeholders.
+    with pytest.raises(ValueError, match="include_images is off"):
+        compose([outcome(image)], overlong_filtering=False)
+    # Gemma 4's processor output, and an image read back from a record.
+    gemma = replace(image, data={"pixel_values": image.data["pixel_values"], "image_position_ids": np.zeros(2)})
+    with pytest.raises(ValueError, match="image_position_ids"):
+        compose([outcome(gemma)], overlong_filtering=False, include_images=True)
+    with pytest.raises(ValueError, match="no processor output"):
+        compose([outcome(replace(image, data=None))], overlong_filtering=False, include_images=True)

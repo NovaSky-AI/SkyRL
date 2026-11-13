@@ -34,7 +34,6 @@ from vllm.utils.system_utils import set_ulimit
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
     ServerInfo,
-    compute_dp_master_port,
     default_bind_host,
     find_and_reserve_port,
     format_http_url,
@@ -46,12 +45,12 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     build_logprobs_content,
     pack_routed_experts,
     pack_sample_support,
+    pack_sample_support_logprobs,
 )
 from skyrl.backends.skyrl_train.inference_servers.protocols import ServerActorProtocol
 from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_DTYPE,
-    SAMPLE_SUPPORT_PADDING,
-    SampleSupport,
+    CompactSampleSupport,
 )
 from skyrl.backends.skyrl_train.weight_sync.lora_target import in_memory_lora_path
 from skyrl.env_vars import (
@@ -63,13 +62,47 @@ from skyrl.env_vars import (
 logger = logging.getLogger(__name__)
 
 
+def _multimodal_prompt(token_ids: List[int], features: dict, cache_salt: Optional[str]):
+    """The engine input for a token prompt with multimodal ``features``.
+
+    ``features`` is vLLM's ``MultiModalFeatures`` (per-modality ``mm_hashes``, ``mm_placeholders`` and
+    serialized ``kwargs_data``), as ``/inference/v1/generate`` takes it; this builds the engine input the
+    same way that endpoint does (vllm/entrypoints/scale_out/token_in_token_out/serving.py), so a caller can
+    send images to ``/skyrl/v1/generate`` and keep its routed experts and sample support.
+    """
+    from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+        mm_kwargs_from_features,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        MultiModalFeatures,
+    )
+    from vllm.inputs import mm_input
+    from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
+
+    parsed = MultiModalFeatures.model_validate(features)
+    placeholders = {
+        modality: [PlaceholderRange(offset=p.offset, length=p.length) for p in ranges]
+        for modality, ranges in parsed.mm_placeholders.items()
+    }
+    return mm_input(
+        prompt_token_ids=token_ids,
+        mm_kwargs=MultiModalKwargsItems(mm_kwargs_from_features(parsed)),
+        mm_hashes=parsed.mm_hashes,
+        mm_placeholders=placeholders,
+        cache_salt=cache_salt,
+    )
+
+
 def _sample_support_from_flat_logprobs(
     logprobs: FlatLogprobs,
     top_k: int,
-) -> tuple[list[dict[str, float]], SampleSupport]:
-    """Extract sampled scores and post-filter support from vLLM's flat rows.
+    *,
+    with_member_logprobs: bool = False,
+) -> tuple[list[dict[str, float]], CompactSampleSupport]:
+    """Extract sampled scores and post-filter CSR support from vLLM's flat rows.
 
     Each row is ``[sampled token, top-1, ..., top-k]``; filtered candidates are ``-inf``.
+    ``with_member_logprobs`` also keeps each member's processed logprob in the support's logprob column.
     """
     row_width = top_k + 1
     token_ids = np.asarray(logprobs.token_ids, dtype=SAMPLE_SUPPORT_DTYPE).reshape(-1, row_width)
@@ -77,27 +110,24 @@ def _sample_support_from_flat_logprobs(
     sampled_logprobs_values = processed_logprobs[:, 0]
     if not np.isfinite(sampled_logprobs_values).all():
         raise ValueError("sample-support capture received non-finite sampled logprob(s)")
+    sampled = token_ids[:, 0]
     candidate_ids = token_ids[:, 1:]
-    candidate_logprobs = processed_logprobs[:, 1:]
-    support_ids = np.full(candidate_ids.shape, SAMPLE_SUPPORT_PADDING, dtype=SAMPLE_SUPPORT_DTYPE)
-    for row_index, (row_ids, row_logprobs) in enumerate(zip(candidate_ids, candidate_logprobs)):
-        # vLLM emits filtered candidates as -inf. Treat all non-finite values
-        # (including NaN and +inf) as absent, then compact the remaining IDs so
-        # the packed representation retains its required trailing padding.
-        finite_ids = row_ids[np.isfinite(row_logprobs)]
-        support_ids[row_index, : len(finite_ids)] = finite_ids
-    sampled_logprobs = [{"logprob": float(value)} for value in sampled_logprobs_values]
+    # vLLM emits filtered candidates as -inf. Treat all non-finite values
+    # (including NaN and +inf) as absent.
+    present = np.isfinite(processed_logprobs[:, 1:])
+    # vLLM's float32 logprobs round-trip exactly through the float64 array.
+    member_logprobs = processed_logprobs[:, 1:].astype(np.float32) if with_member_logprobs else None
 
     # vLLM's approximate top-k/top-p pivot can omit the sampled token. Replace the
-    # weakest valid candidate while preserving the support width and trailing padding.
-    sampled = token_ids[:, 0]
-    valid = support_ids >= 0
-    present = np.any(support_ids == sampled[:, None], axis=1)
-    missing = (~present) & valid.any(axis=1)
-    if np.any(missing):
-        rows = np.flatnonzero(missing)
-        weakest_col = valid.sum(axis=1) - 1
-        support_ids[rows, weakest_col[rows]] = sampled[rows]
+    # weakest valid candidate so the row keeps its size and contains the sample.
+    rows_missing_sample = present.any(axis=1) & ~((candidate_ids == sampled[:, None]) & present).any(axis=1)
+    if np.any(rows_missing_sample):
+        rows = np.flatnonzero(rows_missing_sample)
+        weakest_col = top_k - 1 - np.argmax(present[rows, ::-1], axis=1)
+        candidate_ids = candidate_ids.copy()
+        candidate_ids[rows, weakest_col] = sampled[rows]
+        if member_logprobs is not None:
+            member_logprobs[rows, weakest_col] = sampled_logprobs_values[rows]
         logger.warning(
             "sample-support repair: %d token(s) had the sampled id absent from top-%d support; "
             "overwrote the weakest member to preserve the invariant (vLLM approx top-k/top-p "
@@ -107,7 +137,8 @@ def _sample_support_from_flat_logprobs(
             int(sampled[rows[0]]),
             int(rows[0]),
         )
-    return sampled_logprobs, support_ids
+    sampled_logprobs = [{"logprob": float(value)} for value in sampled_logprobs_values]
+    return sampled_logprobs, CompactSampleSupport.from_masked_rows(candidate_ids, present, member_logprobs)
 
 
 class VLLMServerActor(ServerActorProtocol):
@@ -120,7 +151,7 @@ class VLLMServerActor(ServerActorProtocol):
     called from anywhere (other actors, driver, external processes).
 
     Custom endpoints added for SkyRL:
-    - /reset_prefix_cache: Reset prefix cache
+    - /fetch_weights: Apply checkpoint-delta payloads before reload
 
     Weight sync uses vLLM native endpoints (/init_weight_transfer_engine,
     /update_weights, /get_world_size) from the RLHF router when VLLM_SERVER_DEV_MODE=1.
@@ -219,13 +250,6 @@ class VLLMServerActor(ServerActorProtocol):
         os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "1"
         # TODO (aaron): once native ipc stops needing this, remove
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
-        # Give this engine's workers a TCPStore probe window disjoint from every
-        # other engine's -- see `_seed_dp_master_port` for why. Derived from the
-        # assigned `start_port` rather than the reserved `self._port`, since only
-        # the former is guaranteed `SERVER_PORT_STRIDE` apart across actors.
-        # TODO: delete once vllm#50969 lands -- see the removal checklist on
-        # `compute_dp_master_port` in inference_servers/common.py.
-        os.environ["VLLM_DP_MASTER_PORT"] = str(compute_dp_master_port(start_port))
 
         # Configure the distributed executor backend
         self._cli_args.distributed_executor_backend = distributed_executor_backend
@@ -245,14 +269,6 @@ class VLLMServerActor(ServerActorProtocol):
             from skyrl.backends.skyrl_train.inference_servers.utils import (
                 get_pd_p2p_connector_name,
             )
-            from skyrl.backends.skyrl_train.patches.vllm.patch_multi_connector_stats import (
-                apply_multi_connector_stats_patch,
-            )
-
-            # MultiConnector stacks (e.g. Mooncake P2P + store) crash the
-            # AsyncLLM output handler when a child has stats but no prom
-            # metrics; patch before the engine is built in this process.
-            apply_multi_connector_stats_patch()
 
             # Handle both dict and JSON string formats for kv_transfer_config
             kv_config = getattr(self._cli_args, "kv_transfer_config", None)
@@ -479,17 +495,6 @@ class VLLMServerActor(ServerActorProtocol):
                 """Identify the Ray frontend exporting this server's engine metrics."""
                 return Response(content=orjson.dumps(metrics_info), media_type="application/json")
 
-        @app.post("/reset_prefix_cache")
-        async def _reset_prefix_cache(request: Request):
-            """Reset the prefix cache, optionally resetting in-flight requests too."""
-            try:
-                data = await request.json()
-            except Exception:
-                data = {}
-            reset_running_requests = data.get("reset_running_requests", False)
-            await engine.reset_prefix_cache(reset_running_requests=reset_running_requests)
-            return {"status": "ok"}
-
         @app.post("/fetch_weights")
         async def _fetch_weights(request: Request):
             """Fetch/apply checkpoint-delta payloads before the paused reload phase."""
@@ -559,7 +564,11 @@ class VLLMServerActor(ServerActorProtocol):
         # TODO (sumanthrh): Migrate back to /inference/v1/generate once flashinfer is supported with returning top-k logprobs.
         @app.post("/skyrl/v1/generate")
         async def _skyrl_generate(request: Request):
-            """SkyRL generate endpoint that returns routed_experts alongside token output."""
+            """SkyRL generate endpoint that returns routed_experts alongside token output.
+
+            Like ``/inference/v1/generate``, a request may carry multimodal ``features`` (images) for its
+            token prompt.
+            """
             body = await request.json()
 
             # Resolve `model` to a loaded LoRA adapter, as the native endpoint does
@@ -579,6 +588,12 @@ class VLLMServerActor(ServerActorProtocol):
             cache_salt = body.get("cache_salt")
 
             capture_sample_support = body.get("return_sample_support", False)
+            capture_sample_support_logprobs = body.get("return_sample_support_logprobs", False)
+            if capture_sample_support_logprobs and not capture_sample_support:
+                raise HTTPException(
+                    status_code=400,
+                    detail="return_sample_support_logprobs requires return_sample_support",
+                )
             if capture_sample_support:
                 # Sample support requires a bounded, non-degenerate top-k set.
                 top_k = sampling_params_dict.get("top_k")
@@ -592,9 +607,22 @@ class VLLMServerActor(ServerActorProtocol):
                     )
                 sampling_params_dict["flat_logprobs"] = True
                 sampling_params_dict["logprobs"] = top_k
+                # This endpoint returns token ids only, so the API-server process need not detokenize
+                # the k + 1 candidates per token; that work otherwise starves the event loop that also
+                # serves pause/weight-sync. Stop strings still need the decoded text.
+                if not sampling_params_dict.get("stop"):
+                    sampling_params_dict.setdefault("detokenize", False)
             sampling_params = VLLMSamplingParams(**sampling_params_dict)
             # `cache_salt` salts vLLM's prefix cache; vLLM rejects an empty salt, so attach only when set.
-            if cache_salt is not None:
+            features = body.get("features")
+            if features is not None:
+                try:
+                    prompt = _multimodal_prompt(token_ids, features, cache_salt)
+                # pydantic's ValidationError and undecodable items are ValueErrors; an item that decodes to
+                # something other than a serialized MultiModalKwargsItem raises AttributeError or TypeError.
+                except (ValueError, TypeError, AttributeError) as error:
+                    raise HTTPException(status_code=400, detail=f"invalid features: {error}") from error
+            elif cache_salt is not None:
                 prompt = TokensPrompt(prompt_token_ids=token_ids, cache_salt=cache_salt)
             else:
                 prompt = TokensPrompt(prompt_token_ids=token_ids)
@@ -612,14 +640,18 @@ class VLLMServerActor(ServerActorProtocol):
             finish_reason = resp.finish_reason
 
             logprobs = None
-            sample_support = None
+            packed_sample_support = None
+            packed_sample_support_logprobs = None
             if capture_sample_support:
-                content, support_ids = _sample_support_from_flat_logprobs(
+                content, sample_support = _sample_support_from_flat_logprobs(
                     resp.logprobs,
                     sampling_params_dict["top_k"],
+                    with_member_logprobs=capture_sample_support_logprobs,
                 )
                 logprobs = {"content": content}
-                sample_support = pack_sample_support(support_ids)
+                packed_sample_support = pack_sample_support(sample_support)
+                if capture_sample_support_logprobs:
+                    packed_sample_support_logprobs = pack_sample_support_logprobs(sample_support)
             elif resp.logprobs is not None:
                 content, num_clamped = build_logprobs_content(token_ids_out, resp.logprobs)
                 if num_clamped:
@@ -640,7 +672,8 @@ class VLLMServerActor(ServerActorProtocol):
                         "finish_reason": finish_reason,
                         "logprobs": logprobs,
                         PackedField.ROUTED_EXPERTS.value: routed_experts,
-                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: sample_support,
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT.value: packed_sample_support,
+                        PackedField.ROLLOUT_SAMPLE_SUPPORT_LOGPROBS.value: packed_sample_support_logprobs,
                     }
                 ]
             }
@@ -656,41 +689,6 @@ class VLLMServerActor(ServerActorProtocol):
                 pass
 
 
-def _seed_dp_master_port(http_port: int) -> None:
-    """Give vLLM's ray executor a private TCPStore port window.
-
-    ``RayExecutorV2`` (the default for ``distributed_executor_backend="ray"``)
-    picks the port for the engine's workers' ``torch.distributed`` group by
-    probing ``[VLLM_DP_MASTER_PORT + 100 + 32 * local_dp_rank, +32)`` and taking
-    the first port whose bind succeeds. With DP disabled ``ParallelConfig`` falls
-    back to the env defaults -- ``VLLM_DP_MASTER_PORT`` is 0, and
-    ``VLLM_DP_RANK_LOCAL`` defaults to ``VLLM_DP_RANK`` (0) rather than ``None``,
-    which would have routed us to vLLM's random-port branch -- so *every* engine
-    on the node probes the same window starting at port 100.
-
-    On a host where unprivileged ports start at 1024, all 32 probes fail and vLLM
-    falls back to a random port. But containers commonly set
-    ``net.ipv4.ip_unprivileged_port_start=0``, and there the probe *succeeds*:
-    since it closes the socket before TCPStore binds, two co-located engines both
-    settle on port 100 and the second dies with ``EADDRINUSE``.
-
-    The fix is disjoint windows, not a reserved port -- vLLM probes a 32-port
-    range, so there is no single port to hold. ``VLLMServerActor`` seeds this in
-    ``__init__`` from its group-assigned ``start_port``, which is unique per
-    actor; this call only takes effect on the standalone ``python -m`` path, where
-    the server owns its whole port window anyway.
-
-    Ignored when DP is enabled: vLLM overwrites ``data_parallel_master_port`` from
-    ``get_open_ports_list()`` on that path and leaves ``data_parallel_rank_local``
-    as ``None``, which reaches the random-port branch.
-
-    TODO: delete this function and its call site once vllm#50969 lands -- see the
-    removal checklist on ``compute_dp_master_port`` in
-    ``inference_servers/common.py``.
-    """
-    os.environ.setdefault("VLLM_DP_MASTER_PORT", str(compute_dp_master_port(http_port)))
-
-
 async def _build_and_serve_vllm_server(
     cli_args: Namespace,
     *,
@@ -703,8 +701,6 @@ async def _build_and_serve_vllm_server(
     Shared by ``VLLMServerActor._run_server`` (Ray-actor deployment) and the
     standalone ``python -m`` entrypoint below.
     """
-    _seed_dp_master_port(cli_args.port)
-
     sock_addr = (cli_args.host, cli_args.port)
     # One uvicorn per port (no api_server_count fan-out), matching vLLM's own
     # single-server path, so SO_REUSEPORT stays off.
@@ -713,6 +709,18 @@ async def _build_and_serve_vllm_server(
     # SkyRL uses the scale-out token-in/token-out endpoint for generation.
     cli_args.enable_scale_out = True
     app = build_app(cli_args)
+
+    if getattr(cli_args, "enable_return_routed_experts", False) and cli_args.pipeline_parallel_size > 1:
+        from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (
+            PP_RELAY_ENV,
+            apply_pp_relay_config_patch,
+        )
+
+        # R3 with PP > 1: lift vLLM's rejection before the engine config is validated here. The engine core
+        # validates the config again in its own process; the env var makes SkyRL's `vllm.general_plugins`
+        # entry point install the same patch there. The workers install the relay itself.
+        os.environ[PP_RELAY_ENV] = "1"
+        apply_pp_relay_config_patch()
 
     # Initialize the engine (this loads the model - takes time)
     engine_args = AsyncEngineArgs.from_cli_args(cli_args)
@@ -774,9 +782,11 @@ def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
     ``--worker-extension-cls``, ...).
     """
     from vllm import AsyncEngineArgs as _AsyncEngineArgs
-    from vllm.entrypoints.launchers.cli_args import FrontendArgs
+    from vllm.entrypoints.common.cli_args import FrontendArgs
     from vllm.platforms import current_platform
     from vllm.utils.argparse_utils import FlexibleArgumentParser
+
+    from skyrl.backends.skyrl_train.inference_servers.utils import VLLM_LOGPROBS_MODE
 
     # See build_vllm_cli_args: pin the device type so arg parsing's DeviceConfig
     # autodetection succeeds even before CUDA is fully initialized.
@@ -788,7 +798,12 @@ def _build_standalone_cli_args(argv: Optional[List[str]] = None) -> Namespace:
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = _AsyncEngineArgs.add_cli_args(parser)
-    return parser.parse_args(argv)
+    # Matches build_vllm_cli_args: logprobs are computed from the sampling distribution.
+    parser.set_defaults(logprobs_mode=VLLM_LOGPROBS_MODE)
+    args = parser.parse_args(argv)
+    if args.logprobs_mode != VLLM_LOGPROBS_MODE:
+        parser.error(f"--logprobs-mode must be {VLLM_LOGPROBS_MODE!r}, got {args.logprobs_mode!r}.")
+    return args
 
 
 def main(argv: Optional[List[str]] = None) -> None:

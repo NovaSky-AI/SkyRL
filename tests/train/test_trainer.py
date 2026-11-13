@@ -11,15 +11,12 @@ from jaxtyping import Float, Integer
 from pytest import approx
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
-from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_DTYPE,
-    SAMPLE_SUPPORT_PADDING,
-)
 from skyrl.backends.skyrl_train.workers.worker import CriticWorkerBase, PolicyWorkerBase
 from skyrl.backends.skyrl_train.workers.worker_utils import BatchIterator
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.utils import validate_batch_sizes
+from tests.backends.skyrl_train.sample_support_helpers import csr
 from tests.train.util import example_dummy_config
 
 
@@ -131,15 +128,15 @@ def test_convert_to_training_input_records_sample_support_metrics(dummy_config, 
     )
     trainer.dispatch = MagicMock()
     trainer.dispatch.get_lcm_dp_size.return_value = 1
-    padding_row = [SAMPLE_SUPPORT_PADDING] * 4
+    padding_row = [-1] * 4
     generator_output = {
         "prompt_token_ids": [[1, 2], [3]],
         "response_ids": [[4, 5, 6], [7, 8]],
         "rewards": [[0.0, 0.0, 1.0], [0.0, 1.0]],
         "loss_masks": [[1, 1, 0], [1, 1]],
         "rollout_sample_support": [
-            np.array([[4, 14, -1, -1], [5, 15, 25, 35], padding_row], dtype=SAMPLE_SUPPORT_DTYPE),
-            np.array([[7, -1, -1, -1], [8, 18, 28, -1]], dtype=SAMPLE_SUPPORT_DTYPE),
+            csr([[4, 14, -1, -1], [5, 15, 25, 35], padding_row]),
+            csr([[7, -1, -1, -1], [8, 18, 28, -1]]),
         ],
     }
 
@@ -733,3 +730,41 @@ def test_validate_batch_sizes_lcm_dp_requirement():
     # Pass: ref disabled -> requirement reduces to policy_dp. With policy_dp=2, tbs=2 is valid.
     cfg = create_config(train_batch_size=2, policy_dp=2, ref_dp=3, include_ref=False)
     validate_batch_sizes(cfg)
+
+
+@pytest.mark.parametrize(
+    "role, tp, ep, etp, expert_grid",
+    [
+        ("policy", 1, 1, None, None),
+        ("policy", 1, 8, None, 8),  # run_codecontests.sh's old MEGATRON_EP default on 2 GPUs
+        ("policy", 2, 1, None, None),  # an unset etp is tp: 2 * 1 * 1 divides 2
+        ("policy", 2, 2, None, 4),  # ... so ep=2 next to tp=2 needs 4 GPUs
+        ("policy", 2, 2, 1, None),  # an explicit etp=1 decouples the expert grid from tp
+        ("ref", 1, 8, None, 8),
+    ],
+)
+def test_validate_batch_sizes_megatron_expert_grid(role, tp, ep, etp, expert_grid):
+    """On 2 GPUs, Megatron's expert grid (pp * ep * etp) must divide the world size like the dense one,
+    for a dense model too; ``expert_grid`` is the size the error names, None when the layout is valid."""
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.train_batch_size = cfg.trainer.policy_mini_batch_size = 4
+    cfg.trainer.micro_train_batch_size_per_gpu = cfg.trainer.micro_forward_batch_size_per_gpu = 1
+    cfg.trainer.placement.policy_num_gpus_per_node = cfg.trainer.placement.ref_num_gpus_per_node = 2
+    cfg.trainer.critic.model.path = None
+    cfg.trainer.algorithm.use_kl_loss = role == "ref"
+    cfg.generator.n_samples_per_prompt = 1
+    megatron_config = getattr(cfg.trainer, role).megatron_config
+    megatron_config.tensor_model_parallel_size = tp
+    megatron_config.expert_model_parallel_size = ep
+    megatron_config.expert_tensor_parallel_size = etp
+
+    if expert_grid is None:
+        validate_batch_sizes(cfg)
+    else:
+        with pytest.raises(
+            ValueError,
+            match=rf"world_size 2 should be divisible by Megatron's expert grid \(pp \* ep \* etp\) {expert_grid}\. "
+            rf"trainer\.{role}\.megatron_config\.expert_model_parallel_size",
+        ):
+            validate_batch_sizes(cfg)

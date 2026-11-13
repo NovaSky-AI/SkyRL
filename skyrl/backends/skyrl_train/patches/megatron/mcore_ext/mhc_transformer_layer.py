@@ -129,6 +129,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         packed_seq_params=None,
         sequence_len_offset: Optional[Tensor] = None,
         padding_mask: Optional[Tensor] = None,
+        input_ids: Optional[Tensor] = None,
         mhc_recompute_manager=None,
         **kwargs,
     ):
@@ -176,10 +177,19 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         pre_mlp_layernorm_output = self._reject_residual_returning_norm(
             self.pre_mlp_layernorm(aggregated), "pre_mlp_layernorm"
         )
-        pre_mlp_layernorm_output, moe_padding_mask, moe_unflatten_mbs = self._maybe_unflatten_for_moe(
-            pre_mlp_layernorm_output, padding_mask, packed_seq_params
+        pre_mlp_layernorm_output, moe_padding_mask, moe_input_ids, moe_unflatten_mbs = self._maybe_unflatten_for_moe(
+            pre_mlp_layernorm_output, padding_mask, input_ids, packed_seq_params
         )
-        mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output, padding_mask=moe_padding_mask)
+        # Also in eval mode (megatron-core chunks only in training): eval and logprob forwards see the
+        # same per-rank routing spikes, and without chunking they ran out of memory first.
+        # Token ids are only consumed by hash-routed MoE layers, as in ``TransformerLayer._forward_mlp``.
+        mlp_output_with_bias = chunked_mlp(
+            self.mlp,
+            pre_mlp_layernorm_output,
+            moe_padding_mask,
+            self.config.mlp_chunks_for_training,
+            input_ids=moe_input_ids if self.is_moe_layer else None,
+        )
         if moe_unflatten_mbs is not None:
             mlp_output, mlp_bias = mlp_output_with_bias
             mlp_output = self._maybe_reflatten_from_moe(mlp_output, packed_seq_params, moe_unflatten_mbs)
@@ -197,3 +207,175 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         output = make_viewless_tensor(inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True)
         return output, None
+
+
+def chunked_mlp(
+    mlp,
+    hidden_states: Tensor,
+    padding_mask: Optional[Tensor],
+    num_chunks: int,
+    input_ids: Optional[Tensor] = None,
+):
+    """Run ``mlp`` over ``num_chunks`` sequence chunks of ``hidden_states`` ([s, b, h]).
+
+    megatron-core's ``TransformerLayer._forward_mlp`` does this for ``mlp_chunks_for_training``; this
+    layer replaces that method, so it does it here. MLP and MoE outputs are per token, so the result
+    is unchanged; with MoE, only one chunk's routed tokens are dispatched at a time, which bounds the
+    dispatch / expert / combine buffers on ranks whose experts receive far more than their share
+    under real routing.
+    """
+    if num_chunks <= 1:
+        kwargs = {"input_ids": input_ids} if input_ids is not None else {}
+        return mlp(hidden_states, padding_mask=padding_mask, **kwargs)
+    # Every rank must make the same number of MoE calls: each one runs expert-parallel
+    # collectives, and a rank that made fewer (a short micro-batch, e.g. the one-token padding
+    # micro-batches that even out micro-batch counts across DP ranks) deadlocks the group. So
+    # always split into exactly num_chunks non-empty chunks, padding the sequence with masked
+    # dummy tokens when it is shorter than that; their outputs are dropped.
+    seq, batch = hidden_states.shape[:2]
+    pad = max(0, num_chunks - seq)
+    if pad and getattr(getattr(mlp, "router", None), "routing_type", None) == "quantile_balancing":
+        # The dummy tokens need a padding mask, which quantile balancing does not support yet.
+        raise NotImplementedError(
+            f"mlp_chunks_for_training={num_chunks} with quantile-balancing routing needs a local "
+            f"sequence of at least {num_chunks} tokens, got {seq}: shorter ones are padded with "
+            "masked dummy tokens, and quantile balancing does not support padding masks yet."
+        )
+    if pad:
+        hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, 0, 0, pad))
+        # Mask the dummy tokens even when the caller passed no mask: the router counts unmasked
+        # tokens in its aux / z-loss and expert-bias token counts.
+        if padding_mask is None:
+            padding_mask = hidden_states.new_zeros(batch, seq, dtype=torch.bool)
+        padding_mask = torch.nn.functional.pad(padding_mask, (0, pad), value=True)
+        if input_ids is not None:
+            input_ids = torch.nn.functional.pad(input_ids, (0, pad))
+    chunks = hidden_states.tensor_split(num_chunks, dim=0)
+    masks = padding_mask.tensor_split(num_chunks, dim=-1) if padding_mask is not None else [None] * num_chunks
+    # input_ids is [b, s] while hidden_states is [s, b, h], so it is split along dim 1.
+    id_chunks = input_ids.tensor_split(num_chunks, dim=1) if input_ids is not None else [None] * num_chunks
+    replay = _ChunkedRouterReplay(mlp, [c.shape[0] * batch for c in chunks], pad * batch)
+    outputs = []
+    for i, (chunk, mask, ids) in enumerate(zip(chunks, masks, id_chunks)):
+        outputs.append(replay.call(i, chunk, mask, {"input_ids": ids} if ids is not None else {}))
+        replay.after_chunk()
+    replay.finish()
+    return torch.cat([out for out, _ in outputs], dim=0)[:seq], outputs[0][1]
+
+
+class _ChunkedRouterReplay:
+    """Router replay (R3) for ``chunked_mlp``.
+
+    ``RouterReplay`` assumes one router call per micro-batch:
+
+    - Expected: on replay, ``get_replay_topk`` returns ``target_topk_idx`` as the routing and
+      gathers the router's scores with it (``scores.gather(1, target_topk_idx)``), so the indices
+      must cover exactly the tokens of this call: ``[call_tokens, topk]``.
+    - Actual: ``target_topk_idx`` holds the whole micro-batch, ``[s * b, topk]``, while
+      ``chunked_mlp`` calls the router once per chunk, with scores of ``[chunk_tokens, experts]``.
+    - So the gather fails on the first chunk ("Size does not match at dimension 0").
+      Recompute (``REPLAY_BACKWARD``) pops one ``replay_backward_list`` entry per call, so the
+      second chunk would take the next micro-batch's entry. ``RECORD`` keeps only the last call's
+      indices, so the earlier chunks' routing would be lost.
+
+    So each chunk's call replays its own slice of the micro-batch's indices (``call``), and the
+    recorded top-k is concatenated back into one tensor.
+
+    With selective ``"moe"`` recompute, ``MoELayer`` checkpoints each call on its own, and backward
+    reruns only that call, not this loop, so nothing here could hand the rerun its slice. Instead,
+    ``call`` checkpoints the chunk itself, around both the MoE call and the code that sets its
+    slice, so the rerun replays the same slice whatever order autograd runs the chunks in.
+    NVIDIA/Megatron-LM#8463 does the same upstream by passing the slice to
+    ``MoELayer.forward(replay_topk_idx=...)``.
+    """
+
+    def __init__(self, mlp, chunk_tokens, pad_tokens=0):
+        from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+        self.mlp = mlp
+        router = getattr(mlp, "router", None)
+        self.replay = getattr(router, "router_replay", None)
+        self.action = self.replay.router_replay_action if self.replay is not None else None
+        self.bounds = [0]
+        for n in chunk_tokens:
+            self.bounds.append(self.bounds[-1] + n)
+        self.recorded = []
+        self.real_tokens = self.bounds[-1] - pad_tokens
+        # MoELayer checkpoints each call under selective "moe" recompute.
+        self.chunks_recompute = getattr(mlp, "moe_layer_recompute", False) and mlp.training
+        self.indices = None
+        if self.action == RouterReplayAction.REPLAY_FORWARD:
+            target = self.replay.target_topk_idx
+            self._check_num_rows(target)
+            backward_list = self.replay.replay_backward_list
+            # The chunks' reruns replay their slices of the target, so no rerun pops the entry
+            # set_target_indices appended for this micro-batch; drop it.
+            if self.chunks_recompute and backward_list and backward_list[-1] is target:
+                backward_list.pop()
+            self.indices = self._pad(target, pad_tokens)
+        elif self.action == RouterReplayAction.REPLAY_BACKWARD and self.replay.replay_backward_list:
+            # Full-layer recompute reruns this loop.
+            entry = self.replay.replay_backward_list.pop(0)
+            self._check_num_rows(entry)
+            self.indices = self._pad(entry, pad_tokens)
+        self._record = self.action == RouterReplayAction.RECORD
+
+    def _check_num_rows(self, indices):
+        """One replay row per real token, as the unchunked gather requires; slicing would ignore extra rows."""
+        if indices is not None and indices.shape[0] != self.real_tokens:
+            raise ValueError(
+                f"Routing replay indices have {indices.shape[0]} rows, but this MoE layer routes "
+                f"{self.real_tokens} tokens."
+            )
+
+    @staticmethod
+    def _pad(indices, pad_tokens):
+        """Dummy tokens replay the first real token's experts (any valid, distinct top-k works)."""
+        if not pad_tokens or indices is None:
+            return indices
+        if indices.shape[0] == 0:  # no real token to copy: experts 0..topk-1
+            dummy = torch.arange(indices.shape[1], dtype=indices.dtype, device=indices.device)
+            return dummy.expand(pad_tokens, -1)
+        return torch.cat([indices, indices[:1].expand(pad_tokens, -1)], dim=0)
+
+    def call(self, i, chunk, mask, kwargs):
+        """Run the MLP on chunk ``i``, replaying its slice of the micro-batch's indices."""
+        if self.indices is None:
+            return self.mlp(chunk, padding_mask=mask, **kwargs)
+        indices = self.indices[self.bounds[i] : self.bounds[i + 1]]
+
+        def run(chunk, mask):
+            from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+            # The slice is replayed as a forward target, also in a recompute (REPLAY_BACKWARD).
+            saved = self.replay.target_topk_idx, self.replay.router_replay_action
+            self.replay.target_topk_idx = indices
+            self.replay.router_replay_action = RouterReplayAction.REPLAY_FORWARD
+            # The checkpoint below replaces the MoE layer's own.
+            if self.chunks_recompute:
+                self.mlp.moe_layer_recompute = False
+            try:
+                return self.mlp(chunk, padding_mask=mask, **kwargs)
+            finally:
+                if self.chunks_recompute:
+                    self.mlp.moe_layer_recompute = True
+                self.replay.target_topk_idx, self.replay.router_replay_action = saved
+
+        if not self.chunks_recompute:
+            return run(chunk, mask)
+        return _checkpoint(self.mlp, run, chunk, mask)
+
+    def after_chunk(self):
+        if self._record and self.replay.recorded_topk_idx is not None:
+            self.recorded.append(self.replay.recorded_topk_idx.clone())
+
+    def finish(self):
+        if self._record and self.recorded:
+            self.replay.recorded_topk_idx = torch.cat(self.recorded, dim=0)[: self.real_tokens]
+
+
+def _checkpoint(mlp, fn, chunk, mask):
+    """Checkpoint ``fn(chunk, mask)`` the way ``MoELayer.forward`` checkpoints its call."""
+    from megatron.core.transformer.utils import precision_aware_checkpoint
+
+    return precision_aware_checkpoint(fn, mlp.config, mlp.tp_group, chunk, mask)

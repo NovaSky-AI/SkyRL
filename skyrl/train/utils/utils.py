@@ -6,10 +6,11 @@ import os
 import socket
 import sys
 import time
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import ray
 import torch
@@ -18,6 +19,7 @@ from ray.util.placement_group import (
     PlacementGroup,
     placement_group,
     placement_group_table,
+    remove_placement_group,
 )
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -29,6 +31,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_wire_format,
     validate_concrete_fp8_recipe,
 )
+from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     AUTO_FP8,
     BLOCKWISE_FP8,
@@ -43,6 +46,7 @@ from skyrl.env_vars import (
 )
 from skyrl.train.config.config import (
     SUPPORTED_SPECULATIVE_DECODING_METHODS,
+    MegatronConfig,
     SkyRLTrainConfig,
     get_config_as_dict,
 )
@@ -83,6 +87,23 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
+def _megatron_dp_size(role: str, world_size: int, megatron_config: MegatronConfig) -> int:
+    """The data parallel size of a Megatron model (``role``: policy or ref) on ``world_size`` GPUs.
+
+    Megatron lays the GPUs out twice: a dense grid (tp * cp * pp) and an expert grid (etp * ep * pp), and
+    builds the expert grid even for a dense model. Both must divide the world size (see MegatronConfig).
+    """
+    pp = megatron_config.pipeline_model_parallel_size
+    cp = megatron_config.context_parallel_size
+    tp = megatron_config.tensor_model_parallel_size
+    assert world_size % (pp * cp * tp) == 0, (
+        f"{role}_world_size {world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+        "This ensures that the data parallel size is an integer."
+    )
+    megatron_config.check_expert_grid(world_size, f"trainer.{role}.megatron_config")
+    return world_size // (pp * cp * tp)
+
+
 def validate_batch_sizes(cfg: SkyRLTrainConfig):
     """
     Validate configured batch sizes.
@@ -110,14 +131,7 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
 
     if cfg.trainer.strategy == "megatron":
-        pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
-        cp = cfg.trainer.policy.megatron_config.context_parallel_size
-        tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
-        assert policy_world_size % (pp * cp * tp) == 0, (
-            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-            "This ensures that the data parallel size is an integer."
-        )
-        policy_dp_size = policy_world_size // (pp * cp * tp)
+        policy_dp_size = _megatron_dp_size("policy", policy_world_size, cfg.trainer.policy.megatron_config)
     else:
         policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
 
@@ -198,14 +212,7 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
         if cfg.trainer.strategy == "megatron":
-            pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
-            cp = cfg.trainer.ref.megatron_config.context_parallel_size
-            tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
-            assert ref_world_size % (pp * cp * tp) == 0, (
-                f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-                "This ensures that the data parallel size is an integer."
-            )
-            ref_dp_size = ref_world_size // (pp * cp * tp)
+            ref_dp_size = _megatron_dp_size("ref", ref_world_size, cfg.trainer.ref.megatron_config)
         else:
             ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
@@ -278,6 +285,12 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
         assert (
             cfg.generator.inference_engine.enable_return_routed_experts
         ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
+
+    # The decoupled MTP draft loss rolls logits and labels without context parallelism (see the CP=1
+    # assert in MegatronModelWrapper), for every model.
+    mtp = getattr(cfg.trainer, "mtp", None)
+    if mtp is not None and mtp.enabled and cfg.trainer.policy.megatron_config.context_parallel_size > 1:
+        raise ValueError("trainer.mtp.enabled=true is not supported with context_parallel_size > 1")
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
@@ -398,6 +411,20 @@ def validate_step_timeouts(step_timeout_s: Optional[float], weight_sync_timeout_
         )
 
 
+def validate_optimizer_offload_to_disk_cfg(cfg: SkyRLTrainConfig):
+    """Reject ``optimizer_offload_to_disk`` settings that would be ignored, or fail only once training runs."""
+    if cfg.trainer.ref.megatron_config.optimizer_offload_to_disk.dir is not None:
+        raise ValueError("optimizer_offload_to_disk applies to the policy only; unset it for trainer.ref.")
+    if cfg.trainer.policy.megatron_config.optimizer_offload_to_disk.dir is None:
+        return
+    if cfg.trainer.strategy != "megatron":
+        raise ValueError("optimizer_offload_to_disk requires trainer.strategy=megatron.")
+    if cfg.trainer.policy.model.lora.rank > 0:
+        raise ValueError("optimizer_offload_to_disk does not support LoRA.")
+    if is_cloud_path(cfg.trainer.ckpt_path):
+        raise ValueError("optimizer_offload_to_disk requires a local trainer.ckpt_path.")
+
+
 def validate_cfg(cfg: SkyRLTrainConfig):
     if cfg.trainer.strategy == "fsdp2":
         import warnings
@@ -414,6 +441,15 @@ def validate_cfg(cfg: SkyRLTrainConfig):
             raise ValueError(f"max_training_steps must be > 0, got {cfg.trainer.max_training_steps}")
 
     validate_step_timeouts(cfg.trainer.step_timeout_s, cfg.trainer.weight_sync_timeout_s)
+
+    if cfg.trainer.log_mfu and cfg.trainer.strategy == "megatron":
+        from skyrl.train.utils.mfu import mfu_support
+
+        mfu_warning = mfu_support(
+            cfg.trainer.strategy, cfg.trainer.policy.megatron_config, cfg.trainer.policy.model.lora.rank
+        ).warning
+        if mfu_warning:
+            logger.warning(mfu_warning)
 
     # Validate generation config separately
     validate_generator_cfg(cfg)
@@ -656,6 +692,7 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
 
     if cfg.trainer.strategy == "megatron":
         validate_megatron_cfg(cfg)
+    validate_optimizer_offload_to_disk_cfg(cfg)
     if cfg.generator.use_conversation_multi_turn:
         if (
             cfg.generator.sampling_params.stop is not None or cfg.generator.eval_sampling_params.stop is not None
@@ -702,13 +739,15 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             f"Unsupported fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}; "
             f"expected one of {(*WIRE_FORMATS, AUTO_FP8)!r} or None"
         )
+    if ie_cfg.fp8_weight_sync_exclude_modules and ie_cfg.fp8_weight_sync_mode is None:
+        raise ValueError("fp8_weight_sync_exclude_modules requires fp8_weight_sync_mode to be set")
     if ie_cfg.fp8_weight_sync_mode in WIRE_FORMATS:
         if cfg.trainer.strategy != "megatron":
             raise ValueError("FP8 weight sync requires trainer.strategy='megatron'")
         if ie_cfg.weight_sync_backend in {"sharded_rdt", "delta"}:
             # Neither backend can carry the quantized payload + scale pairs that
-            # FP8 weight sync is made of: the RDT weight sources export bridge
-            # tensors cast to the inference dtype, and the delta checkpoint format
+            # FP8 weight sync is made of: the RDT weight sources export plain bridge
+            # tensors (inference dtype, fp32 / integer params kept), and the delta checkpoint format
             # cannot represent the marker names and scale tensors. Both senders
             # refuse at send time too, but vLLM is built with quantization="fp8"
             # and load_format="dummy" long before the first sync, so the model is
@@ -742,6 +781,44 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             raise ValueError(
                 "lora.sync_mode='memory' requires generator.inference_engine.weight_sync_backend='nccl' "
                 f"(CUDA IPC when colocated), got {ie_cfg.weight_sync_backend!r}"
+            )
+    if lora_cfg.max_lora_rank is not None and lora_cfg.max_lora_rank < lora_cfg.rank:
+        raise ValueError(
+            f"trainer.policy.model.lora.max_lora_rank={lora_cfg.max_lora_rank} must be >= lora.rank={lora_cfg.rank}"
+        )
+    if lora_cfg.init_adapter_path:
+        if lora_cfg.rank <= 0:
+            raise ValueError("trainer.policy.model.lora.init_adapter_path requires lora.rank > 0 (the adapter's r)")
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError(
+                f"trainer.policy.model.lora.init_adapter_path is only supported with trainer.strategy=megatron, "
+                f"got {cfg.trainer.strategy!r}"
+            )
+        if cfg.trainer.strategy == "megatron" and cfg.trainer.policy.megatron_config.lora_config.lora_type != "lora":
+            raise ValueError(
+                "trainer.policy.model.lora.init_adapter_path requires megatron_config.lora_config.lora_type='lora'"
+            )
+    if cfg.trainer.critic.model.lora.init_adapter_path:
+        raise ValueError("lora.init_adapter_path is only supported for the policy, not trainer.critic")
+
+    if ie_cfg.scale_moe_lora_rank:
+        megatron_lora_cfg = cfg.trainer.policy.megatron_config.lora_config
+        if cfg.trainer.strategy != "megatron" or lora_cfg.rank <= 0 or megatron_lora_cfg.merge_lora:
+            raise ValueError(
+                "generator.inference_engine.scale_moe_lora_rank requires trainer.strategy='megatron', "
+                "lora.rank > 0 and megatron_config.lora_config.merge_lora=false"
+            )
+        if not megatron_lora_cfg.normalize_moe_lora:
+            raise ValueError(
+                "generator.inference_engine.scale_moe_lora_rank requires "
+                "megatron_config.lora_config.normalize_moe_lora=true: otherwise the experts train at lora.rank"
+            )
+    for kwargs_name in ("engine_init_kwargs", "prefill_init_kwargs", "decode_init_kwargs"):
+        additional_config = (getattr(ie_cfg, kwargs_name) or {}).get("additional_config") or {}
+        if "max_expert_lora_rank" in additional_config:
+            raise ValueError(
+                f"generator.inference_engine.{kwargs_name}.additional_config.max_expert_lora_rank is set by "
+                "SkyRL; use generator.inference_engine.scale_moe_lora_rank=true instead"
             )
 
     if ie_cfg.enable_pd:
@@ -791,16 +868,21 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     assert ie_cfg.distributed_executor_backend in ("mp", "ray"), "invalid distributed executor backend"
 
     if ie_cfg.enable_return_routed_experts:
-        # vLLM captures routes per worker, into a buffer covering only that worker's layers, and
-        # only the last pipeline stage returns model output. With inference PP > 1 the routes of
-        # every earlier stage's MoE layers are silently dropped (left as expert 0). This holds for
-        # both executor backends. The ray backend itself is fine: vLLM copies the routed-expert
-        # arrays out of Ray's shared-memory channel before the next read (v1/executor/ray_utils.py).
-        assert ie_cfg.pipeline_parallel_size == 1, (
-            "rollout router replay (r3) requires generator.inference_engine.pipeline_parallel_size=1: "
-            "vLLM returns routed experts only from the last pipeline stage, so earlier stages' routes "
-            "would be lost. Scale the inference engine with tensor/expert parallelism instead."
-        )
+        # Each vLLM PP stage captures only its own MoE layers, and only the last stage returns
+        # output, so stock vLLM rejects R3 with PP > 1. The PP relay (natively in a patched vLLM,
+        # or through patches/vllm/patch_routed_experts_pp_relay.py on AuxOutput-based builds)
+        # forwards each stage's routes to the next. Both executor backends use the same PP channel.
+        if ie_cfg.pipeline_parallel_size > 1:
+            from skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay import (
+                vllm_supports_routed_experts_with_pp,
+            )
+
+            assert vllm_supports_routed_experts_with_pp(), (
+                "rollout router replay (r3) with generator.inference_engine.pipeline_parallel_size > 1 "
+                "needs a vLLM build with the AuxOutput connector (the PP relay patch targets it); the "
+                "installed vLLM is not one, so earlier stages' routes would be lost. Use "
+                "pipeline_parallel_size=1 and scale with tensor/expert parallelism instead."
+            )
         assert (
             cfg.trainer.strategy == "megatron"
         ), "rollout router replay (r3) is only supported with Megatron training backend"
@@ -979,6 +1061,9 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         for nvte_var in ("NVTE_DEBUG", "NVTE_DEBUG_LEVEL"):
             if os.environ.get(nvte_var):
                 env_vars[nvte_var] = os.environ[nvte_var]
+        # DeepSeek-V4.1 switches read by the Megatron workers (patches/megatron/deepseek_v41: KV fake-quant,
+        # Engram table placement, faulthandler).
+        env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
 
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
@@ -1095,6 +1180,18 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # Selects the DSA indexer top-k backend under dsa_kernel_backend=cudnn
         # (patches/megatron/patch_dsa_hybrid_indexer.py); read in the Megatron workers.
         "SKYRL_DSA_INDEXER_BACKEND",
+        # GLM-5.3-Flash k-pool indexer query sharding (glm5_next/dsa.py) and head-full sparse
+        # attention (patches/megatron/patch_dsa_head_full.py); read in the Megatron workers.
+        "SKYRL_DSA_INDEXER_TP_SHARD",
+        "SKYRL_DSA_HEAD_FULL",
+        "SKYRL_DSA_HEAD_FULL_FAST_PERMUTE",
+        "SKYRL_DSA_HEAD_FULL_ZIGZAG",
+        # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
+        "VLLM_ALLREDUCE_USE_FLASHINFER",
+        "VLLM_ALLREDUCE_USE_SYMM_MEM",
+        # Ray sets OMP_NUM_THREADS=num_cpus (1 per policy actor) unless the runtime env has it,
+        # which leaves the CPU-offloaded optimizer step single-threaded.
+        "OMP_NUM_THREADS",
         # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
         "CUDA_LAUNCH_BLOCKING",
         "PYTHONFAULTHANDLER",
@@ -1233,8 +1330,11 @@ def configure_ray_worker_logging() -> None:
     # 2) Route stdlib logging -> Loguru (so vLLM/transformers/etc. are formatted)
     class _InterceptHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
+            level_name = record.levelname
+            if record.levelno == logging.INFO and (record.name == "httpx" or record.name.startswith("httpx.")):
+                level_name = "DEBUG"
             try:
-                level = logger.level(record.levelname).name
+                level = logger.level(level_name).name
             except ValueError:
                 level = record.levelno
             logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
@@ -1283,21 +1383,39 @@ def initialize_ray(cfg: SkyRLTrainConfig):
     sync_registries()
 
 
-def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
-    try:
-        ray.get(pg.ready(), timeout=timeout)
-    except Exception as e:
-        # Extract resource demands from the placement group
-        bundles = pg.bundle_specs
-        total_gpus = sum(bundle.get("GPU", 0) for bundle in bundles)
-        total_cpus = sum(bundle.get("CPU", 0) for bundle in bundles)
+@contextmanager
+def cleanup_on_error(cleanup: Callable[[], Any], description: str):
+    """Run ``cleanup`` if the body raises, then re-raise the body's exception.
 
-        raise RuntimeError(
-            f"Failed to create placement group with {len(bundles)} bundles "
-            f"(requiring {total_gpus} GPUs, {total_cpus} CPUs total) in {timeout} seconds. "
-            f"This might indicate insufficient GPU resources.\n"
-            f"Error: {e}"
-        )
+    A failure in ``cleanup`` is attached to that exception as a note instead of replacing it.
+    """
+    try:
+        yield
+    except BaseException as primary:
+        try:
+            cleanup()
+        except Exception as cleanup_exc:
+            primary.add_note(f"{description} also failed during cleanup: {cleanup_exc!r}")
+        raise
+
+
+def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
+    """Wait until ``pg`` is ready, removing it if that does not happen within ``timeout`` seconds."""
+    with cleanup_on_error(lambda: remove_placement_group(pg), "Removing the placement group"):
+        try:
+            ray.get(pg.ready(), timeout=timeout)
+        except Exception as e:
+            # Extract resource demands from the placement group
+            bundles = pg.bundle_specs
+            total_gpus = sum(bundle.get("GPU", 0) for bundle in bundles)
+            total_cpus = sum(bundle.get("CPU", 0) for bundle in bundles)
+
+            raise RuntimeError(
+                f"Failed to create placement group with {len(bundles)} bundles "
+                f"(requiring {total_gpus} GPUs, {total_cpus} CPUs total) in {timeout} seconds. "
+                f"This might indicate insufficient GPU resources.\n"
+                f"Error: {e}"
+            )
 
 
 @ray.remote(num_gpus=1)

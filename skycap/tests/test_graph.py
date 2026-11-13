@@ -128,7 +128,8 @@ def test_the_sibling_not_picked_is_shadowed_but_still_trains() -> None:
     assert h.graph.paths() == [[0, 1], [0, 2]]
 
 
-def test_a_model_sibling_is_preferred_over_a_later_client_copy() -> None:
+def test_a_later_client_copy_is_preferred_over_a_model_sibling() -> None:
+    # A trajectory goes on from its newest branch, e.g. the client twins a token-mode full render stores.
     graph = MessageGraph()
     root, _ = graph.add(
         None, role="user", author="client", message=user("q"), match_hash="q", delta_hash="q", created_at=0.0
@@ -152,9 +153,9 @@ def test_a_model_sibling_is_preferred_over_a_later_client_copy() -> None:
         created_at=2.0,
     )
 
-    assert graph.match(["q", "a"]) == [root.id, sample.id]
-    assert graph.shadowed_by(copy.id) == sample.id
-    assert graph.shadowed_by(sample.id) is None
+    assert graph.match(["q", "a"]) == [root.id, copy.id]
+    assert graph.shadowed_by(sample.id) == copy.id
+    assert graph.shadowed_by(copy.id) is None
 
 
 def test_with_no_model_sibling_the_latest_client_one_is_picked() -> None:

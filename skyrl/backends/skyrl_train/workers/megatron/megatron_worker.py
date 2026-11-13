@@ -1,5 +1,8 @@
+import dataclasses
+import functools
 import os
 import shutil
+import time
 from collections import defaultdict
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -13,9 +16,9 @@ from huggingface_hub import snapshot_download
 from loguru import logger
 from megatron.bridge import AutoBridge
 from megatron.bridge.peft.canonical_lora import CanonicalLoRA
-from megatron.bridge.peft.lora import LoRA
 from megatron.core.optimizer import ChainedOptimizer, DistributedOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from megatron.core.quantization.quant_config import RecipeConfig
 from omegaconf import OmegaConf
 from transformers import AutoConfig
 
@@ -24,6 +27,10 @@ from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
     fold_lora_alpha_for_vllm,
     fold_lora_rank_scale_for_vllm,
     mark_alpha_folded,
+    normalized_moe_expert_lora_rank,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.lora_output_layer import (
+    enable_output_layer_attr_passthrough,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.megatron_strategy import (
     MegatronStrategy,
@@ -43,13 +50,35 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
 )
+from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
+    get_packed_seq_align_size,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+    fp8_exclude_recipe,
+    is_fp8_enabled,
+    reject_stage_local_layer_patterns,
     resolve_auto_fp8_recipe,
     validate_concrete_fp8_recipe,
+    validate_fp8_exclude_modules_matched,
     validate_mxfp8_gdn_tp_alignment,
 )
 from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
     SKYRL_LORA_ADAPTER_NAME,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_clip_grads_mixed_dtype import (
+    apply_clip_grads_mixed_dtype_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_dist_ckpt_exchange_wait import (
+    apply_dist_ckpt_exchange_wait_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_dist_optim_te_load_state_dict import (
+    apply_dist_optim_te_load_state_dict_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_distopt_mixed_dtype_group_index import (
+    apply_distopt_mixed_dtype_group_index_patch,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_head_full import (
+    apply_dsa_head_full_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import (
     apply_dsa_hybrid_indexer_patch,
@@ -66,6 +95,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_shared_expert_lora_tp imp
 from skyrl.backends.skyrl_train.patches.megatron.patch_sparse_mla_nope import (
     patch_sparse_mla_nope,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_triton_kernels_int64_offsets import (
+    apply_triton_kernels_int64_offsets_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_vision_attention_backend import (
     patch_vision_attention_backend,
 )
@@ -73,6 +105,7 @@ from skyrl.backends.skyrl_train.patches.te.patch_fa2_head_dim import (
     patch_fa2_head_dim_allowlist,
 )
 from skyrl.backends.skyrl_train.training_batch import (
+    PACKED_BATCH_FIELD_TYPES,
     TensorList,
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -80,7 +113,11 @@ from skyrl.backends.skyrl_train.training_batch import (
     append_tensor_list_padding,
     packed_dummy_row_segments,
 )
-from skyrl.backends.skyrl_train.utils.packed_tensor import PackedTensor
+from skyrl.backends.skyrl_train.utils.lora_targets import (
+    check_lora_group_flags,
+    check_megatron_lora_group_support,
+    megatron_all_linear_target_modules,
+)
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.utils.sample_support import SAMPLE_SUPPORT_FIELD
 from skyrl.backends.skyrl_train.weight_sync import (
@@ -98,10 +135,14 @@ from skyrl.backends.skyrl_train.workers.megatron.adapter_store import (
 from skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper import (
     MegatronModelWrapper,
 )
+from skyrl.backends.skyrl_train.workers.megatron.param_sync import (
+    sync_params_for_export,
+)
 from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
     RefWorkerBase,
+    _apply_adam_params_to_group,
 )
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -112,6 +153,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     reduce_metrics,
 )
 from skyrl.env_vars import SKYRL_MEGATRON_RANDOM_INIT, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.tinker import types
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import update_model_config
 from skyrl.utils.tok import get_tokenizer
@@ -127,12 +169,81 @@ import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  
 from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
     maybe_force_qwen35_text_bridge,
 )
+from skyrl.backends.skyrl_train.workers.megatron.model_flops import (
+    model_flops,
+    unsupported_reason,
+)
 
 apply_shared_expert_lora_tp_patch()
 apply_dsa_hybrid_indexer_patch()
+apply_dist_ckpt_exchange_wait_patch()
+apply_dist_optim_te_load_state_dict_patch()
+apply_dsa_head_full_patch()
+# megatron-core Triton kernels (fused mHC, MLA RoPE): int64 row offsets for long sequences (DSv4 / V4.1 at >64k).
+apply_triton_kernels_int64_offsets_patch()
+# Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
+# TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
+apply_distopt_mixed_dtype_group_index_patch()
+# Grad norm / clip over mixed fp32/bf16 decoupled grads (precision-aware optimizer on mHC models).
+# TODO: remove once NVIDIA/Megatron-LM#7279 is in the pinned megatron-core (see patches/megatron/README.md).
+apply_clip_grads_mixed_dtype_patch()
+
+
+# Selective-recompute modules an attention variant cannot take.
+_UNSUPPORTED_RECOMPUTE_MODULES = {
+    # megatron-core's DSv4HybridAttention (DeepSeek-V4 / V4.1) asserts checkpoint_core_attention is off.
+    "dsv4_hybrid": {"core_attn"},
+}
+
+
+def drop_unsupported_recompute_modules(provider) -> None:
+    """Drop the selective-recompute modules the provider's attention variant cannot take (selective "core_attn"
+    is SkyRL's default), and turn recompute off if nothing is left. A no-op for variants with no entry in
+    ``_UNSUPPORTED_RECOMPUTE_MODULES`` and for any granularity but "selective"."""
+    variant = getattr(provider, "experimental_attention_variant", None)
+    unsupported = _UNSUPPORTED_RECOMPUTE_MODULES.get(variant, set())
+    if provider.recompute_granularity != "selective" or not unsupported & set(provider.recompute_modules or []):
+        return
+    dropped = sorted(unsupported & set(provider.recompute_modules))
+    provider.recompute_modules = [m for m in provider.recompute_modules if m not in unsupported]
+    if not provider.recompute_modules:
+        provider.recompute_granularity = None
+    logger.info(
+        f"{variant} attention does not support {dropped} recompute; "
+        f"recompute_granularity={provider.recompute_granularity}, "
+        f"recompute_modules={provider.recompute_modules}"
+    )
+
+
+def default_cp_comm_type_for_sliding_window(config) -> None:
+    """Default ``cp_comm_type`` to ``"a2a"`` under context parallelism with sliding-window attention.
+
+    Transformer Engine has no ``"p2p"`` (or ``"a2a+p2p"``) context-parallel path for sliding-window
+    attention, and megatron-core uses ``"p2p"`` when ``cp_comm_type`` is unset, so the sliding-window
+    layers would fail at the first forward. When nothing is set this picks ``"a2a"``, which needs the
+    per-TP-rank query and KV head counts divisible by the context-parallel size, and falls back to
+    ``"all_gather"`` when they are not. A ring-based choice is rejected up front. Used for Beam, whose
+    Megatron-Bridge provider leaves it unset.
+    """
+    cp = getattr(config, "context_parallel_size", 1) or 1
+    if cp <= 1 or getattr(config, "window_size", None) is None:
+        return
+    if config.cp_comm_type is None:
+        tp = getattr(config, "tensor_model_parallel_size", 1) or 1
+        heads = config.num_attention_heads
+        kv_heads = getattr(config, "num_query_groups", None) or heads
+        a2a_ok = heads % tp == 0 and kv_heads % tp == 0 and (heads // tp) % cp == 0 and (kv_heads // tp) % cp == 0
+        config.cp_comm_type = "a2a" if a2a_ok else "all_gather"
+    elif isinstance(config.cp_comm_type, str) and config.cp_comm_type in ("p2p", "a2a+p2p"):
+        raise ValueError(
+            f"cp_comm_type={config.cp_comm_type!r} does not support sliding-window attention under "
+            "context parallelism; use 'a2a' or 'all_gather'."
+        )
 
 
 class MegatronWorker:
+    _mfu_warned = False
+
     def _maybe_setup_fake_int4_qat(self):
         """Wire up INT4-served training and return the BF16 bridge-weights path.
 
@@ -221,6 +332,13 @@ class MegatronWorker:
                 "generator.inference_engine.language_model_only=true "
                 "(the vision tower stays frozen in the inference engine)."
             )
+        if self.is_vlm and getattr(hf_config_original, "model_type", None) == "qwen4_exp":
+            # Qwen4ExpBridge only builds the language model (see patches/megatron/qwen4_exp).
+            raise ValueError(
+                "Qwen3.8-Flash-Next (qwen4_exp) is supported text-only on the Megatron backend: "
+                "set trainer.policy.language_model_only=true and "
+                "generator.inference_engine.language_model_only=true."
+            )
 
         override_config_kwargs = {
             "bos_token_id": tokenizer.bos_token_id,
@@ -261,8 +379,8 @@ class MegatronWorker:
         bridge = AutoBridge.from_hf_pretrained(bridge_source, trust_remote_code=True)
 
         # For Qwen3.5, language_model_only routes to the native GPTModel + GDN
-        # path (which supports sample packing) instead of the VL Qwen3VLModel
-        # (which doesn't). Must run before to_megatron_provider; no-op otherwise.
+        # path instead of the VL Qwen3VLModel, so the vision tower is not built.
+        # Must run before to_megatron_provider; no-op otherwise.
         if language_model_only and maybe_force_qwen35_text_bridge(bridge, hf_config):
             logger.info(
                 "language_model_only=True: forcing Qwen3.5 text->GPTModel bridge "
@@ -338,6 +456,19 @@ class MegatronWorker:
             provider.moe_router_enable_expert_bias = megatron_config.moe_router_enable_expert_bias
         provider.moe_enable_routing_replay = megatron_config.moe_enable_routing_replay
 
+        # Supply a quant recipe via either user-provided config file or derived config file
+        # from user-provided exclude list.
+        if megatron_config.te_precision_config_file:
+            provider.quant_recipe = RecipeConfig.from_yaml_file(megatron_config.te_precision_config_file)
+            if megatron_config.pipeline_model_parallel_size > 1:
+                reject_stage_local_layer_patterns(
+                    [m.pattern for m in provider.quant_recipe.matchers], "te_precision_config_file"
+                )
+        elif megatron_config.fp8_exclude_modules:
+            provider.quant_recipe = RecipeConfig.from_config_dict(
+                fp8_exclude_recipe(list(megatron_config.fp8_exclude_modules))
+            )
+
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
@@ -359,6 +490,8 @@ class MegatronWorker:
                 f"(recompute_modules={provider.recompute_modules}); mHC is not compatible with "
                 "full recompute."
             )
+
+        drop_unsupported_recompute_modules(provider)
 
         # megatron bridge resolves the HF config's `layer_types` into an explicit per-layer list
         # sized for the full model, and megatron-core asserts
@@ -421,6 +554,9 @@ class MegatronWorker:
                 "(native process_mtp_loss disabled)"
             )
 
+        if getattr(hf_config, "model_type", None) == "beam":
+            default_cp_comm_type_for_sliding_window(provider)
+
         provider.finalize()
 
         self.provider = provider
@@ -439,7 +575,46 @@ class MegatronWorker:
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
         self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
 
+    def model_flops(self, num_seqs: int, seqlen_sum: int, seqlen_squared_sum: int) -> Optional[Dict[str, float]]:
+        """Returns the forward + backward model FLOPs of a batch with these per-document statistics.
+
+        See :func:`~skyrl.backends.skyrl_train.workers.megatron.model_flops.model_flops`. Returns None
+        for models the formula does not support (see
+        :func:`~skyrl.backends.skyrl_train.workers.megatron.model_flops.unsupported_reason`).
+        Telemetry only: also returns None on any failure rather than ending the run. Either case
+        logs one warning per worker.
+        """
+        reason = unsupported_reason(self.provider)
+        if reason is not None:
+            self._warn_mfu_once(f"[mfu] model FLOPs and MFU are not logged: {reason}.")
+            return None
+        try:
+            return model_flops(self.provider, num_seqs, seqlen_sum, seqlen_squared_sum)
+        except Exception as e:
+            self._warn_mfu_once(f"[mfu] could not compute model FLOPs, so MFU is not logged: {e}")
+            return None
+
+    def _warn_mfu_once(self, message: str) -> None:
+        """Logs ``message`` if no MFU warning has been logged on this worker yet."""
+        if not self._mfu_warned:
+            logger.warning(message)
+            self._mfu_warned = True
+
     def configure_lora(self, lora_config, lora_type: Optional[str] = "lora", experts_shared_outer_loras: bool = False):
+        check_lora_group_flags(
+            lora_config.target_modules,
+            lora_config.train_attn,
+            lora_config.train_mlp,
+            init_adapter_path=lora_config.init_adapter_path,
+        )
+        # `language_model_only` swaps in a text-only bridge only for some architectures
+        # (Qwen3.5, Kimi K2.5), so also ask the provider whether it builds a vision tower.
+        check_megatron_lora_group_support(
+            lora_config.train_attn,
+            lora_config.train_mlp,
+            has_vision_tower=self.is_vlm or getattr(self.provider, "vision_config", None) is not None,
+            multi_latent_attention=bool(getattr(self.provider, "multi_latent_attention", False)),
+        )
         if experts_shared_outer_loras:
             apply_packed_per_expert_sharded_state_dict_patch()
         normalize_moe_lora = self.cfg.policy.megatron_config.lora_config.normalize_moe_lora
@@ -456,35 +631,37 @@ class MegatronWorker:
                 f"normalize_moe_lora requires lora.rank divisible by moe_router_topk; "
                 f"got rank={lora_config.rank}, topk={topk}"
             )
-            expert_rank = -(-(lora_config.rank // topk) // etp) * etp
+            expert_rank = normalized_moe_expert_lora_rank(lora_config.rank, topk, etp)
             assert expert_rank <= lora_config.rank, (
                 f"normalize_moe_lora: expert rank {lora_config.rank // topk} (rank {lora_config.rank} // topk "
                 f"{topk}) rounds up to {expert_rank} for expert_tensor_parallel_size={etp}, exceeding the "
                 f"LoRA rank {lora_config.rank} that vLLM max_lora_rank is sized from"
             )
 
-        if lora_config.target_modules == "all-linear":
-            if lora_type == "lora":
-                target_modules = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in_proj", "out_proj"]
-            else:
-                target_modules = [
-                    "linear_q",
-                    "linear_k",
-                    "linear_v",
-                    "linear_proj",
-                    "linear_fc1_up",
-                    "linear_fc1_gate",
-                    "linear_fc2",
-                    "in_proj",
-                    "out_proj",
-                ]
-            if not gdn_in_proj_lora_is_safe(self.bridge):
-                target_modules.remove("in_proj")
-        else:
-            target_modules = lora_config.target_modules
+        self._lora_import_plan = None
+        target_modules = lora_config.target_modules
+        if lora_config.init_adapter_path:
+            # The adapter decides which modules are adapted and at what rank; the LoRA
+            # module built below must match it exactly for the import to be lossless.
+            self._lora_import_plan = self._plan_lora_import(lora_config, lora_type)
+            target_modules = self._lora_import_plan.target_modules
+        elif isinstance(target_modules, str) and target_modules.lower() == "all-linear":
+            target_modules = megatron_all_linear_target_modules(
+                lora_type,
+                lora_config.train_attn,
+                lora_config.train_mlp,
+                include_gdn_in_proj=gdn_in_proj_lora_is_safe(self.bridge),
+            )
+            if not (lora_config.train_attn and lora_config.train_mlp) and self._rank == 0:
+                group = "attn" if lora_config.train_attn else "mlp"
+                logger.info(f"LoRA restricted to {group} modules: {target_modules}")
 
         if lora_type == "lora":
-            self.lora_cls = LoRA(
+            from skyrl.backends.skyrl_train.distributed.megatron.lora_import import (
+                SkyRLLoRA,
+            )
+
+            self.lora_cls = SkyRLLoRA(
                 target_modules=target_modules,
                 dim=lora_config.rank,
                 alpha=lora_config.alpha,
@@ -496,6 +673,10 @@ class MegatronWorker:
                 experts_shared_outer_loras=experts_shared_outer_loras,
                 normalize_moe_lora=normalize_moe_lora,
                 share_expert_adapters=lora_config.share_expert_adapters,
+                sequence_parallel_input_regather=(
+                    self.cfg.policy.megatron_config.lora_config.sequence_parallel_input_regather
+                ),
+                module_dims=self._lora_import_plan.module_dims if self._lora_import_plan else {},
             )
         elif lora_type == "canonical_lora":
             if experts_shared_outer_loras:
@@ -511,6 +692,72 @@ class MegatronWorker:
                 exclude_modules=[] if lora_config.exclude_modules is None else lora_config.exclude_modules,
                 normalize_moe_lora=self.cfg.policy.megatron_config.lora_config.normalize_moe_lora,
             )
+
+    def _plan_lora_import(self, lora_config, lora_type: Optional[str]):
+        """Read ``lora.init_adapter_path`` and size the Megatron adapters to hold it."""
+        from skyrl.backends.skyrl_train.distributed.lora_import import (
+            check_adapter_matches_config,
+            normalize_peft_adapter,
+            read_peft_adapter,
+        )
+        from skyrl.backends.skyrl_train.distributed.megatron.lora_import import (
+            plan_megatron_lora_import,
+        )
+
+        if lora_type != "lora":
+            raise ValueError(
+                f"init_adapter_path requires megatron_config.lora_config.lora_type='lora', got {lora_type!r}"
+            )
+        adapter = normalize_peft_adapter(read_peft_adapter(lora_config.init_adapter_path))
+        check_adapter_matches_config(adapter, lora_config.rank, lora_config.alpha)
+        plan = plan_megatron_lora_import(
+            self.bridge,
+            adapter,
+            tp_size=mpu.get_tensor_model_parallel_world_size(),
+            pp_size=mpu.get_pipeline_model_parallel_world_size(),
+            target_modules=(
+                None
+                if isinstance(lora_config.target_modules, str) and lora_config.target_modules.lower() == "all-linear"
+                else list(lora_config.target_modules)
+            ),
+        )
+        if "output_layer" in plan.target_modules and self.cfg.fused_lm_head_logprob:
+            raise ValueError(
+                "init_adapter_path: the adapter trains lm_head, which trainer.fused_lm_head_logprob=true bypasses "
+                "(it reads output_layer.weight directly); disable fused_lm_head_logprob"
+            )
+        if not self.cfg.policy.megatron_config.lora_config.merge_lora:
+            max_lora_rank = lora_config.max_lora_rank or lora_config.rank
+            if plan.max_rank > max_lora_rank:
+                raise ValueError(
+                    f"init_adapter_path: with merge_lora=false the synced adapter has modules of rank {plan.max_rank} "
+                    f"but vLLM max_lora_rank is {max_lora_rank}; set trainer.policy.model.lora.max_lora_rank to "
+                    "a vLLM-accepted value >= that rank (64, 128, 256, 320 or 512)"
+                )
+        self._lora_import_adapter = adapter
+        if self._rank == 0:
+            logger.info(
+                "init_adapter_path={}: r={} alpha={} adapted leaves={} -> Megatron targets={} ranks={}",
+                lora_config.init_adapter_path,
+                adapter.r,
+                adapter.lora_alpha,
+                adapter.leaf_modules(),
+                plan.target_modules,
+                plan.module_dims,
+            )
+        return plan
+
+    def _load_lora_init_adapter(self, model: List[nn.Module]) -> None:
+        """Copy ``lora.init_adapter_path`` into the freshly built LoRA model."""
+        from skyrl.backends.skyrl_train.distributed.megatron.lora_import import (
+            load_peft_adapter_into_megatron,
+        )
+
+        load_peft_adapter_into_megatron(self.bridge, model, self._lora_import_plan, self.lora_cls)
+        # The plan's pieces hold full (unsharded) CPU copies of every adapter tensor; nothing reads them after the load.
+        self._lora_import_plan = None
+        self._lora_import_adapter = None
+        torch.distributed.barrier()
 
     def make_megatron_module(
         self,
@@ -565,6 +812,9 @@ class MegatronWorker:
             def lora_pre_wrap_hook(model):
                 lora_model = self.lora_cls(model, training=True)
                 self.lora_cls.set_params_to_save(lora_model)
+                # GPTModel reads/writes gather_output and sequence_parallel on its
+                # output_layer; an adapter-wrapped one must answer for its base linear.
+                enable_output_layer_attr_passthrough(lora_model)
 
                 return lora_model
 
@@ -576,9 +826,20 @@ class MegatronWorker:
         if ddp_config is not None:
             for k, v in get_config_as_dict(ddp_config).items():
                 setattr(default_ddp_config, k, v)
+        if getattr(self.provider, "calculate_per_token_loss", False) and default_ddp_config.average_in_collective:
+            # Per-token loss normalization (forced by Megatron-Bridge's Qwen-VL providers under CP)
+            # sums gradients across DP x CP and divides by the global token count in
+            # finalize_model_grads; Megatron's DDP asserts average_in_collective is off for it:
+            # https://github.com/NVIDIA/Megatron-LM/blob/d476c21be396dc666d2e04fa8c199c3851a1551f/megatron/core/distributed/distributed_data_parallel.py#L250-L255
+            logger.info("calculate_per_token_loss is on: setting ddp_config.average_in_collective=False")
+            default_ddp_config.average_in_collective = False
         model = self.provider.provide_distributed_model(
             ddp_config=default_ddp_config, wrap_with_ddp=wrap_with_ddp, bf16=bf16
         )
+        if self.megatron_config.fp8_exclude_modules:
+            validate_fp8_exclude_modules_matched(model, list(self.megatron_config.fp8_exclude_modules))
+        if lora_config is not None and getattr(self, "_lora_import_plan", None) is not None:
+            self._load_lora_init_adapter(model)
         return model
 
     def _forward_logprobs(self, data: TrainingInputBatch) -> torch.Tensor:
@@ -738,7 +999,7 @@ class MegatronWorker:
             if value is None:
                 padded[key] = None
                 continue
-            if isinstance(value, PackedTensor):
+            if isinstance(value, PACKED_BATCH_FIELD_TYPES):
                 # Per-token fields cover the dummy attended token; response fields do not.
                 padded[key] = append_packed_field_padding(
                     key, value, segment_lengths=packed_dummy_row_segments(key, pad_count)
@@ -775,6 +1036,7 @@ class MegatronWorker:
         return padded
 
     def save_hf_model(self, export_dir: str, tokenizer):
+        sync_params_for_export(self.actor_module, getattr(self, "optimizer", None))
         # Save model in HuggingFace safetensors format
         hf_export = self.megatron_config.hf_export_config
         self.strategy.save_hf_model(
@@ -799,9 +1061,31 @@ class MegatronWorker:
             data["pixel_values"] = None
 
 
+def _counts_train_compute(method):
+    """Adds the method's CUDA-synchronized wall-clock time to ``self._train_compute_seconds``.
+
+    Timing, and its two device synchronizations, run only when ``log_mfu`` is enabled. A call that
+    raises is not counted.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        if not self.cfg.log_mfu:
+            return method(self, *args, **kwargs)
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+        result = method(self, *args, **kwargs)
+        torch.cuda.synchronize()
+        self._train_compute_seconds += time.perf_counter() - start
+        return result
+
+    return wrapper
+
+
 class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        self._train_compute_seconds = 0.0
         self.model: MegatronModelWrapper = None
         self.actor_module: List[nn.Module] = None
         self.scheduler: OptimizerParamScheduler = None
@@ -936,10 +1220,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             self.optimizer = None
             self.scheduler = None
         else:
+            if self.cfg.policy.megatron_config.optimizer_config_kwargs.get("optimizer_cpu_offload"):
+                # Ray starts this actor with num_cpus=1, which sets OMP_NUM_THREADS=1, so the CPU share of the
+                # optimizer (torch AdamW) would step on one thread. Use this rank's share of the node's CPUs.
+                cpu_threads = len(os.sched_getaffinity(0)) // max(1, self.cfg.placement.policy_num_gpus_per_node)
+                if torch.get_num_threads() < cpu_threads:
+                    torch.set_num_threads(cpu_threads)
             optim_config = init_megatron_optim_config(
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
-            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config)
+            offload_cfg = self.cfg.policy.megatron_config.optimizer_offload_to_disk
+            offload_to_disk = None
+            if offload_cfg.dir is not None:
+                if self._is_lora:
+                    raise ValueError("optimizer_offload_to_disk does not support LoRA.")
+                offload_to_disk = dataclasses.replace(offload_cfg, dir=os.path.join(offload_cfg.dir, self.cfg.run_name))
+            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config, offload_to_disk=offload_to_disk)
 
             # create scheduler
             self.scheduler = get_megatron_optimizer_param_scheduler(
@@ -968,7 +1264,10 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             is_vlm=self.is_vlm,
         )
 
-        self.empty_cuda_cache = self.cfg.policy.megatron_config.empty_cuda_cache
+        megatron_config = self.cfg.policy.megatron_config
+        expandable_segments = self.cfg.use_expandable_segments
+        self.empty_cuda_cache = megatron_config.empty_cuda_cache_after_forward(expandable_segments)
+        self.empty_cuda_cache_after_backward = megatron_config.empty_cuda_cache_after_backward(expandable_segments)
 
         # Enable expandable_segments after init so model weights stay in IPC-compatible
         # standard CUDA memory; only subsequent activations use expandable segments.
@@ -1087,6 +1386,35 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
+    def _set_per_token_loss_counts(self, micro_buffer: List[dict]) -> None:
+        """Attach token counts for Megatron's per-token loss normalization, if it is on."""
+        if not getattr(get_model_config(self.actor_module[0]), "calculate_per_token_loss", False):
+            return
+        if not self.cfg.remove_microbatch_padding:
+            raise ValueError("calculate_per_token_loss requires trainer.remove_microbatch_padding=true")
+        model_config = get_model_config(self.actor_module[0])
+        cp_size = mpu.get_context_parallel_world_size()
+        align = get_packed_seq_align_size(
+            mpu.get_tensor_model_parallel_world_size(),
+            cp_size,
+            fp8_enabled=is_fp8_enabled(getattr(model_config, "fp8", None)),
+            fp8_recipe=getattr(model_config, "fp8_recipe", None),
+        )
+        local_counts = []
+        for m_batch in micro_buffer:
+            if m_batch.get("sub_seq_lengths") is not None:
+                seqlens = [int(n) for row in m_batch["sub_seq_lengths"] for n in row.tolist()]
+            else:
+                seqlens = m_batch["attention_mask"].sum(dim=-1).tolist()
+            padded_total = sum(-(-int(n) // align) * align for n in seqlens)
+            local_counts.append(padded_total // cp_size)
+        total = torch.tensor(sum(local_counts), dtype=torch.int64, device=torch.cuda.current_device())
+        torch.distributed.all_reduce(total, group=mpu.get_data_parallel_group(with_context_parallel=True))
+        for m_batch, count in zip(micro_buffer, local_counts):
+            m_batch["num_tokens_local"] = count
+            m_batch["num_tokens_global"] = int(total.item())
+
+    @_counts_train_compute
     def forward_backward(
         self,
         data: TrainingInputBatch,
@@ -1194,6 +1522,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             m_batch["num_real_microbatches"] = num_real_microbatches
 
         if not micro_buffer:
+            # Still join the per-token count all-reduce so ranks with microbatches don't hang.
+            self._set_per_token_loss_counts(micro_buffer)
             return WorkerOutput()
 
         seq_len = micro_buffer[0]["sequences"].shape[1]
@@ -1207,6 +1537,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             micro_bsz = max_micro_bsz
         else:
             micro_bsz = micro_buffer[0]["sequences"].shape[0]
+
+        self._set_per_token_loss_counts(micro_buffer)
 
         # Gate on first PP/TP/CP rank so we emit exactly one line per DP rank
         # (matches how status all-reduce treats metrics as identical within a DP group).
@@ -1233,7 +1565,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             return_per_token_outputs=return_per_token_outputs,
         )
 
-        if self.empty_cuda_cache:
+        if self.empty_cuda_cache_after_backward:
             torch.cuda.empty_cache()
 
         # Aggregate metrics across micro-batches
@@ -1301,6 +1633,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         return WorkerOutput(loss_fn_outputs=all_loss_fn_outputs, metrics=status)
 
+    def pop_train_compute_seconds(self) -> float:
+        """Returns the seconds spent in ``forward_backward`` and ``optim_step`` since the last call."""
+        seconds, self._train_compute_seconds = self._train_compute_seconds, 0.0
+        return seconds
+
+    @_counts_train_compute
     def optim_step(self) -> Optional[float]:
         """
         Perform optimizer step.
@@ -1360,30 +1698,32 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             return opt.param_groups[0]["lr"]
         return self.optimizer.param_groups[0]["lr"]
 
-    def set_lr(self, learning_rate: float) -> None:
-        """
-        Set learning rate for the optimizer.
+    def set_optimizer_hparams(self, adam_params: types.AdamParams) -> None:
+        """Apply the request's ``AdamParams`` to the live optimizer before each ``optim_step``.
 
-        Handles both regular optimizers and ChainedOptimizer (used with
-        distributed optimizer). Updates all param_groups across all
-        underlying optimizers.
-
-        Note: This bypasses the scheduler. The next scheduler.step() call
-        will override this value unless the scheduler is configured for
-        constant LR. No-op when ``policy.inference_only_init=True``.
+        Megatron's distributed optimizer is a ``ChainedOptimizer`` whose inner optimizers
+        each own param groups and a config (``init_megatron_optim_config`` bakes the
+        build-time values into both). The param groups are rewritten per step through the
+        shared helper — no-decay groups keep their ``0`` — and ``grad_clip_norm`` is written
+        to each inner optimizer's ``config.clip_grad``, which its own ``step`` clips with.
+        No-op when the worker was initialized with ``policy.inference_only_init=True``.
         """
         if self.optimizer is None:
             return
         if isinstance(self.optimizer, ChainedOptimizer):
-            # ChainedOptimizer wraps multiple optimizers (e.g., for different param groups)
             for opt in self.optimizer.chained_optimizers:
                 if opt.optimizer is None:
                     continue
                 for param_group in opt.param_groups:
-                    param_group["lr"] = learning_rate
+                    _apply_adam_params_to_group(param_group, adam_params)
+                opt.config.clip_grad = adam_params.grad_clip_norm
         else:
             for param_group in self.optimizer.param_groups:
-                param_group["lr"] = learning_rate
+                _apply_adam_params_to_group(param_group, adam_params)
+            if hasattr(self.optimizer, "config"):
+                # The offload-to-disk and the generated Megatron optimizers both carry
+                # the OptimizerConfig they clip with; anything else would have no attr.
+                self.optimizer.config.clip_grad = adam_params.grad_clip_norm
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         """Resolve serialized FP8 before the parent builds the weight source."""
@@ -1399,7 +1739,11 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, "
                     f"got {resolved_backend!r}."
                 )
-            self._serialized_fp8_config = resolve_serialized_fp8_config(mode, self.strategy.hf_config)
+            self._serialized_fp8_config = resolve_serialized_fp8_config(
+                mode,
+                self.strategy.hf_config,
+                inference_engine_cfg.fp8_weight_sync_exclude_modules,
+            )
 
         await super().init_weight_sync_state(inference_engine_client, inference_engine_cfg)
 
@@ -1583,7 +1927,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             # Read while the export is still prepared: the send consumes the
             # stream and drops it, and re-reading afterwards would be a
             # collective this rank would run alone.
-            unique = len(source.metadata())
+            unique = len(source.metadata)
             aliased = len(receive_target["aliases"])
             await inference_engine_client.set_lora_receive_target(receive_target)
         # No rank may enter the transfer before every worker is armed: rank 0
@@ -1624,9 +1968,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         from megatron.bridge.models.conversion.peft_bridge import (
             build_adapter_config_dict,
-            infer_target_modules_from_adapter_weights,
         )
         from safetensors.torch import save_file
+
+        from skyrl.backends.skyrl_train.weight_sync.sources import (
+            adapter_target_modules,
+        )
 
         # Every rank must participate in the bridge's collective export, but only
         # the writer ranks materialize the gathered tensors: with MoE expert
@@ -1685,9 +2032,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 adapter_state, num_moe_experts=getattr(self.provider, "num_moe_experts", None)
             )
 
-            target_modules = sorted(
-                set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"}
-            )
+            target_modules = adapter_target_modules(self.bridge, adapter_state.keys())
             base_model_name_or_path = str(
                 getattr(self, "_logical_model_path", "")
                 or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")
@@ -1734,6 +2079,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         inference_engine_cfg: "InferenceEngineConfig",
         model_id: Optional[str] = None,
     ):
+        sync_params_for_export(self.actor_module, getattr(self, "optimizer", None))
         if inference_engine_client is None:
             inference_engine_client = self._weight_sync_inference_client
 

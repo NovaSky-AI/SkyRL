@@ -502,3 +502,33 @@ class TestMultiDatasetValidation:
         cfg = _sft_cfg_from_overrides(["eval_interval=5"])
         with pytest.raises(ValueError, match="requires eval_datasets"):
             validate_sft_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        (["strategy=fsdp"], "requires strategy='megatron'"),
+        (["ckpt_path=s3://bucket/ckpts"], "local ckpt_path"),
+    ],
+)
+def test_optimizer_offload_to_disk_rejects_settings_it_cannot_honor(overrides, match):
+    cfg = _sft_cfg_from_overrides(["megatron_config.optimizer_offload_to_disk.dir=/tmp/state", *overrides])
+
+    with pytest.raises(ValueError, match=match):
+        validate_sft_cfg(cfg)
+
+
+@pytest.mark.parametrize("ep, valid", [(1, True), (2, True), (8, False)])
+def test_megatron_expert_grid_must_divide_the_world_size(ep, valid):
+    """Megatron's expert grid (pp * ep * etp) must divide the GPUs like the dense one, for a dense model too."""
+    cfg = _sft_cfg_from_overrides(
+        ["strategy=megatron", "placement.num_gpus_per_node=2", f"megatron_config.expert_model_parallel_size={ep}"]
+    )
+
+    if valid:
+        validate_sft_cfg(cfg)
+    else:
+        with pytest.raises(
+            ValueError, match=r"divisible by Megatron's expert grid \(pp \* ep \* etp\) 8\. megatron_config\."
+        ):
+            validate_sft_cfg(cfg)

@@ -10,9 +10,37 @@ What to check and which tests to run when bumping a pinned dependency.
   so check each patch against the new source.
 - Rebase onto `main` before you run GPU CI. A stale base causes failures unrelated to the bump.
 
+## torch
+
+Every CUDA extension wheel is built for one torch version, so these move together with torch in
+`pyproject.toml`:
+- the `torch` pins in the `fsdp` and `megatron` extras, the `override-dependencies` entry, and
+  `torchvision` (each torchvision release supports one torch minor)
+- `flash-attn` (the combined FA2+FA4 wheel) and its `flash-attn-4` companion, both from the same
+  `NovaSky-AI/skyrl-wheels` release
+- `mamba-ssm`, `causal-conv1d` and the three Transformer Engine packages from Astral's index. TE's three
+  packages all come from Astral: its `transformer-engine-torch` pins Astral's TE core.
+- `fast-hadamard-transform` and `flash-mla`, plus the `torch` pin in 
+ `fast-hadamard-transform`'s build dependencies
+
+The new TE-torch build means a torch bump needs the full Transformer Engine test matrix below,
+including the B200 MXFP8 rows.
+
+torch also pins an exact `nvidia-cudnn-cu13`. When the image puts an older cuDNN on `LD_LIBRARY_PATH`,
+cuDNN's sublibraries resolve to it and the first cuDNN op fails with
+`CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED`. TEMPORARY until the images are rebuilt without the system
+cuDNN (#2636): `skyrl/backends/skyrl_train/patches/cudnn/preload.py` loads them from the wheel, and
+`tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_megatron_vlm_init.py::test_vlm_sft_hf_parity`
+(a `Conv3d` through cuDNN) exercises it.
+
 ## Megatron-related bumps
 
 For megatron-core and megatron-bridge, follow `skyrl/backends/skyrl_train/patches/megatron/README.md`.
+
+For megatron-core, megatron-bridge **and vLLM** bumps, run the GLM-5.3-Flash roundtrip rows vs vLLM and
+compare them with the measured values in that README's
+[Reference values](../../skyrl/backends/skyrl_train/patches/megatron/README.md#reference-values) table,
+then add a column for the bump.
 
 ## Transformer Engine
 

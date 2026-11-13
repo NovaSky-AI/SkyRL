@@ -28,7 +28,14 @@ from jaxtyping import Float
 from loguru import logger
 
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
+    DPPOTrustRegion,
+    DPPOType,
+    MemberWeight,
+    RatioBand,
+    RatioClamp,
+    UnitWeight,
     apply_off_policy_correction,
+    sampler_ratio,
 )
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean, safe_exp_delta
 from skyrl.train.config import AlgorithmConfig
@@ -455,11 +462,12 @@ class PolicyLossType(StrEnum):
     CROSS_ENTROPY = "cross_entropy"
     IMPORTANCE_SAMPLING = "importance_sampling"
     DPPO = "dppo"
+    REINFORCE = "reinforce"
 
 
-# Losses that optimize against rollout logprobs, so the "old" logprobs forward pass can be
+# Losses that optimize against rollout logprobs (or none), so the "old" logprobs forward pass can be
 # skipped when nothing else needs them (see `RayPPOTrainer._skip_policy_forward`).
-LOSSES_WITHOUT_OLD_LOGPROBS = frozenset({PolicyLossType.ROLLOUT_IS, PolicyLossType.DPPO})
+LOSSES_WITHOUT_OLD_LOGPROBS = frozenset({PolicyLossType.ROLLOUT_IS, PolicyLossType.DPPO, PolicyLossType.REINFORCE})
 
 LOSSES_WITH_OLD_LOGPROBS = frozenset(
     {
@@ -508,6 +516,7 @@ class PolicyLossRegistry(BaseFunctionRegistry):
             "importance_sampling": [PolicyLossType.IMPORTANCE_SAMPLING, importance_sampling_loss],
             "dppo": [PolicyLossType.DPPO, dppo_policy_loss],
             "rollout_is": [PolicyLossType.ROLLOUT_IS, rollout_is_policy_loss],
+            "reinforce": [PolicyLossType.REINFORCE, reinforce_policy_loss],
         }
 
         for pl_name, (pl_type, pl_func) in pl_types.items():
@@ -737,6 +746,7 @@ def compute_policy_loss_cispo(
     config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    score_centering_term: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
     """Implementation of CISPO (Clipped IS-weight Policy Optimization) loss function,
     as proposed in https://arxiv.org/abs/2506.13585.
@@ -765,8 +775,13 @@ def compute_policy_loss_cispo(
     Logs ``clip_ratio`` (cap-hit fraction) plus ``cispo/ratio_{mean,clamped_mean,max,min}`` so the
     actual gradient multiplier ``r = pi_theta / pi_behavior`` is observable, not just how often the
     cap fires (which is near-zero with a wide ``eps_clip_high``).
+
+    ``score_centering_term`` (``cispo_anchor="rollout"`` only) is the per-token
+    ``Σ_v sg[q_v clamp(r_v)] log π_v`` over the recorded support; see ``score_centering_weight``.
     """
     anchor = config.cispo.cispo_anchor
+    if score_centering_term is not None and anchor != "rollout":
+        raise ValueError("score centering requires cispo_anchor='rollout'")
     if anchor == "rollout":
         assert rollout_logprobs is not None, "rollout_logprobs are required for cispo with cispo_anchor='rollout'"
         if config.off_policy_correction.tis_ratio_type is not None:
@@ -779,11 +794,14 @@ def compute_policy_loss_cispo(
     else:
         behavior_log_probs = old_log_probs
 
-    ratio = safe_exp_delta(log_probs - behavior_log_probs, clip=20.0, out_dtype=log_probs.dtype)
-    clamped_ratio = torch.clamp(ratio, 1 - config.cispo.cispo_eps_clip_low, 1 + config.cispo.cispo_eps_clip_high)
+    clamp = RatioClamp.from_clip(config.cispo.cispo_eps_clip_low, config.cispo.cispo_eps_clip_high)
+    ratio = sampler_ratio(log_probs - behavior_log_probs, out_dtype=log_probs.dtype)
+    clamped_ratio = clamp.calibrate(ratio)
     loss = -advantages * clamped_ratio.detach() * log_probs
+    if score_centering_term is not None:
+        loss = loss + advantages * score_centering_term
 
-    is_clipped = (ratio < 1 - config.cispo.cispo_eps_clip_low) | (ratio > 1 + config.cispo.cispo_eps_clip_high)
+    is_clipped = clamp.clipped(ratio)
     clip_ratio = masked_mean(is_clipped.float(), loss_mask).mean().detach().item()
 
     # IS-ratio diagnostics. clip_ratio above is only the cap-HIT fraction; these expose the actual
@@ -821,6 +839,31 @@ def compute_policy_loss_cispo(
     return loss, loss_metrics
 
 
+def score_centering_weight(loss_name: str, loss_config: AlgorithmConfig) -> MemberWeight:
+    """The weight ``f`` a loss gives the sampled token's score, which score centering applies to
+    every support member (https://arxiv.org/abs/2609.20807, App. A.2).
+
+    Only losses whose weight is relative to the sampler qualify; one relative to ``π_old`` (PPO's
+    ratio) is computed by the trainer itself and never sees the training-inference mismatch.
+    ``loss_config`` must be the post-override config the loss itself receives, so both sides use
+    the same weight.
+    """
+    if loss_name == PolicyLossType.REINFORCE:
+        return UnitWeight()
+    if loss_name == PolicyLossType.ROLLOUT_IS:
+        return RatioBand.from_clip(loss_config.eps_clip_low, loss_config.eps_clip_high)
+    if loss_name == PolicyLossType.CISPO and loss_config.cispo.cispo_anchor == "rollout":
+        return RatioClamp.from_clip(loss_config.cispo.cispo_eps_clip_low, loss_config.cispo.cispo_eps_clip_high)
+    if loss_name == PolicyLossType.DPPO:
+        dppo = loss_config.dppo
+        return DPPOTrustRegion(DPPOType(dppo.dppo_type), delta_low=dppo.delta_low, delta_high=dppo.delta_high)
+    raise ValueError(
+        f"score centering needs a loss weighted relative to the sampler: {PolicyLossType.REINFORCE.value!r}, "
+        f"{PolicyLossType.ROLLOUT_IS.value!r}, {PolicyLossType.CISPO.value!r} with cispo_anchor='rollout', or "
+        f"{PolicyLossType.DPPO.value!r}; got {loss_name!r}"
+    )
+
+
 @register_policy_loss(PolicyLossType.ROLLOUT_IS)
 def rollout_is_policy_loss(
     log_probs: torch.Tensor,
@@ -829,6 +872,7 @@ def rollout_is_policy_loss(
     config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    score_centering_term: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
     """Calibrated importance-weighted policy gradient using rollout log-probs.
 
@@ -842,18 +886,55 @@ def rollout_is_policy_loss(
     old_log_probs are not available.
     It further uses hard zero instead of clamping, but that does not change
     the gradient only the loss value.
+
+    ``score_centering_term`` is the per-token ``Σ_v sg[q_v f(r_v)] log π_θ(v)`` over the recorded
+    support; see ``score_centering_weight``.
     """
     assert rollout_logprobs is not None, "rollout_logprobs are required for rollout_is"
 
-    ratio = safe_exp_delta(log_probs - rollout_logprobs, clip=20.0, out_dtype=log_probs.dtype)
-
-    in_range = (ratio > 1 - config.eps_clip_low) & (ratio < 1 + config.eps_clip_high)
-    calibrated_ratio = torch.where(in_range, ratio, torch.zeros_like(ratio))
+    band = RatioBand.from_clip(config.eps_clip_low, config.eps_clip_high)
+    ratio = sampler_ratio(log_probs - rollout_logprobs, out_dtype=log_probs.dtype)
+    in_range = band.contains(ratio)
+    calibrated_ratio = band.calibrate(ratio)
 
     loss = -(calibrated_ratio.detach() * advantages * log_probs)
+    if score_centering_term is not None:
+        loss = loss + advantages * score_centering_term
     clip_ratio = masked_mean((~in_range).float(), loss_mask).mean().detach().item()
 
     loss_metrics: dict[str, float] = {"clip_ratio": clip_ratio}
+    loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
+        loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
+    )
+    loss_metrics.update(off_policy_metrics)
+
+    loss = reduce_loss(loss, loss_mask)
+    return loss, loss_metrics
+
+
+@register_policy_loss(PolicyLossType.REINFORCE)
+def reinforce_policy_loss(
+    log_probs: torch.Tensor,
+    old_log_probs: torch.Tensor,
+    advantages: torch.Tensor,
+    config: AlgorithmConfig,
+    loss_mask: Optional[torch.Tensor] = None,
+    rollout_logprobs: Optional[torch.Tensor] = None,
+    score_centering_term: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, dict[str, float]]:
+    """Plain policy gradient on the sampled tokens, with no importance ratio.
+
+    L(θ) = -E_t[ Â_t · log π_θ(a_t|s_t) ]
+
+    Under a training-inference mismatch this carries the full drift
+    (https://arxiv.org/abs/2609.20807); ``score_centering_term``, the per-token
+    ``Σ_v sg[q_v] log π_θ(v)`` over the recorded support, cancels it.
+    """
+    loss = -(advantages * log_probs)
+    if score_centering_term is not None:
+        loss = loss + advantages * score_centering_term
+
+    loss_metrics: dict[str, float] = {"clip_ratio": 0.0}
     loss, loss_mask, off_policy_metrics = apply_off_policy_correction(
         loss, old_log_probs, rollout_logprobs, loss_mask, config.off_policy_correction
     )
@@ -871,6 +952,7 @@ def dppo_policy_loss(
     config: AlgorithmConfig,
     loss_mask: Optional[torch.Tensor] = None,
     rollout_logprobs: Optional[torch.Tensor] = None,
+    score_centering_term: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, dict[str, float]]:
     """
     Divergence Proximal Policy Optimization (DPPO) policy loss.
@@ -883,44 +965,29 @@ def dppo_policy_loss(
 
     See: https://arxiv.org/abs/2602.04879
     Reference impl: https://github.com/sail-sg/Stable-RL/blob/main/verl/trainer/ppo/core_algos.py#L1241
+
+    ``score_centering_term`` is the per-token ``Σ_v sg[q_v f(r_v)] log π_θ(v)`` over the recorded
+    support, for the advantage's sign; see ``score_centering_weight``.
     """
     # Use rollout logprobs as behavior policy for both ratio and mask
     # See Section 5.2 of paper
     mu_log_probs = rollout_logprobs if rollout_logprobs is not None else old_log_probs
-    ratio = safe_exp_delta(log_probs - mu_log_probs, clip=20.0, out_dtype=log_probs.dtype)
+    ratio = sampler_ratio(log_probs - mu_log_probs, out_dtype=log_probs.dtype)
 
-    dppo_type = config.dppo.dppo_type
-    delta_low = config.dppo.delta_low
-    delta_high = config.dppo.delta_high
-
-    # Compute DPPO mask
+    trust_region = DPPOTrustRegion(
+        DPPOType(config.dppo.dppo_type), delta_low=config.dppo.delta_low, delta_high=config.dppo.delta_high
+    )
     with torch.no_grad():
-        current_probs = torch.exp(log_probs)
-        mu_probs = torch.exp(mu_log_probs)
-        prob_diff = current_probs - mu_probs  # Use actual probabilities
-
-        if dppo_type == "binary_tv":
-            # Binary Total Variation (Equation 13)
-            mask = torch.ones_like(advantages)
-            mask[(advantages > 0) & (prob_diff > delta_high)] = 0.0
-            mask[(advantages < 0) & (-prob_diff > delta_low)] = 0.0
-
-        elif dppo_type == "binary_kl":
-            # Binary KL (Equation 14)
-            eps = 1e-8
-            binary_kl = mu_probs * (mu_log_probs - log_probs) + (1 - mu_probs) * torch.log(
-                (1 - mu_probs + eps) / (1 - current_probs + eps)
-            )
-
-            mask = torch.ones_like(advantages)
-            mask[(advantages > 0) & (prob_diff > 0) & (binary_kl > delta_high)] = 0.0
-            mask[(advantages < 0) & (prob_diff < 0) & (binary_kl > delta_low)] = 0.0
-
-        else:
-            raise ValueError(f"Unknown DPPO type: {dppo_type}. Must be 'binary_tv' or 'binary_kl'.")
+        trainer_log_probs = log_probs.detach()
+        keep_positive = trust_region.keep(trainer_log_probs, mu_log_probs, negative_advantage=False)
+        keep_negative = trust_region.keep(trainer_log_probs, mu_log_probs, negative_advantage=True)
+        keep = torch.where(advantages > 0, keep_positive, torch.where(advantages < 0, keep_negative, True))
+        mask = keep.to(advantages.dtype)
 
     # Surrogate loss with divergence-based mask
     loss = -(ratio * advantages * mask)
+    if score_centering_term is not None:
+        loss = loss + advantages * score_centering_term
 
     clip_ratio = masked_mean((mask == 0).float(), loss_mask).mean().detach().item()
     loss_metrics = {"clip_ratio": clip_ratio}

@@ -6,12 +6,12 @@ import math
 import os
 import tarfile
 import tempfile
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 import ray
 import torch
 from pydantic import BaseModel
-from ray.util.placement_group import placement_group
+from ray.util.placement_group import placement_group, remove_placement_group
 from transformers import AutoTokenizer
 
 from skyrl.backends.backend import AbstractBackend
@@ -26,6 +26,7 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
     pad_training_input_batch,
 )
+from skyrl.backends.skyrl_train.utils.lora_targets import check_lora_group_flags
 from skyrl.backends.skyrl_train.workers.worker import PPORayActorGroup
 from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 from skyrl.backends.skyrl_train.workers.worker_utils import (
@@ -36,9 +37,14 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 )
 from skyrl.env_vars import SKYRL_RAY_PG_TIMEOUT_IN_S
 from skyrl.tinker import types
-from skyrl.train.config import SkyRLTrainConfig, get_config_as_yaml_str
+from skyrl.tinker.config import check_backend_config, flatten_backend_config
+from skyrl.train.config import (
+    SkyRLTrainConfig,
+    get_config_as_yaml_str,
+)
 from skyrl.train.utils.utils import (
     ResolvedPlacementGroup,
+    cleanup_on_error,
     get_ray_pg_ready_with_timeout,
     initialize_ray,
 )
@@ -65,7 +71,7 @@ class SkyRLTrainBackendOverrides(BaseModel, extra="allow"):
     the per-tenant adapter machinery, which FSDP does not implement);
     full-parameter fine-tuning and FSDP always tear down on unload. Set to
     ``False`` to release all GPUs on the last unload (scale-to-zero) — also
-    the escape hatch for changing the LoRA ``(rank, alpha)`` signature, which
+    the escape hatch for changing the LoRA ``(rank, alpha, train_attn, train_mlp)`` signature, which
     is otherwise pinned by the first ``create_model`` for the warm runtime's
     lifetime."""
     runtime_role: Literal["trainer", "inference", "combined"] = "combined"
@@ -79,6 +85,59 @@ class MegatronBackendOverrides(SkyRLTrainBackendOverrides):
     strategy: str = "megatron"
 
 
+def _server_values(
+    base_model: str,
+    overrides: SkyRLTrainBackendOverrides,
+    lora_config: types.LoraConfig | None,
+    backend_config_values: dict[str, Any],
+) -> dict[str, tuple[Any, str]]:
+    """Config values the Tinker server sets itself, each with what sets it.
+
+    They are applied on the override dict, not on the built config, so ``__post_init__`` validates
+    with them: the strategy decides which settings are valid (``logprobs_chunk_size=None`` needs
+    megatron), and ``fake_int4_qat`` needs ``lora.rank > 0``.
+    """
+    values = {
+        "trainer.policy.model.path": (base_model, "set by --base-model"),
+        "trainer.critic.model.path": (base_model, "set by --base-model"),
+        "trainer.strategy": (overrides.strategy, "set by --backend"),
+        # TODO(tyler): Support KL Loss
+        "trainer.algorithm.use_kl_loss": (False, "the Tinker server does not support a KL loss"),
+    }
+    for role in ("policy", "critic"):
+        prefix = f"trainer.{role}.optimizer_config"
+        schedule = "the client schedules the learning rate through AdamParams.learning_rate"
+        values[f"{prefix}.scheduler"] = ("constant_with_warmup", schedule)
+        values[f"{prefix}.num_warmup_steps"] = (0, schedule)
+    if overrides.runtime_role != "combined":
+        values["trainer.placement.colocate_all"] = (False, f"a {overrides.runtime_role}-only runtime never colocates")
+    # An inference-only runtime trains nothing: its create_model only registers a base-model alias
+    # with rank 0, and the backend_config rank is what enables LoRA on the inference engines.
+    if lora_config is not None and overrides.runtime_role != "inference":
+        if lora_config.rank > 0:
+            values["trainer.policy.model.lora.rank"] = (
+                lora_config.rank,
+                "set by the LoRA rank the client passes to create_model",
+            )
+            # train_attn/train_mlp narrow which modules get an adapter; the worker
+            # resolves them against the loaded model. train_unembed is resolved in
+            # the API (see api._supported_lora_config) and never arrives as True.
+            # With rank 0 there is no adapter at all, so the flags must not leak in.
+            values["trainer.policy.model.lora.train_attn"] = (
+                lora_config.train_attn,
+                "set by the LoRA flags the client passes to create_model",
+            )
+            values["trainer.policy.model.lora.train_mlp"] = (
+                lora_config.train_mlp,
+                "set by the LoRA flags the client passes to create_model",
+            )
+            # The Tinker SDK cannot express alpha (the API server fills in 32), so a backend_config
+            # alpha takes precedence over that placeholder.
+            if "trainer.policy.model.lora.alpha" not in backend_config_values:
+                values["trainer.policy.model.lora.alpha"] = (int(lora_config.alpha), "filled in by the API server")
+    return values
+
+
 def _build_skyrl_train_config(
     base_model: str,
     overrides: SkyRLTrainBackendOverrides,
@@ -86,61 +145,67 @@ def _build_skyrl_train_config(
 ) -> SkyRLTrainConfig:
     """Build config for SkyRL-Train workers using default config with overrides.
 
+    ``backend_config`` keys are rejected when the server sets them to another value
+    (``_server_values``) or when no value of theirs is ever used.
+
     Args:
         base_model: HuggingFace model path
-        config_container: Backend configuration
+        overrides: Backend configuration
         lora_config: LoRA configuration if using LoRA
     """
-
-    # Apply user overrides from backend_config
-    user_overrides = dict(overrides.model_extra)
-    if overrides.runtime_role != "combined":
-        user_overrides["trainer.placement.colocate_all"] = False
-    # The Tinker path drives profiling through /start_profiling, which builds the
-    # profiler at request time. A static config here would fight it over the single
-    # `worker.profiler` slot, so reject it rather than letting both sources win
-    # unpredictably.
-    profiler_keys = [k for k in user_overrides if k.startswith("trainer.policy.torch_profiler_config")]
-    if profiler_keys:
-        raise ValueError(
-            f"`backend_config` may not set {sorted(profiler_keys)}. The Tinker server controls "
-            f"torch profiling at runtime: start the server with --torch-profiler to enable the "
-            f"endpoints, then call /start_profiling and /stop_profiling."
-        )
-    # override base model path
-    # NOTE: It is better to add this as a part of the CLI overrides since we have post_init logic
-    # that resolves other config derived from the policy model path.
-    user_overrides["trainer.policy.model.path"] = base_model
-    user_overrides["trainer.critic.model.path"] = base_model
-    # Strategy must be set on the override dict (not after from_cli_overrides) so
-    # TrainerConfig.__post_init__ sees the right value during validation —
-    # e.g. logprobs_chunk_size=None is only valid when strategy=megatron.
     assert overrides.strategy in (
         "fsdp",
         "megatron",
     ), f"Only fsdp and megatron are supported for SkyRL-Train backend, got {overrides.strategy!r}"
-    user_overrides["trainer.strategy"] = overrides.strategy
-    # LoRA rank/alpha must also be on the override dict so post_init validation
-    # sees them — e.g. fake_int4_qat.enabled requires lora.rank > 0, which
-    # would spuriously fail for LoRA clients if the rank were applied after
-    # from_cli_overrides. The client-requested rank wins over any backend_config
-    # value. The Tinker SDK cannot express alpha (the API server fills in 32), so
-    # an explicit `trainer.policy.model.lora.alpha` in backend_config takes
-    # precedence over that placeholder; otherwise the API's value is used.
-    if lora_config is not None and lora_config.rank > 0:
-        user_overrides["trainer.policy.model.lora.rank"] = lora_config.rank
-        if "trainer.policy.model.lora.alpha" not in user_overrides:
-            user_overrides["trainer.policy.model.lora.alpha"] = int(lora_config.alpha)
-    cfg = SkyRLTrainConfig.from_cli_overrides(user_overrides)
+    backend_config = dict(overrides.model_extra or {})
+    backend_config_values = flatten_backend_config(backend_config)
+    server_values = _server_values(base_model, overrides, lora_config, backend_config_values)
+    unused_keys = dict(SkyRLTrainBackend.REPLACED_PER_REQUEST)
+    unused_keys[SkyRLTrainBackend.PROFILER_CONFIG_KEY] = (
+        "start the server with --torch-profiler and call /start_profiling and /stop_profiling"
+    )
+    # A Tinker request carries these and would overwrite any backend_config value for
+    # them, so reject it there outright — including a value that happens to equal the
+    # request's. Stricter than the _server_values() check below, which only rejects a
+    # differing value. Without a request (an inference-only server) backend_config is
+    # the only way to configure LoRA serving: the alias that runtime's create_model
+    # registers still arrives here with a rank-0 LoraConfig, so guard on the runtime
+    # role the same way _server_values() does.
+    client_lora_keys = [
+        f"trainer.{role}.model.lora.{field}"
+        for role in ("policy", "critic")
+        for field in ("rank", "train_attn", "train_mlp")
+    ]
+    operator_set = sorted(k for k in client_lora_keys if k in backend_config_values)
+    if lora_config is not None and overrides.runtime_role != "inference" and operator_set:
+        raise ValueError(
+            f"`backend_config` may not set {operator_set}. These come from each Tinker request "
+            f"(`create_lora_training_client(rank=..., train_attn=..., train_mlp=...)`); set them there."
+        )
+    check_backend_config(backend_config_values, server_values, unused_keys)
+    # Every forward_backward request carries loss_fn and picks the loss function, so a
+    # policy_loss_type the request could pick would be inert. "dual_clip" is the exception: no
+    # loss_fn normalizes to it, and ppo_policy_loss (loss_fn="ppo") reads it from the config to
+    # dual-clip, so it is the one value the server honours.
+    loss_type = backend_config_values.get("trainer.algorithm.policy_loss_type")
+    if loss_type is not None and loss_type != "dual_clip":
+        raise ValueError(
+            f"--backend-config sets trainer.algorithm.policy_loss_type={loss_type!r}: the loss function "
+            "comes from each request's loss_fn, so this value would be ignored. 'dual_clip' is the "
+            "one value the server honours (dual-clip PPO for loss_fn='ppo'); pick other losses "
+            "with the request's loss_fn."
+        )
 
-    # Disable scheduler - Tinker manages learning rate externally via set_lr()
-    cfg.trainer.policy.optimizer_config.scheduler = "constant_with_warmup"
-    cfg.trainer.policy.optimizer_config.num_warmup_steps = 0
-    cfg.trainer.critic.optimizer_config.scheduler = "constant_with_warmup"
-    cfg.trainer.critic.optimizer_config.num_warmup_steps = 0
-
-    # TODO(tyler): Support KL Loss
-    cfg.trainer.algorithm.use_kl_loss = False
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        {**backend_config, **{key: value for key, (value, _) in server_values.items()}}
+    )
+    lora = cfg.trainer.policy.model.lora
+    if lora.rank > 0:
+        # Fail before Ray starts or any GPU is reserved. The worker repeats this and adds the
+        # checks that need the model (e.g. Megatron's for vision towers and MLA).
+        check_lora_group_flags(
+            lora.target_modules, lora.train_attn, lora.train_mlp, init_adapter_path=lora.init_adapter_path
+        )
 
     logger.info("SkyRL-Train config:\n%s", get_config_as_yaml_str(cfg))
     return cfg
@@ -301,40 +366,43 @@ class SkyRLTrainBackend(AbstractBackend):
             record_memory=cfg.trainer.policy.record_memory,
         )
 
-        # set to a large number for megatron scheduler init
-        # lr will be managed externally via set_lr()
-        policy_num_training_steps = 1e9
-        ray.get(
-            policy_model.async_init_model(
-                cfg.trainer.policy.model.path,
-                num_training_steps=policy_num_training_steps,
+        with cleanup_on_error(policy_model.shutdown, "Shutting down the policy workers"):
+            # set to a large number for megatron scheduler init
+            # lr will be managed externally via set_optimizer_hparams()
+            policy_num_training_steps = 1e9
+            ray.get(
+                policy_model.async_init_model(
+                    cfg.trainer.policy.model.path,
+                    num_training_steps=policy_num_training_steps,
+                )
             )
-        )
-        ray.get(policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
+            ray.get(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id)
+            )
 
-        if is_lora and cfg.trainer.strategy == "megatron":
-            # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
-            # the freshly-initialised LoRA into a per-worker pristine slot, then
-            # register the first adapter under `model_id`. Must happen while the
-            # model + optimizer are still GPU-resident (i.e. before the offload).
-            # currently, this is only supported for megatron backend
-            ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
-            ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
-            ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
+            if is_lora and cfg.trainer.strategy == "megatron":
+                # For multi-tenant LoRA training: prime DistributedOptimizer state and snapshot
+                # the freshly-initialised LoRA into a per-worker pristine slot, then
+                # register the first adapter under `model_id`. Must happen while the
+                # model + optimizer are still GPU-resident (i.e. before the offload).
+                # currently, this is only supported for megatron backend
+                ray.get(policy_model.async_run_ray_method("pass_through", "prime_optimizer_state"))
+                ray.get(policy_model.async_run_ray_method("pass_through", "register_pristine_adapter"))
+                ray.get(policy_model.async_run_ray_method("pass_through", "register_adapter", model_id))
 
-        if colocate_all:
-            policy_model.offload_to_cpu()
+            if colocate_all:
+                policy_model.offload_to_cpu()
 
-        # Create unified dispatch that manages all actor groups
-        self._dispatch = WorkerDispatch(
-            cfg=cfg,
-            policy_actor_group=policy_model,
-            inference_engine_client=self._inference_engine_client,
-        )
+            # Create unified dispatch that manages all actor groups
+            self._dispatch = WorkerDispatch(
+                cfg=cfg,
+                policy_actor_group=policy_model,
+                inference_engine_client=self._inference_engine_client,
+            )
 
-        # Mark the offloaded policy model in dispatch state
-        if colocate_all:
-            self._dispatch.mark_as_offloaded("policy")
+            # Mark the offloaded policy model in dispatch state
+            if colocate_all:
+                self._dispatch.mark_as_offloaded("policy")
 
         logger.info("init policy model done")
 
@@ -348,8 +416,24 @@ class SkyRLTrainBackend(AbstractBackend):
                 num_policy_gpus == num_critic_gpus
             ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
 
-        cfg.trainer.critic.model.lora.rank = lora_config.rank
-        cfg.trainer.critic.model.lora.alpha = int(lora_config.alpha)
+        # No rank check here: _build_skyrl_train_config (#2464) already rejected every
+        # client-carried LoRA key in backend_config at the policy's first create_model.
+        backend_config_values = flatten_backend_config(self.config.model_extra or {})
+        critic_lora_cfg = cfg.trainer.critic.model.lora
+        critic_lora_cfg.rank = lora_config.rank
+        # The Tinker SDK cannot send alpha (the API fills in 32), so a backend_config alpha wins, as for the policy.
+        if "trainer.critic.model.lora.alpha" not in backend_config_values:
+            critic_lora_cfg.alpha = int(lora_config.alpha)
+        critic_lora_cfg.train_attn = lora_config.train_attn
+        critic_lora_cfg.train_mlp = lora_config.train_mlp
+        if critic_lora_cfg.rank > 0:
+            # Before the critic workers start, as for the policy in _build_skyrl_train_config.
+            check_lora_group_flags(
+                critic_lora_cfg.target_modules,
+                critic_lora_cfg.train_attn,
+                critic_lora_cfg.train_mlp,
+                init_adapter_path=critic_lora_cfg.init_adapter_path,
+            )
         critic_model = PPORayActorGroup(
             cfg.trainer,
             cfg.trainer.placement.critic_num_nodes,
@@ -360,12 +444,20 @@ class SkyRLTrainBackend(AbstractBackend):
             colocate_all=colocate_all,
             sequence_parallel_size=cfg.trainer.critic.sequence_parallel_size,
         )
-        self._dispatch.register_actor_group("critic", critic_model)
-        self._dispatch.init_model("critic", cfg.trainer.critic.model.path, num_training_steps=1e9)
-        ray.get(critic_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id))
-        if colocate_all:
-            critic_model.offload_to_cpu()
-            self._dispatch.mark_as_offloaded("critic")
+
+        def release_critic():
+            self._dispatch.unregister_actor_group("critic")
+            critic_model.shutdown()
+
+        with cleanup_on_error(release_critic, "Shutting down the critic workers"):
+            self._dispatch.register_actor_group("critic", critic_model)
+            self._dispatch.init_model("critic", cfg.trainer.critic.model.path, num_training_steps=1e9)
+            ray.get(
+                critic_model.async_run_ray_method("pass_through", "_set_pad_token_id", self._tokenizer.pad_token_id)
+            )
+            if colocate_all:
+                critic_model.offload_to_cpu()
+                self._dispatch.mark_as_offloaded("critic")
         logger.info("init critic model done")
 
     def init_weight_sync_state(self):
@@ -521,12 +613,15 @@ class SkyRLTrainBackend(AbstractBackend):
             self._render_server = None
 
     def _lora_signature_from(self, lora_config: types.LoraConfig) -> tuple:
-        # Tinker's public LoraConfig only exposes rank + alpha (plus
-        # seed/train_attn/train_mlp/train_unembed) - pending support https://github.com/NovaSky-AI/SkyRL/issues/1632.
-        # Equality across adapters therefore reduces to (rank, alpha); the worker-side
-        # AdapterStore additionally verifies parallel-state equality via
-        # its own LoraSignature.
-        return (int(lora_config.rank), int(lora_config.alpha))
+        # Shape-affecting fields only: adapters sharing a runtime are byte-copies of
+        # one template. `seed` stays out -- it changes initial values, not structure.
+        # The worker-side AdapterStore additionally verifies parallel-state equality.
+        return (
+            int(lora_config.rank),
+            int(lora_config.alpha),
+            bool(lora_config.train_attn),
+            bool(lora_config.train_mlp),
+        )
 
     def create_model(self, model_id: str, lora_config: types.LoraConfig, model_role: str = "policy") -> None:
         if model_id in self._model_ids_to_role:
@@ -553,14 +648,29 @@ class SkyRLTrainBackend(AbstractBackend):
                     "model was created without LoRA. Recreate the server with a "
                     "LoRA-enabled first model."
                 )
+            # Capability before compatibility: otherwise a request this backend can never
+            # serve is reported as a signature mismatch with the first adapter.
+            strategy = self._cfg.trainer.strategy
+            if strategy != "megatron":
+                raise NotImplementedError(
+                    f"A second LoRA adapter on one server is not implemented on the {strategy} backend, "
+                    "which serves a single adapter per server; multi-tenant LoRA requires Megatron."
+                )
+            check_lora_group_flags(
+                self._cfg.trainer.policy.model.lora.target_modules,
+                lora_config.train_attn,
+                lora_config.train_mlp,
+                init_adapter_path=self._cfg.trainer.policy.model.lora.init_adapter_path,
+            )
             new_signature = self._lora_signature_from(lora_config)
             if new_signature != self._base_lora_signature:
                 raise ValueError(
                     f"LoRA signature mismatch for model '{model_id}': "
-                    f"got (rank, alpha)={new_signature}, "
+                    f"got (rank, alpha, train_attn, train_mlp)={new_signature}, "
                     f"first adapter registered with {self._base_lora_signature}. "
-                    "Multi-LoRA with the SkyRLTrainBackend requires identical (rank, alpha) across all "
-                    "adapters; target_modules is fixed server-side."
+                    "Multi-LoRA with the SkyRLTrainBackend requires identical "
+                    "(rank, alpha, train_attn, train_mlp) across all adapters; target_modules is "
+                    "fixed server-side."
                 )
             self._dispatch.register_adapter("policy", model_id)
             self._model_ids_to_role[model_id] = model_role
@@ -570,31 +680,36 @@ class SkyRLTrainBackend(AbstractBackend):
 
         # First-time setup OR critic creation (existing path).
         if model_role == "policy":
-            self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
+            # Restored on failure rather than reset: an inference-only runtime may have built it while sampling.
+            cfg_before = self._cfg
+            with cleanup_on_error(
+                lambda: self._discard_partial_runtime(cfg_before), "Discarding the partially built runtime"
+            ):
+                self._cfg = _build_skyrl_train_config(self.base_model, self.config, lora_config)
 
-            if not ray.is_initialized():
-                logger.info("Initializing Ray with runtime environment")
-                initialize_ray(self._cfg)
+                if not ray.is_initialized():
+                    logger.info("Initializing Ray with runtime environment")
+                    initialize_ray(self._cfg)
 
-            self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
+                self._colocate_pg = self._create_colocate_pg() if self._cfg.trainer.placement.colocate_all else None
 
-            if self.config.runtime_role == "inference":
-                PolicyWorker = None
-            elif self._cfg.trainer.strategy == "fsdp":
-                from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
-                    PolicyWorker,
-                )
-            elif self._cfg.trainer.strategy == "megatron":
-                from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
-                    PolicyWorker,
-                )
-            else:
-                raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
-            if PolicyWorker is not None:
-                logger.info("Building models.")
-                self._build_policy(PolicyWorker, model_id=model_id)
-            if is_lora:
-                self._base_lora_signature = self._lora_signature_from(lora_config)
+                if self.config.runtime_role == "inference":
+                    PolicyWorker = None
+                elif self._cfg.trainer.strategy == "fsdp":
+                    from skyrl.backends.skyrl_train.workers.fsdp.fsdp_worker import (
+                        PolicyWorker,
+                    )
+                elif self._cfg.trainer.strategy == "megatron":
+                    from skyrl.backends.skyrl_train.workers.megatron.megatron_worker import (
+                        PolicyWorker,
+                    )
+                else:
+                    raise ValueError(f"Unknown strategy type: {self._cfg.trainer.strategy}")
+                if PolicyWorker is not None:
+                    logger.info("Building models.")
+                    self._build_policy(PolicyWorker, model_id=model_id)
+                if is_lora:
+                    self._base_lora_signature = self._lora_signature_from(lora_config)
         elif model_role == "critic":
             if model_role in self._model_ids_to_role.values():
                 raise ValueError(f"SkyRLTrainBackend already has a '{model_role}' model")
@@ -633,6 +748,15 @@ class SkyRLTrainBackend(AbstractBackend):
 
         return ResolvedPlacementGroup(pg)
 
+    def _discard_partial_runtime(self, cfg_before) -> None:
+        """Undo a first ``create_model`` that failed part-way, so the next one starts from scratch."""
+        self._cfg = cfg_before
+        self._dispatch = None
+        self._base_lora_signature = None
+        colocate_pg, self._colocate_pg = self._colocate_pg, None
+        if colocate_pg is not None:
+            remove_placement_group(colocate_pg.pg)
+
     def _unload_inference_adapter(self, model_id: str) -> None:
         """Drop a deleted tenant's LoRA adapter from the inference engines.
 
@@ -651,7 +775,6 @@ class SkyRLTrainBackend(AbstractBackend):
 
     def delete_model(self, model_id: str) -> None:
         role = self._get_role(model_id)
-
         # Inference-only model IDs are aliases for the same base-model runtime.
         # Keep that runtime alive while another alias is still registered.
         if self.config.runtime_role == "inference" and len(self._model_ids_to_role) > 1:
@@ -890,7 +1013,7 @@ class SkyRLTrainBackend(AbstractBackend):
         """Extract training metrics from dispatch return dict.
 
         Workers return metrics like 'loss', 'policy_loss', 'policy_entropy', etc.
-        We convert to Tinker's colon-suffixed format (e.g. 'total_loss:sum').
+        We convert to Tinker's colon-suffixed format (e.g. 'loss:sum').
         """
         metrics: dict[str, float] = {}
 
@@ -899,6 +1022,9 @@ class SkyRLTrainBackend(AbstractBackend):
             metrics["total_loss:sum"] = float(data["loss"])
         elif "final_loss" in data:
             metrics["total_loss:sum"] = float(data["final_loss"])
+
+        if "total_loss:sum" in metrics:
+            metrics["loss:sum"] = metrics["total_loss:sum"]
 
         if "policy_loss" in data:
             metrics["pg_loss:sum"] = float(data["policy_loss"])
@@ -1208,6 +1334,10 @@ class SkyRLTrainBackend(AbstractBackend):
     # Only the policy role is profiled, matching the trainer path.
     # ------------------------------------------------------------------
 
+    # The profiler is built at request time by /start_profiling. A static profiler config in
+    # backend_config would fight it over the single `worker.profiler` slot, so it is rejected.
+    PROFILER_CONFIG_KEY = "trainer.policy.torch_profiler_config"
+
     def start_profile(self, config: dict) -> None:
         """Build and arm a profiler on the policy workers. Raises on failure."""
         if self._dispatch is None:
@@ -1231,15 +1361,43 @@ class SkyRLTrainBackend(AbstractBackend):
         errors = self._dispatch.profile_step("policy") or []
         return next((e for e in errors if e), None)
 
+    # backend_config keys that optim_step replaces on every call, so no configured value is used.
+    REPLACED_PER_REQUEST = {
+        "trainer.policy.optimizer_config.lr": "replaced by AdamParams.learning_rate before every optim_step",
+        "trainer.critic.optimizer_config.lr": "replaced by AdamParams.learning_rate before every optim_step",
+        "trainer.policy.optimizer_config.adam_betas": "replaced by AdamParams.beta1/beta2 before every optim_step",
+        "trainer.critic.optimizer_config.adam_betas": "replaced by AdamParams.beta1/beta2 before every optim_step",
+        "trainer.policy.optimizer_config.weight_decay": "replaced by AdamParams.weight_decay before every optim_step",
+        "trainer.critic.optimizer_config.weight_decay": "replaced by AdamParams.weight_decay before every optim_step",
+        "trainer.policy.optimizer_config.max_grad_norm": "replaced by AdamParams.grad_clip_norm before every optim_step",
+        "trainer.critic.optimizer_config.max_grad_norm": "replaced by AdamParams.grad_clip_norm before every optim_step",
+        # init_megatron_optim_config applies optimizer_config_kwargs last, so the kwargs win at
+        # optimizer creation — but set_optimizer_hparams rewrites the param groups and the
+        # per-step clip before every step, so no configured value is ever used there either.
+        "trainer.policy.megatron_config.optimizer_config_kwargs.lr": "replaced by AdamParams.learning_rate before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.lr": "replaced by AdamParams.learning_rate before every optim_step",
+        "trainer.policy.megatron_config.optimizer_config_kwargs.adam_beta1": "replaced by AdamParams.beta1 before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.adam_beta1": "replaced by AdamParams.beta1 before every optim_step",
+        "trainer.policy.megatron_config.optimizer_config_kwargs.adam_beta2": "replaced by AdamParams.beta2 before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.adam_beta2": "replaced by AdamParams.beta2 before every optim_step",
+        "trainer.policy.megatron_config.optimizer_config_kwargs.adam_eps": "replaced by AdamParams.eps before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.adam_eps": "replaced by AdamParams.eps before every optim_step",
+        "trainer.policy.megatron_config.optimizer_config_kwargs.weight_decay": "replaced by AdamParams.weight_decay before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.weight_decay": "replaced by AdamParams.weight_decay before every optim_step",
+        "trainer.policy.megatron_config.optimizer_config_kwargs.clip_grad": "replaced by AdamParams.grad_clip_norm before every optim_step",
+        "trainer.critic.megatron_config.optimizer_config_kwargs.clip_grad": "replaced by AdamParams.grad_clip_norm before every optim_step",
+    }
+
     def optim_step(self, model_id: str, request_data: types.OptimStepInput) -> types.OptimStepOutput:
         if self.config.runtime_role == "inference":
             raise RuntimeError("Training is unavailable in an inference-only runtime")
         role = self._get_role(model_id)
 
-        # Apply learning rate from AdamParams before optimizer step
-        # Note: beta1, beta2, eps are fixed at optimizer creation and cannot be changed dynamically
+        # The request's AdamParams are in force for the step: the workers rewrite the
+        # optimizer's param groups (lr, betas, eps, weight_decay) and the per-step clip
+        # (grad_clip_norm) before the step, so the build-time config values never rule.
         adam_params = request_data.adam_params
-        self._dispatch.set_lr(role, adam_params.learning_rate, model_id=model_id)
+        self._dispatch.set_optimizer_hparams(role, adam_params, model_id=model_id)
 
         grad_norm = self._dispatch.optim_step(role, model_id=model_id)
         logger.info(f"optim_step: lr={adam_params.learning_rate}, grad_norm={grad_norm}")

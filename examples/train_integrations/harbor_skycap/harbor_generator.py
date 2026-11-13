@@ -22,9 +22,13 @@ sandbox environment that LiteLLM- and OpenAI-based agents read.
 import asyncio
 import importlib
 import os
+import re
 import time
 from copy import deepcopy
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import litellm
 from harbor.agents.factory import AgentFactory
@@ -56,6 +60,37 @@ litellm.suppress_debug_info = True
 # Attempts per trial. A Harbor failure is often environmental (a sandbox that didn't come up).
 MAX_NUM_RETRIES_PER_TRIAL = 2
 
+#: How a failed trial's exception shows it ran out of context. Harbor raises its own two types for agents it
+#: classifies; an installed agent that exits on skycap's 400 (code ``context_length_exceeded``, which LiteLLM
+#: may raise as a plain ``BadRequestError``) is only a ``NonZeroAgentExitCodeError``. Its message keeps just the
+#: first 1000 characters of the agent's output, which end before the error, so the end of the agent's own log in
+#: the trial directory is searched too. Rich wraps that log, possibly inside the code.
+CONTEXT_LENGTH_EXCEPTIONS = {"ContextLengthExceededError", "ContextWindowExceededError"}
+CONTEXT_LENGTH_OUTPUT = re.compile(r"context\s*_length\s*_exceeded|ContextWindowExceededError")
+#: How much of the end of each agent log is searched.
+AGENT_LOG_TAIL_BYTES = 64 * 1024
+
+
+def _ran_out_of_context(results: Any) -> bool:
+    """Whether a trial's agent stopped on a context-length error: by Harbor's exception, its message or the agent's log."""
+    exception = results.exception_info.exception_type if results.exception_info else None
+    if exception in CONTEXT_LENGTH_EXCEPTIONS:
+        return True
+    if exception != "NonZeroAgentExitCodeError":
+        return False
+    if CONTEXT_LENGTH_OUTPUT.search(results.exception_info.exception_message or ""):
+        return True
+    uri = urlparse(getattr(results, "trial_uri", None) or "")
+    if uri.scheme != "file":
+        return False
+    for log in sorted(Path(url2pathname(uri.path), "agent").glob("*.txt")):
+        with open(log, "rb") as f:
+            f.seek(max(0, log.stat().st_size - AGENT_LOG_TAIL_BYTES))
+            if CONTEXT_LENGTH_OUTPUT.search(f.read().decode(errors="replace")):
+                return True
+    return False
+
+
 #: skycap authenticates nothing, but LiteLLM won't build a client without a key.
 PLACEHOLDER_API_KEY = "skycap"
 
@@ -69,6 +104,8 @@ class HarborSkycapGenerator(GeneratorInterface):
         inference_engine_client: Any = None,
         train_paths: str = "all",
         records: Optional[RecordLog] = None,
+        include_images: bool = False,
+        check_first_batch: bool = True,
     ) -> None:
         """
         Args:
@@ -79,6 +116,9 @@ class HarborSkycapGenerator(GeneratorInterface):
             train_paths: the skycap path rule every trajectory is finished with: ``all``, ``final``, or a custom
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
             records: where every trajectory opened is logged, per phase, for the W&B record index.
+            include_images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
+            check_first_batch: raise when not one trajectory of the first ``generate`` call has anything to train
+                (``skycap.check_first_batch``).
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
@@ -116,6 +156,9 @@ class HarborSkycapGenerator(GeneratorInterface):
         kwargs = agent.setdefault("kwargs", {})
         # skycap has the tokens exactly; asking Harbor for them too is what forces the sibling to ban summarization.
         kwargs.pop("collect_rollout_details", None)
+        self.include_images = include_images
+        self._check_first_batch = check_first_batch
+        self._first_batch_done = False
         self._rate_limiter = create_rate_limiter(getattr(generator_cfg, "rate_limit", None))
 
     async def close(self) -> None:
@@ -163,12 +206,22 @@ class HarborSkycapGenerator(GeneratorInterface):
         finally:
             progress.close()
 
+        if self._check_first_batch and not self._first_batch_done:
+            self._first_batch_done = True
+            if not any(outcome is not None and outcome.samples for outcome in outcomes):
+                raise RuntimeError(
+                    f"No trajectory in the first batch ({len(outcomes)}) has anything to train; each trial's "
+                    f"exception.txt and agent logs are under {self._template.get('trials_dir')}. "
+                    "skycap.check_first_batch=false skips this check."
+                )
+
         output = compose(
             outcomes,
             overlong_filtering=self.generator_cfg.apply_overlong_filtering,
             top_k=self.generator_cfg.sampling_params.top_k,
             sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
             routed_experts=self._routed_experts,
+            include_images=self.include_images,
         )
         output["rollout_metrics"].update(trial_metrics(attempts))
         return output
@@ -234,17 +287,18 @@ class HarborSkycapGenerator(GeneratorInterface):
         }
         trajectory = None
         try:
-            async with self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
+            # The trajectory opens only once the trial may run: one queued behind the rate limiter for longer
+            # than skycap.ttl would otherwise be abandoned as idle before its agent's first call.
+            async with self._rate_limiter, self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
                 config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
-                async with self._rate_limiter:
-                    results = await (await Trial.create(TrialConfig.model_validate(config))).run()
+                results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
                 attempts.record(results)
                 exception = results.exception_info.exception_type if results.exception_info else None
                 if exception == "AgentTimeoutError":
                     # Masked, not retried, as the sibling does.
                     reward, stop_reason = 0.0, "agent_timeout"
-                elif exception == "ContextLengthExceededError":
+                elif await asyncio.to_thread(_ran_out_of_context, results):
                     # Trains with reward 0, as the sibling does.
                     reward, stop_reason = 0.0, "context_length"
                 elif not results.verifier_result:
@@ -317,6 +371,8 @@ class HarborSkycapGenerator(GeneratorInterface):
             for provider in ("OPENAI", "HOSTED_VLLM"):
                 env[f"{provider}_API_BASE"] = base_url
                 env[f"{provider}_API_KEY"] = key
+            # Codex and Harbor's other OpenAI-SDK-style agents read OPENAI_BASE_URL, not the LiteLLM names above.
+            env["OPENAI_BASE_URL"] = base_url
             env["MSWEA_API_KEY"] = key
         kwargs = config["agent"]["kwargs"]
         kwargs["api_base"] = base_url
@@ -338,7 +394,7 @@ def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
     # As Harbor picks the agent (AgentFactory.create_agent_from_config): a known name wins over an import path.
     name, import_path = agent.get("name"), agent.get("import_path")
     if name is not None and name in AgentName.values():
-        cls = AgentFactory._AGENT_MAP.get(AgentName(name))
+        cls = AgentFactory.get_agent_class(AgentName(name))
     elif import_path:
         module, _, attribute = import_path.partition(":")
         cls = getattr(importlib.import_module(module), attribute)

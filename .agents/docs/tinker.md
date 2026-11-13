@@ -5,7 +5,7 @@ SkyRL's implementation of the [Tinker API](https://tinker-docs.thinkingmachines.
 ## Code Layout
 
 - **`skyrl/tinker/api.py`** -- FastAPI HTTP server. Receives Tinker SDK requests, writes them to SQLite/Postgres, returns future IDs.
-- **`skyrl/tinker/proto_serialization.py`** -- Proto wire-format conversion. The tinker SDK (>= 0.25.0, the minimum supported) sends `forward_backward` request bodies as protobuf (forward-only passes use the same endpoint with a `forward_only` flag; JSON bodies are rejected with 415) and requires proto-serialized `SampleResponse`/`ForwardBackwardOutput` results from `retrieve_future`. Mirrors the SDK's `tinker/proto/{request,response}_conv.py`; round-trip tested in `tests/tinker/test_proto_serialization.py`.
+- **`skyrl/tinker/proto_serialization.py`** -- Proto wire-format conversion. The tinker SDK (`>=0.25.0,<0.28.0` in `pyproject.toml`; see *SDK compatibility* below) sends `forward_backward` request bodies as protobuf (forward-only passes use the same endpoint with a `forward_only` flag; JSON bodies are rejected with 415) and requires proto-serialized `SampleResponse`/`ForwardBackwardOutput` results from `retrieve_future`. Mirrors the SDK's `tinker/proto/{request,response}_conv.py`; round-trip tested in `tests/tinker/test_proto_serialization.py`.
 - **`skyrl/tinker/engine.py`** -- Background subprocess (`TinkerEngine`). Polls DB, batches compatible requests, dispatches to backend.
 - **`skyrl/tinker/types.py`** -- Internal Pydantic models (distinct from API request/response models in `api.py`). `LOSS_TYPES` dict defines valid loss functions.
 - **`skyrl/tinker/config.py`** -- `EngineConfig` Pydantic model. `add_model()` auto-generates argparse flags from Pydantic fields.
@@ -23,6 +23,30 @@ uv run --extra tinker --extra fsdp -m skyrl.tinker.api \
 
 The API process spawns the engine as a child subprocess (via `uv run -m skyrl.tinker.engine`). If the engine crashes, the API server auto-terminates.
 
+### backend_config on the SkyRL-Train backends
+
+The server sets some SkyRL-Train config values itself: from its own flags (`--backend`,
+`--base-model`, `--runtime-role`) and from each client request (the LoRA rank in
+`create_model`, the learning rate in every `optim_step`). A `--backend-config` value that the
+server would replace is an error instead of being silently ignored:
+
+- A conflicting `strategy`, `runtime_role` or `served_model_name` stops the server at startup.
+- Everything else is checked when the first `create_model` request sets up training (on an
+  inference-only runtime, the first sample request). That request fails with one error that
+  lists every offending key and the value the server uses.
+- Values equal to the server's are accepted, and nested spellings
+  (`{"trainer.policy": {"optimizer_config": {"lr": 1e-5}}}`) are checked like dotted keys —
+  except the client-carried LoRA keys
+  (`trainer.{policy,critic}.model.lora.{rank,train_attn,train_mlp}`), which a training
+  request always rejects, even when the value equals the request's.
+
+The full list is under "Keys the server sets" in `docs/content/docs/tinker/configuration.mdx`.
+
+The full `AdamParams` is applied on every `optim_step`: learning rate, betas, eps, weight
+decay and grad clipping are written into the optimizer before the step, so
+`trainer.<role>.optimizer_config` and Megatron's `optimizer_config_kwargs` are only the
+build-time defaults.
+
 ## Key API Endpoints
 
 All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a `request_id`, poll `retrieve_future`.
@@ -33,7 +57,7 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 | `/create_model` | POST | Create a LoRA (or full-param) training model |
 | `/forward_backward` | POST | Forward + backward pass, accumulates gradients (protobuf body; forward-only via the `forward_only` flag) |
 | `/optim_step` | POST | Apply accumulated gradients |
-| `/asample` | POST | Generate samples from current or base model |
+| `/asample` | POST | Generate samples from current or base model. Returns `sample_sequence_ids` (one per sample) alongside the future id; SDK >= 0.26 asserts on them |
 | `/save_weights` | POST | Save full training checkpoint (weights + optimizer) |
 | `/save_weights_for_sampler` | POST | Sync weights to inference engines |
 | `/load_weights` | POST | Load a previously saved checkpoint. Only permitted as a model's first request (matching the Tinker service); later attempts get a 400 -- load into a freshly created model instead |
@@ -41,6 +65,16 @@ All endpoints are under `/api/v1/`. Requests are async -- submit via POST, get a
 | `/training_runs/{unique_id}/checkpoints/sampler_weights/{checkpoint_id}` | DELETE | Delete a saved sampler checkpoint archive from disk |
 | `/retrieve_future` | POST | Long-poll for async result (300s timeout) |
 | `/healthz` | GET | Liveness check |
+
+## SDK compatibility
+
+`pyproject.toml` pins `tinker>=0.25.0,<0.28.0`; `uv.lock` resolves 0.27.2. Verified against 0.25.0, 0.27.0 and 0.27.2. What each SDK line needs from the server:
+
+- **0.25**: proto `forward_backward` bodies and proto `retrieve_future` results (`proto_serialization.py`).
+- **0.26/0.27**: `asample` must return `sample_sequence_ids`, one per `num_samples` (`SampleFutureResponse`); the SDK stamps them onto `SampledSequence.sequence_id` client-side, so the proto result does not carry them. `forward_backward` requests dual-write `loss_fn_config` into a legacy float map and `loss_fn_config_v2` (number/text union); the parser prefers v2 so string values reach the API model (which rejects them, since no SkyRL loss takes a string).
+- **0.28 is not supported yet**: it renames the proto `TopkPromptLogprobs` message to `TopkLogprobs` (`prompt_length` -> `length`), which breaks `serialize_sample_output` for `topk_prompt_logprobs > 0`, and adds `save_weights_external`.
+
+0.27 client features that are opt-in behind server-driven flags and that SkyRL leaves off (the stub `/api/v1/client/config` returns defaults): `sample_use_retrieve_futures` (`/api/v1/retrieve_futures` session poller), `sample_cancel_enabled` (`/api/v1/cancel_future`). Not implemented and ignored: `copy_weights`, checkpoint `user_metadata`, `Datum` provenance spans, `SampleRequest.record_stability_info`.
 
 ## Concurrency and Batching
 
@@ -86,8 +120,8 @@ cloud URI (traces stage locally and each closed window is uploaded, then deleted
   in `backend_config`: the policy is offloaded between requests and the manual
   path uses `swap_tensors`, which fails while the profiler holds parameter
   references. Megatron is unaffected.
-- `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected at
-  startup -- static config would fight the endpoints over `worker.profiler`.
+- `trainer.policy.torch_profiler_config.*` in `backend_config` is rejected when
+  the config is built -- static config would fight the endpoints over `worker.profiler`.
 
 ## Testing
 

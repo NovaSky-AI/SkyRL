@@ -56,6 +56,7 @@ uv run --isolated --extra fsdp -m examples.train.algorithms.dapo.main_dapo \
   trainer.algorithm.dynamic_sampling.type=$DYNAMIC_SAMPLING_TYPE \
   trainer.algorithm.dynamic_sampling.max_sample_batches=$DYNAMIC_SAMPLING_MAX_SAMPLE_BATCHES \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
+  trainer.algorithm.grpo_norm_by_std=true \
   generator.inference_engine.enforce_eager=$ENFORCE_EAGER \
   generator.apply_overlong_filtering=$APPLY_OVERLONG_FILTERING \
   generator.sampling_params.temperature=$TEMPERATURE \
