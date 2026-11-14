@@ -9,6 +9,7 @@ import asyncio
 import copy
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 from uuid import uuid4
@@ -48,6 +49,7 @@ from skyrl.train.generators.utils import (
     get_generation_prompt_ids,
     get_rollout_metrics,
 )
+from skyrl.train.sampling_service import SamplingClient, TrajectoryShed
 from skyrl_gym.envs.base_text_env import BaseTextEnvStepOutput
 
 
@@ -376,6 +378,7 @@ class SkyRLGymGenerator(GeneratorInterface):
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
+        env = None
         try:
             # NOTE: `custom_chat_template` was mainly for getting accurate loss masks for thinking models.
             # This is no longer needed now given that step wise training is supported
@@ -626,9 +629,6 @@ class SkyRLGymGenerator(GeneratorInterface):
 
             # Get environment-specific metrics after the episode is done
             env_metrics = env.get_metrics()
-            # Close the environment
-            await self._run_in_executor_if_available(env.close)
-
             prompt_ids = agent_loop_state.input_ids[:initial_prompt_length]
             rollout_logprobs = None
             rollout_expert_indices_out = None
@@ -728,7 +728,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             return agent_loop_output
 
         finally:
-            await self.inference_engine_client.finish_session(session_id)
+            try:
+                if env is not None:
+                    await self._run_in_executor_if_available(env.close)
+            finally:
+                await self.inference_engine_client.finish_session(session_id)
 
     def _build_per_token_rewards(
         self, per_step_rewards: List[Tuple[float, Optional[int]]], response_ids: List[int], appended_eos_token: bool
@@ -996,22 +1000,47 @@ class SkyRLGymGenerator(GeneratorInterface):
                 training_phase=training_phase,
             )
 
-        # Async agent loop to generate trajectories in parallel.
+        # Async agent loop to generate trajectories in parallel. A hard engine
+        # pressure cut terminates only the selected attempt. Re-running the
+        # agent loop reconstructs its environment from the original request;
+        # the first model call then waits in the service's reduced queue.
         tasks = []
         for i in range(len(prompts)):
-            tasks.append(
-                self.agent_loop(
-                    prompts[i],
-                    env_classes[i],
-                    env_extras[i],
-                    max_tokens,
-                    max_input_length,
-                    sampling_params=sampling_params,
-                    trajectory_id=trajectory_ids[i] if trajectory_ids is not None else None,
-                    cache_salt=cache_salt,
-                    training_phase=training_phase,
-                )
-            )
+
+            async def run_one(index: int = i):
+                while True:
+                    try:
+                        trajectory_id = trajectory_ids[index] if trajectory_ids is not None else None
+                        attempt_id = (
+                            f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}"
+                            if trajectory_id is not None
+                            else uuid4().hex
+                        )
+                        admission = (
+                            self.inference_engine_client.trajectory(attempt_id)
+                            if isinstance(self.inference_engine_client, SamplingClient)
+                            else nullcontext()
+                        )
+                        async with admission:
+                            return await self.agent_loop(
+                                prompts[index],
+                                env_classes[index],
+                                dict(env_extras[index]),
+                                max_tokens,
+                                max_input_length,
+                                sampling_params=sampling_params,
+                                trajectory_id=trajectory_id,
+                                cache_salt=cache_salt,
+                                training_phase=training_phase,
+                            )
+                    except TrajectoryShed as exc:
+                        logger.info(
+                            "Restarting shed trajectory {} through the reduced sampling queue ({})",
+                            exc.attempt_id,
+                            exc.reason,
+                        )
+
+            tasks.append(run_one())
 
         all_outputs = await tqdm.gather(
             *tasks,
