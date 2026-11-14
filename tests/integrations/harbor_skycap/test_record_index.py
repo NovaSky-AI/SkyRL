@@ -21,18 +21,18 @@ import pytest_asyncio  # noqa: E402
 import torch  # noqa: E402
 from loguru import logger  # noqa: E402
 
-from examples.train_integrations.harbor_skycap import record_index  # noqa: E402
 from examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap import (  # noqa: E402
     HarborSkycapConfig,
 )
-from examples.train_integrations.harbor_skycap.harbor_generator import (  # noqa: E402
+from skycap import record as skycap_record  # noqa: E402
+from skyrl.integration.harbor_skycap import record_index  # noqa: E402
+from skyrl.integration.harbor_skycap.harbor_generator import (  # noqa: E402
     HarborSkycapGenerator,
 )
-from examples.train_integrations.harbor_skycap.record_index import (  # noqa: E402
+from skyrl.integration.harbor_skycap.record_index import (  # noqa: E402
     RecordLog,
     SkycapRecordIndex,
 )
-from skycap import record as skycap_record  # noqa: E402
 from skyrl.train.utils.callbacks import CallbackInput  # noqa: E402
 from tests.integrations.harbor_skycap import (
     test_harbor_skycap as harbor_tests,  # noqa: E402
