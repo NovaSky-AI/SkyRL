@@ -326,7 +326,37 @@ dataloader's state is not reliable (which is usually used to save checkpoint in 
 
 To address this, our `AsyncDataloader` records the data UIDs that have been consumed by the trainer. Upon resuming from a checkpoint, we load the consumed data UIDs and skip the data that has already been trained. Therefore, the state of the dataloader is not used at all.
 
-## V. Future Work
+## V. Colocated partial rollout
+
+`skyrl/train/partial_rollout_trainer.py::PartialRolloutRayPPOTrainer` is the fully-async trainer for the case where the inference engines and the trainer **share the GPUs** (`trainer.placement.colocate_all=true`), for clusters too small to split or models too large to split. `examples/train/fully_async/main_fully_async.py` selects it from `colocate_all`. Each step:
+
+1. `num_parallel_generation_workers` groups are kept in flight. When `policy_mini_batch_size` of them have finished, the trainer cuts the in-flight requests and the engines sleep. The engines keep the cut requests paused.
+2. The trainer runs on the finished groups and writes the step's checkpoint while the engines sleep.
+3. The weight sync wakes the engines with the new weights, and the cut requests continue from the tokens they generated before the cut.
+
+So `1 - policy_mini_batch_size / num_parallel_generation_workers` of the in-flight groups are cut per step, and a group's staleness is the number of cuts it survived (`async/staleness_*`). Tokens produced before a cut carry the older policy's rollout logprobs, so use a rollout-logprob loss (`rollout_is`, `dppo`, ...) as for fully async training. The trainer never blocks a resumed group. See `examples/train/fully_async/partial_rollout_run_gsm8k.sh`.
+
+Set `generator.inference_engine.router_init_kwargs.policy=sticky_least_loaded`. The default `consistent_hash` router policy places each trajectory by its session id, so long trajectories pile up on one engine and can exhaust its KV cache. `sticky_least_loaded` places each new trajectory on the engine with the fewest active sessions. The pool depth trades throughput for staleness: a deeper pool keeps the engines fuller, but a trained group is older. On Qwen3-4B DAPO with `policy_mini_batch_size=32` on 8xH100, 48 groups in flight gave 23 percent shorter steps than synchronous training with `max_staleness_steps=0` (staleness 0.5), and 35 percent with `max_staleness_steps=4` (staleness 2.0). Training reward did not separate these runs.
+
+The trainer sets no limit on the number of cuts that one group survives: it cuts and resumes a group until the group finishes. The step logs `partial_rollout/groups_cut`, the number of groups in flight at the cut.
+
+`trainer.fully_async.max_staleness_steps` selects when a finished group frees its slot. At most `max(num_parallel_generation_workers, policy_mini_batch_size * (max_staleness_steps + 1))` groups are not yet trained on.
+
+- Hold slot, when `policy_mini_batch_size * (max_staleness_steps + 1) <= num_parallel_generation_workers` (always true for `0`): a finished group holds its slot until the step that trains on it. The number of generating groups falls during each generation phase. The mean staleness is about `num_parallel_generation_workers / policy_mini_batch_size - 1` steps. The example script sets `0`.
+- Free slot, when `policy_mini_batch_size * (max_staleness_steps + 1) > num_parallel_generation_workers`: a finished group frees its slot at once, as in the fully-async trainer. The inference engines stay at `num_parallel_generation_workers` generating groups. Each cut hits about `num_parallel_generation_workers` groups, so the mean staleness is about one step higher. The default of `max_staleness_steps` is 4.
+
+Example: with 64 groups in flight and a mini-batch of 32, `max_staleness_steps=1` is still hold slot (32 x 2 = 64); `2` or more is free slot. The trainer logs the rule in use at startup.
+
+The trainer does not support `trainer.fully_async.sample_full_batch=true` or `trainer.update_ref_every_epoch=true`. Both run a checkpoint or a model load at the end of an epoch while the inference engines are awake.
+
+`trainer.fully_async.clear_kv_cache_on_weight_sync` selects what happens to the key-value (KV) cache of the paused requests:
+
+- `false` (the default) copies the KV cache to host memory for the training phase and restores it. A request resumes with no prefill. Its next tokens continue from KV states of the older weights. Each step pays one copy of the KV pool to host memory and back, and the host needs memory for the KV pools of all engines (about 60 GiB per GPU for Qwen3-4B on H100).
+- `true` discards the KV cache. The inference engine prefills the paused requests again with the new weights.
+
+With a LoRA adapter sync, the trainer also copies the base model to host memory for the training phase, because the sync does not send it again.
+
+## VI. Future Work
 
 - Validate with correct algorithmic offset (importance weighting)
 - Support fully async training for `.generate()` and `/completions` as well.

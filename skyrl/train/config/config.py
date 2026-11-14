@@ -1243,7 +1243,14 @@ class FullyAsyncConfig(BaseConfig):
     """Indicates whether fully async training is enabled"""
     max_staleness_steps: int = 4
     """Maximum off-policy steps allowed. If a trajectory group is scheduled at step *i* and trained at step *j*,
-    then ``j - i <= max_staleness_steps``. Larger values increase throughput but also off-policy-ness."""
+    then ``j - i <= max_staleness_steps``. Larger values increase throughput but also off-policy-ness.
+
+    The colocated partial-rollout trainer also uses this field for admission. At most
+    ``max(num_parallel_generation_workers, policy_mini_batch_size * (max_staleness_steps + 1))`` groups
+    are not yet trained on. When ``policy_mini_batch_size * (max_staleness_steps + 1)`` is at most
+    ``num_parallel_generation_workers`` (always true for ``0``), a finished group holds its slot until
+    the step that trains on it. When it is larger, a finished group frees its slot at once. A cut can add steps to the age of a group, so that trainer does not
+    guarantee ``j - i <= max_staleness_steps``."""
     num_parallel_generation_workers: int = 768
     """Number of generation workers to spawn. Should be >= ``policy_mini_batch_size`` and
     <= ``policy_mini_batch_size * (max_staleness_steps + 1)``."""
@@ -1257,6 +1264,11 @@ class FullyAsyncConfig(BaseConfig):
     """Whether or not to clear the KV cache on weight sync. Defaults to False.
     If False, we reuse KV cache from stale policies during generation
     (avoids recomputation at the cost of using slightly stale KV cache).
+
+    The colocated partial-rollout trainer keeps the in-flight requests paused in the inference engines
+    during training. With ``False``, it copies the KV cache to host memory for the training phase and
+    restores it, so the host needs memory for the KV pools of all inference engines. With ``True``, it
+    discards the KV cache, and the inference engines prefill the paused requests again.
     """
 
     # --- Trainer simulation (no real trainer components) ---
