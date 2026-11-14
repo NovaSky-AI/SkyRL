@@ -5,10 +5,12 @@ UID tracking, and the consumer's exhaustion-aware buffer drain.
 """
 
 import asyncio
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import torch
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from skyrl.train.fully_async_trainer import (
@@ -18,6 +20,7 @@ from skyrl.train.fully_async_trainer import (
     _AsyncStalenessManager,
 )
 from skyrl.train.utils.async_utils import BackgroundFailure
+from tests.train.util import example_dummy_config
 
 
 def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncDataloader:
@@ -26,6 +29,220 @@ def _make_async_dataloader(num_prompts: int, mini_batch_size: int) -> _AsyncData
     # batch_size=1 (one prompt per draw) and identity collate so each batch is a list with one dict.
     loader = StatefulDataLoader(dataset, batch_size=1, collate_fn=lambda batch: batch[0])
     return _AsyncDataloader(loader, mini_batch_size)
+
+
+async def _train_from_checkpoint(
+    source, destination, *, load_cursor=True, sample_full_batch=True, max_steps=None, drop_all=False, dispatch=None
+):
+    class Prompts(list):
+        collate_fn = staticmethod(list)
+
+    prompts = Prompts({"uid": str(idx), "prompt": [], "env_class": None, "env_extras": {}} for idx in range(8))
+    cfg = example_dummy_config()
+    cfg.trainer.resume_mode = "from_path" if source else "none"
+    cfg.trainer.resume_path = str(source) if source else None
+    cfg.trainer.resume_load_dataloader_state = load_cursor
+    cfg.trainer.ckpt_path = str(destination)
+    cfg.trainer.ckpt_interval = 7
+    cfg.trainer.epochs = 3
+    cfg.trainer.max_training_steps = max_steps
+    cfg.trainer.eval_interval = -1
+    cfg.trainer.enable_ray_gpu_monitor = False
+    cfg.trainer.placement.colocate_all = False
+    cfg.trainer.policy_mini_batch_size = 2
+    cfg.trainer.fully_async.enabled = True
+    cfg.trainer.fully_async.num_parallel_generation_workers = 4
+    cfg.trainer.fully_async.sample_full_batch = sample_full_batch
+    cfg.trainer.algorithm.zero_variance_filter = True
+    cfg.trainer.update_ref_every_epoch = True
+    cfg.generator.n_samples_per_prompt = 2
+    cfg.generator.inference_engine.enable_ray_prometheus_stats = False
+    trained = []
+    generated = []
+
+    async def generate(inputs):
+        uid = inputs["trajectory_ids"][0].instance_id
+        generated.append((trainer.epoch, uid))
+        return {"rewards": [0.0, float(not drop_all and uid != "0")], "loss_masks": [[1], [1]]}
+
+    async def train_batch(uids):
+        trained.append((trainer.global_step, trainer.epoch, uids))
+        return {}
+
+    trainer = FullyAsyncRayPPOTrainer(cfg, MagicMock(), None, prompts, None, SimpleNamespace(generate=generate))
+    trainer.dispatch = dispatch if dispatch is not None else MagicMock()
+    trainer.dispatch.save_weights_for_sampler = AsyncMock()
+    trainer.init_weight_sync_state = MagicMock()
+    trainer.ref_model = MagicMock()
+    trainer.update_ref_with_policy = MagicMock()
+    trainer._cleanup_old_checkpoints = MagicMock()
+    trainer.convert_generation_group_mini_batch_to_training_input = lambda kept, dropped: [group.uid for group in kept]
+    trainer._run_training = train_batch
+    await asyncio.wait_for(trainer.train(), timeout=10)
+    return trained, generated
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume_step", [7, 8], ids=["partway", "boundary"])
+@pytest.mark.parametrize("sample_full_batch", [False, True])
+async def test_full_resume_of_shortened_epoch(tmp_path, resume_step, sample_full_batch):
+    initial = tmp_path / "global_step_6"
+    initial.mkdir()
+    torch.save({"global_step": 6}, initial / "trainer_state.pt")
+
+    first_run = tmp_path / "uninterrupted"
+    reference, generated = await _train_from_checkpoint(
+        initial, first_run, load_cursor=False, sample_full_batch=sample_full_batch
+    )
+    assert [epoch for _, epoch, _ in reference] == [1, 1] + [2] * (3 if sample_full_batch else 4)
+    assert int((first_run / "latest_ckpt_global_step.txt").read_text()) == reference[-1][0]
+    source = first_run
+    if not sample_full_batch:
+        source = tmp_path / "stopped"
+        await _train_from_checkpoint(initial, source, load_cursor=False, sample_full_batch=False, max_steps=resume_step)
+        assert int((source / "latest_ckpt_global_step.txt").read_text()) == resume_step
+    checkpoint = source / f"global_step_{resume_step}"
+    assert torch.load(checkpoint / "trainer_state.pt", weights_only=False)["global_step"] == resume_step
+    if not sample_full_batch:
+        saved_cursor = torch.load(checkpoint / "fully_async_state.pt")
+        stopped = await _train_from_checkpoint(
+            checkpoint, source, load_cursor=False, sample_full_batch=False, max_steps=resume_step
+        )
+        assert stopped == ([], [])
+        assert torch.load(checkpoint / "fully_async_state.pt") == saved_cursor
+    resumed = tmp_path / "resumed"
+    actual, regenerated = await _train_from_checkpoint(checkpoint, resumed, sample_full_batch=sample_full_batch)
+    assert actual == [batch for batch in reference if batch[0] > resume_step]
+    consumed = torch.load(checkpoint / "fully_async_state.pt")["consumed_uids"]
+    assert [uid for epoch, uid in regenerated if epoch == 1] == [
+        uid for epoch, uid in generated if epoch == 1 and uid not in consumed
+    ]
+    if resume_step == 7:
+        assert (resumed / "global_step_8" / "fully_async_state.pt").is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "progress, expected_steps, expected_uids",
+    [({}, [8, 9], ["3", "4", "5", "6", "7"]), ({"skipped_steps_in_epoch": 3}, [], [])],
+    ids=["legacy", "shortened-boundary"],
+)
+async def test_full_resume_uses_epoch_state_not_global_step(tmp_path, progress, expected_steps, expected_uids):
+    checkpoint = tmp_path / "global_step_7"
+    checkpoint.mkdir()
+    torch.save({"global_step": 7}, checkpoint / "trainer_state.pt")
+    state = {"epoch": 1, "consumed_uids": ["0", "1", "2"], "filtered_uids": ["0"], **progress}
+    torch.save(state, checkpoint / "fully_async_state.pt")
+    trained, generated = await _train_from_checkpoint(checkpoint, tmp_path / "resumed")
+    assert [step for step, epoch, _ in trained if epoch == 1] == expected_steps
+    assert sorted(uid for epoch, uid in generated if epoch == 1) == expected_uids
+
+
+@pytest.mark.asyncio
+async def test_filtered_epochs_checkpoint_only_completed_steps(tmp_path):
+    original = tmp_path / "original"
+    dispatch = MagicMock()
+    trained, generated = await _train_from_checkpoint(None, original, drop_all=True, dispatch=dispatch)
+    assert not trained and len(generated) == 24
+    dispatch.save_checkpoint.assert_called_once()
+    assert {path.name for path in original.glob("global_step_*")} == {"global_step_0"}
+    assert await _train_from_checkpoint(original / "global_step_0", tmp_path / "resumed") == ([], [])
+
+
+@pytest.mark.asyncio
+async def test_partial_resume_generation_budget_bounds_and_replaces_filtered_groups(monkeypatch):
+    class Generator:
+        async def generate(self, generator_input):
+            uid = generator_input["uid"]
+            await asyncio.sleep(int(uid) * 0.01)
+            rewards = [1.0, 1.0] if uid == "0" else [0.0, 1.0]
+            return {"rewards": rewards, "loss_masks": [[1], [1]]}
+
+    def prepare_generator_input(rand_prompts, *_args, **_kwargs):
+        uid = rand_prompts[0]["uid"]
+        return {"uid": uid, "prompts": []}, [uid]
+
+    monkeypatch.setattr(
+        "skyrl.train.fully_async_trainer.prepare_generator_input",
+        prepare_generator_input,
+    )
+    monkeypatch.setattr(
+        "skyrl.train.fully_async_trainer.get_sampling_params_for_backend",
+        lambda *_args, **_kwargs: {},
+    )
+
+    trainer = FullyAsyncRayPPOTrainer.__new__(FullyAsyncRayPPOTrainer)
+    trainer.async_train_dataloader = _make_async_dataloader(num_prompts=8, mini_batch_size=2)
+    trainer._staleness_manager = _AsyncStalenessManager(
+        max_concurrent_generation_groups=4,
+        mini_batch_size=2,
+        max_staleness_steps=1,
+    )
+    trainer.generator = Generator()
+    trainer.global_step = 8
+    trainer.mini_batch_size = 2
+    trainer.num_parallel_generation_workers = 4
+    trainer.sample_full_batch = True
+    trainer.all_metrics = {}
+    trainer.all_timings = {}
+    trainer._phase_gauge = SimpleNamespace(timed_phase=lambda *_args: nullcontext())
+    trainer.cfg = SimpleNamespace(
+        generator=SimpleNamespace(
+            n_samples_per_prompt=2,
+            inference_engine=SimpleNamespace(backend="test"),
+            sampling_params={},
+        ),
+        environment=SimpleNamespace(env_class="test"),
+        trainer=SimpleNamespace(algorithm=SimpleNamespace(zero_variance_filter_tol=0.0)),
+    )
+
+    buffer = asyncio.Queue(maxsize=4)
+    generation_budget = asyncio.Semaphore(2)
+    tasks = [
+        asyncio.create_task(trainer._run_generate_for_a_group_loop(buffer, BackgroundFailure(), generation_budget))
+        for _ in range(4)
+    ]
+    try:
+        kept, dropped, exhausted = await asyncio.wait_for(
+            trainer._collect_generation_mini_batch(buffer, asyncio.Event(), BackgroundFailure(), generation_budget),
+            timeout=1,
+        )
+        while trainer._staleness_manager._stat.running:
+            await asyncio.sleep(0)
+
+        assert [group.uid for group in dropped] == ["0"]
+        assert [group.uid for group in kept] == ["1", "2"]
+        assert exhausted is False
+        assert buffer.empty()
+        assert trainer._staleness_manager._stat.accepted == 2
+        assert trainer._staleness_manager._stat.filtered == 1
+        assert all(not task.done() for task in tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Exhaustion must also wake peers blocked on permits so sample_full_batch can terminate.
+    trainer.async_train_dataloader = _make_async_dataloader(num_prompts=2, mini_batch_size=2)
+    trainer._staleness_manager = _AsyncStalenessManager(
+        max_concurrent_generation_groups=4,
+        mini_batch_size=2,
+        max_staleness_steps=1,
+    )
+    buffer = asyncio.Queue(maxsize=4)
+    generation_budget = asyncio.Semaphore(4)
+    tasks = [
+        asyncio.create_task(trainer._run_generate_for_a_group_loop(buffer, BackgroundFailure(), generation_budget))
+        for _ in range(4)
+    ]
+    try:
+        await asyncio.wait_for(asyncio.gather(*tasks), timeout=1)
+        assert buffer.qsize() == 2
+        assert trainer._staleness_manager._stat.running == 0
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # --------------------------------------------------------------------------------------

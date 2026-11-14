@@ -485,6 +485,13 @@ def _offload_frozen_param_to_file(name: str, param) -> bool:
         return False
 
 
+def invalidate_frozen_param_offload_cache(model: nn.Module) -> None:
+    """Discard frozen CPU or file-backed copies after loading new model weights."""
+    for param in model.parameters():
+        if hasattr(param, "_offload_cpu_data"):
+            del param._offload_cpu_data
+
+
 @torch.no_grad()
 def offload_megatron_model_to_cpu(models, is_lora: bool = False):
     """

@@ -517,7 +517,6 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
         "on_log",
         # --- epoch boundary + cleanup ---
         "on_epoch_end",
-        "on_save",  # final
         "on_train_end",
     ]
     assert event_names == expected, f"unexpected event sequence: {event_names}"
@@ -535,11 +534,9 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
     for snap in snaps_by_event["on_log"][1:]:
         assert {"trainer/epoch", "trainer/global_step", "eval/score"} <= set(snap["logs_keys"]), snap["logs_keys"]
         assert any(key.startswith("timing/") for key in snap["logs_keys"]), snap["logs_keys"]
-    # The final save runs after the loop has advanced global_step past the last trained step.
     assert [(snap["global_step"], snap["ckpt_path"]) for snap in snaps_by_event["on_save"]] == [
         (1, _FAKE_CKPT_PATH),
         (2, _FAKE_CKPT_PATH),
-        (3, _FAKE_CKPT_PATH),
     ]
     assert snaps_by_event["on_train_end"][0]["global_step"] == 2
     for name, snap in recorder.events:
