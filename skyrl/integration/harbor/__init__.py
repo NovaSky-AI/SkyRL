@@ -6,7 +6,12 @@ Entrypoints, run scripts and dataset preparation live in examples/train_integrat
 """
 
 import importlib
-from typing import Any
+from typing import TYPE_CHECKING, Any, List
+
+if TYPE_CHECKING:
+    from skyrl.integration.harbor.dataset import HarborTaskDataset
+    from skyrl.integration.harbor.harbor_generator import HarborGenerator
+
 
 # Imported on first use, so that importing a submodule doesn't pull in Harbor.
 _EXPORTS = {
@@ -21,3 +26,7 @@ def __getattr__(name: str) -> Any:
     if name in _EXPORTS:
         return getattr(importlib.import_module(_EXPORTS[name]), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> List[str]:
+    return sorted(set(globals()) | set(_EXPORTS))

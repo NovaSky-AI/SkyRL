@@ -6,7 +6,20 @@ Entrypoints and run scripts live in examples/train_integrations/harbor_skycap.
 """
 
 import importlib
-from typing import Any
+from typing import TYPE_CHECKING, Any, List
+
+if TYPE_CHECKING:
+    from skyrl.integration.harbor_skycap.harbor_generator import HarborSkycapGenerator
+    from skyrl.integration.harbor_skycap.record_index import (
+        RecordLog,
+        SkycapRecordIndex,
+    )
+    from skyrl.integration.harbor_skycap.servers import (
+        SkycapServers,
+        exposure_for,
+        start_servers,
+    )
+
 
 # Imported on first use, so that `python -m skyrl.integration.harbor_skycap.record_index pull`
 # doesn't import Harbor.
@@ -26,3 +39,7 @@ def __getattr__(name: str) -> Any:
     if name in _EXPORTS:
         return getattr(importlib.import_module(_EXPORTS[name]), name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> List[str]:
+    return sorted(set(globals()) | set(_EXPORTS))
