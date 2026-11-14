@@ -24,6 +24,7 @@ from skyrl.train.config.config import (
 )
 from skyrl.train.utils import utils as train_utils
 from skyrl.train.utils.utils import (
+    _validate_expert_nvfp4_cfg,
     prepare_runtime_environment,
     validate_cfg,
     validate_inference_engine_cfg,
@@ -1934,3 +1935,126 @@ def test_expert_nvfp4_stacked_sync_default_on_and_ignored_without_expert_nvfp4()
     assert cfg.trainer.policy.megatron_config.expert_nvfp4_stacked_sync is True
     assert cfg.trainer.policy.megatron_config.expert_nvfp4 is False
     validate_megatron_cfg(cfg)  # a no-op without expert_nvfp4: must not raise
+
+
+def _expert_nvfp4_config(mode="w4a16"):
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.megatron_config.expert_nvfp4 = True
+    cfg.trainer.policy.megatron_config.expert_nvfp4_mode = mode
+    return cfg
+
+
+# FlashInfer's whole NVFP4 env, every value explicit (only "1" is true for FlashInfer).
+_FI_ENV = {
+    "FLASHINFER_NVFP4_4OVER6_ERR_MODE": "MSE",
+    "FLASHINFER_NVFP4_4OVER6_ERR_USE_FAST_MATH": "1",
+    "FLASHINFER_NVFP4_4OVER6_E4M3_USE_256": "0",
+    "FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH": "0",
+    "TRTLLM_DISABLE_FP4_QUANT_FAST_MATH": "0",
+}
+
+
+def _nvfp4_env(env_vars):
+    return {
+        k: v for k, v in env_vars.items() if k.startswith(("FLASHINFER_", "TRTLLM_", "NVTE_NVFP4", "NVTE_BACKWARD"))
+    }
+
+
+def test_expert_nvfp4_defaults_to_w4a16_with_four_over_six():
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        ["trainer.strategy=megatron", "trainer.policy.megatron_config.expert_nvfp4=true"]
+    )
+    mc = cfg.trainer.policy.megatron_config
+    assert (mc.expert_nvfp4_mode, mc.expert_nvfp4_block_scale) == ("w4a16", "four_over_six")
+
+
+@pytest.mark.parametrize("mode", ["w4a16", "w4a4"])
+@pytest.mark.parametrize("colocated", [False, True])
+def test_expert_nvfp4_accepts_packed_push_backends(colocated, mode):
+    cfg = _expert_nvfp4_config(mode)
+    cfg.trainer.placement.colocate_all = colocated
+    _validate_expert_nvfp4_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "overrides, message",
+    [
+        ({"trainer.strategy": "fsdp"}, "trainer.strategy=megatron"),
+        ({"trainer.policy.megatron_config.expert_nvfp4_mode": "bogus"}, "expert_nvfp4_mode must be one of"),
+        ({"generator.inference_engine.weight_sync_backend": "sharded_rdt"}, "NCCL or CUDA-IPC"),
+        ({"generator.inference_engine.weight_sync_backend": "delta"}, "NCCL or CUDA-IPC"),
+        ({"generator.inference_engine.fp8_weight_sync_mode": "fp8"}, "mutually exclusive"),
+        ({"trainer.policy.model.lora.rank": 8}, "full-parameter"),
+        ({"trainer.policy.megatron_config.moe_grouped_gemm": False}, "moe_grouped_gemm"),
+        ({"trainer.policy.megatron_config.expert_tensor_parallel_size": 2}, "expert_tensor_parallel_size: 1"),
+        ({"trainer.policy.megatron_config.tensor_model_parallel_size": 2}, "takes from tensor_model_parallel_size"),
+        ({"trainer.policy.megatron_config.transformer_config_kwargs": {"fp8": "e4m3"}}, "global fp8/fp4"),
+        ({"trainer.policy.megatron_config.transformer_config_kwargs": {"quant_recipe": {}}}, "quant_recipe"),
+        ({"trainer.mtp.enabled": True}, "MTP"),
+    ],
+)
+def test_expert_nvfp4_rejects_unsupported_setups(overrides, message):
+    cfg = _expert_nvfp4_config()
+    for path, value in overrides.items():
+        *parents, leaf = path.split(".")
+        setattr(_get_nested_attr(cfg, ".".join(parents)), leaf, value)
+    with pytest.raises(ValueError, match=message):
+        _validate_expert_nvfp4_cfg(cfg)
+
+
+def test_expert_nvfp4_accepts_tensor_parallel_with_whole_experts():
+    cfg = _expert_nvfp4_config()
+    cfg.trainer.policy.megatron_config.tensor_model_parallel_size = 4
+    cfg.trainer.policy.megatron_config.expert_tensor_parallel_size = 1
+    _validate_expert_nvfp4_cfg(cfg)
+
+
+@pytest.mark.parametrize(
+    "rollout, ok",
+    [
+        (dict(expert_parallel_size=8, tensor_parallel_size=8, data_parallel_size=1), True),
+        (dict(expert_parallel_size=1, tensor_parallel_size=1, data_parallel_size=1), True),
+        (dict(expert_parallel_size=1, tensor_parallel_size=2, data_parallel_size=1), False),
+        (dict(expert_parallel_size=1, tensor_parallel_size=1, data_parallel_size=2), False),
+    ],
+)
+def test_expert_nvfp4_w4a4_needs_whole_fc2_input_rows_on_the_rollouts(rollout, ok):
+    """w4a4 rounds each fc2 input per token over the whole row, as vLLM does under expert parallelism; w4a16 rounds
+    no activations and takes any rollout layout."""
+    for mode in ("w4a16", "w4a4"):
+        cfg = _expert_nvfp4_config(mode)
+        for key, value in rollout.items():
+            setattr(cfg.generator.inference_engine, key, value)
+        if ok or mode == "w4a16":
+            _validate_expert_nvfp4_cfg(cfg)
+        else:
+            with pytest.raises(ValueError, match="cannot match the rollouts' per-token fc2-input scales"):
+                _validate_expert_nvfp4_cfg(cfg)
+
+
+def test_expert_nvfp4_validation_is_a_no_op_when_off():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.generator.inference_engine.weight_sync_backend = "sharded_rdt"
+    _validate_expert_nvfp4_cfg(cfg)
+
+
+@pytest.mark.parametrize("mode", ["w4a16", "w4a4"])
+@pytest.mark.parametrize("block_scale, four_over_six", [("four_over_six", "1"), ("absmax", "0")])
+def test_expert_nvfp4_runtime_environment_is_the_configs_flashinfer_env(monkeypatch, mode, block_scale, four_over_six):
+    """No TE recipe env (NVTE_NVFP4_* / NVTE_BACKWARD_OVERRIDE) is exported, and the engines' FlashInfer env follows
+    expert_nvfp4_block_scale with every key explicit, so a stray exact-math shell setting cannot leak in."""
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setenv("NVTE_NVFP4_4OVER6", "all")
+    monkeypatch.setenv("FLASHINFER_DISABLE_FP4_QUANT_FAST_MATH", "1")
+    cfg = _expert_nvfp4_config(mode)
+    cfg.trainer.policy.megatron_config.expert_nvfp4_block_scale = block_scale
+    assert _nvfp4_env(prepare_runtime_environment(cfg)) == {"FLASHINFER_NVFP4_4OVER6": four_over_six, **_FI_ENV}
+
+
+def test_runtime_environment_has_no_nvfp4_env_without_expert_nvfp4(monkeypatch):
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    assert _nvfp4_env(prepare_runtime_environment(cfg)) == {}

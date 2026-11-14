@@ -230,9 +230,7 @@ class TestSerializedNvfp4WeightSource:
         from skyrl.backends.skyrl_train.weight_sync import nvfp4_stacked
 
         monkeypatch.setattr(nvfp4_stacked, "quantize_nvfp4_matrix", quantize)
-        self.settings = nvfp4.Nvfp4WeightQuantSettings(
-            use_4over6=True, e4m3_max=448, err_mode="MSE", row_scaled_activation=True, backward_override=None
-        )
+        self.settings = nvfp4.Nvfp4WeightQuantSettings("four_over_six")
 
     @staticmethod
     def _tensors():

@@ -1,6 +1,6 @@
 """CPU tests for the stacked NVFP4 expert sync (``weight_sync/nvfp4_stacked.py`` + the receiver's pure parts).
 
-The TE kernel is GPU-only, so ``quantize_nvfp4_matrix`` is replaced by a deterministic stand-in whose outputs
+The quantizer is GPU-only, so ``quantize_nvfp4_matrix`` is replaced by a deterministic stand-in whose outputs
 depend on the input bytes: equal bytes after stacking/unstacking then mean the stacking itself is lossless.
 """
 
@@ -21,9 +21,7 @@ from skyrl.backends.skyrl_train.weight_sync.nvfp4_stacked import (
     unstack_to_per_expert,
 )
 
-_SETTINGS = nvfp4.Nvfp4WeightQuantSettings(
-    use_4over6=False, e4m3_max=448, err_mode="MAE", row_scaled_activation=True, backward_override=None
-)
+_SETTINGS = nvfp4.Nvfp4WeightQuantSettings("absmax")
 NUM_LAYERS, NUM_EXPERTS, HIDDEN, INTER = 3, 4, 32, 16
 
 

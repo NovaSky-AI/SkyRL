@@ -699,15 +699,37 @@ class MegatronConfig(BaseConfig):
     ``optimizer_offload_fraction=1.0``), whose step allocates little GPU memory.
     ``True`` / ``False`` force both empties on / off."""
     expert_nvfp4: bool = False
-    """Run routed-expert GEMMs (``*.experts.linear_fc1/fc2``) through Transformer Engine's NVFP4 recipe and
-    sync the same NVFP4 expert weights to vLLM (ModelOpt NVFP4, per-token activations, no re-quantization on
-    the sampler). Everything else stays BF16. The recipe itself (per-token activations, 4/6 block scaling,
-    dequantized backward, no RHT / stochastic rounding / 2D blocks) is read by TE from the ``NVTE_NVFP4_*``
-    and ``NVTE_BACKWARD_OVERRIDE`` environment, forwarded to all Ray actors together with the matching
-    ``FLASHINFER_*`` sampler settings. Requires ``moe_grouped_gemm`` and SM100.
+    """Routed-expert NVFP4 training: the trainer's routed experts (``*.experts.linear_fc1/fc2``) compute on the
+    NVFP4 grid vLLM serves, and the same NVFP4 expert weights are synced to vLLM (ModelOpt NVFP4, per-token
+    activations on FlashInfer TRT-LLM, no re-quantization on the sampler), so the trainer's logprobs follow the
+    rollouts'. Everything else stays BF16, and so do the optimizer's master weights (straight-through).
+    ``expert_nvfp4_mode`` picks what the trainer rounds; ``expert_nvfp4_block_scale`` the block scales of both
+    sides. Requires ``moe_grouped_gemm``, expert TP 1 (``expert_tensor_parallel_size: 1``; set it explicitly with
+    ``tensor_model_parallel_size > 1``, Megatron defaults it to the TP size), the NCCL or CUDA-IPC weight sync and
+    SM100. The ref model mirrors the policy's setting.
 
     ``num_layers_at_start_in_bf16`` / ``num_layers_at_end_in_bf16`` keep the routed experts of the first / last
     N layers in BF16, in the trainer and on the sampler (the vLLM ignore list and the weight sync follow them)."""
+    expert_nvfp4_mode: Literal["w4a16", "w4a4"] = "w4a16"
+    """What the trainer rounds with ``expert_nvfp4`` (the rollouts are W4A4 either way).
+
+    ``w4a16`` (the default): only the routed-expert weights, in fprop and dgrad. It gave the best rollout-trainer
+    logprob match in GLM-5.3 and Qwen3-30B-A3B RL: trainer and rollout hidden states differ at depth (attention /
+    KV-cache numerics), so the two sides' 4-bit activation codes decorrelate while the identical weight rounding
+    cancels. Runs at about bf16 speed and memory, on any dispatcher.
+
+    ``w4a4``: also the per-token NVFP4 inputs of both expert GEMMs, as vLLM's W4A4 MoE quantizes them (wgrad reads
+    the rounded inputs), with the fprops on NVFP4 tensor cores (FlashInfer's CuTe DSL grouped GEMM). Needs whole
+    fc2-input rows on the engines (expert parallelism, or a single unsharded engine), and rejects ``moe_act``
+    recompute and ``expert_fc1`` / ``moe_act`` activation offloading.
+
+    Either way dgrad and wgrad run in BF16 on the rounded operands and the optimizer updates the unrounded weights."""
+    expert_nvfp4_block_scale: Literal["absmax", "four_over_six"] = "four_over_six"
+    """With ``expert_nvfp4``: the E4M3 block scales of the routed experts' NVFP4 weights and per-token activations.
+    ``four_over_six`` (humans&' recipe) picks amax/6 or amax/4 per 16-block, whichever has the lower squared error
+    (FlashInfer's 4over6 with its fast MSE error path, E4M3 bound 448); ``absmax`` (amax/6) is vLLM's own
+    quantizer. The weight sync quantizes the experts with it (FlashInfer ``fp4_quantize`` with vLLM's per-expert
+    global scale), and the vLLM engines' FlashInfer activation quantizer is configured from it."""
     expert_nvfp4_stacked_sync: bool = True
     """With ``expert_nvfp4``: ship each NVFP4 MoE layer's experts to vLLM as 8 tensors stacked over all experts,
     already in vLLM's ModelOpt-NVFP4 ``FusedMoE`` parameter layout (``weight_sync/nvfp4_stacked.py``), instead of
@@ -798,11 +820,11 @@ class MegatronConfig(BaseConfig):
                 self.transformer_config_kwargs.setdefault(key, value)
         if self.expert_nvfp4 and (self.fp8_exclude_modules or self.te_precision_config_file):
             raise ValueError(
-                "expert_nvfp4 builds its own per-module quant recipe; fp8_exclude_modules and "
+                "expert_nvfp4 needs BF16 routed-expert compute; fp8_exclude_modules and "
                 "te_precision_config_file are not supported with it."
             )
-        # expert_nvfp4 honours num_layers_at_{start,end}_in_bf16 through the same Megatron first/last-layer
-        # mechanism, so the layer counts are valid with FP8 or with expert_nvfp4.
+        # expert_nvfp4 reads num_layers_at_{start,end}_in_bf16 from the same Megatron first/last-layer kwargs, so the
+        # layer counts are valid with FP8 or with expert_nvfp4.
         if (
             not is_fp8_enabled(self.transformer_config_kwargs.get("fp8", False))
             and not self.expert_nvfp4
