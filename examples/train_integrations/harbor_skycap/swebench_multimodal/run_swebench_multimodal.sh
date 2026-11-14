@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SWE-bench Multimodal through skycap: mini-swe-agent in Daytona sandboxes, a vision-language policy that
+# SWE-bench Multimodal through skycap: mini-swe-agent in Daytona or Ray sandboxes, a vision-language policy that
 # sees the issue's screenshots, and every rollout's exact tokens and images captured for training.
 #
 #   SANDBOX_OWNER=<you> bash examples/train_integrations/harbor_skycap/swebench_multimodal/run_swebench_multimodal.sh
@@ -15,7 +15,13 @@
 #                             over many tasks measures each task's pass@GROUP_SIZE without training
 #   MAX_CONCURRENCY           trials (so sandboxes) in flight at once, eval included (default 64). The
 #                             Daytona org is shared: keep it well under what others leave free
-#   SANDBOX_OWNER             required: the `owner` label on every sandbox; `run` is the experiment name
+#   SANDBOX=daytona|ray       where each trial's sandbox runs (default daytona). ray runs it as a gVisor sandbox on this
+#                             run's own Ray cluster (skyrl.integration.ray_sandbox): no Daytona key, owner label or
+#                             snapshots. The node needs Ray's sandbox tools, and Ray with the sandbox
+#                             fixes (RAY_WHEEL); each sandbox reserves RAY_SANDBOX_CPUS of the node's CPUs (default 0.25)
+#                             and SANDBOX_MEMORY_MB of its memory
+#   RAY_WHEEL=<url>           run on this Ray wheel instead of the locked Ray, layered on with `uv run --with`
+#   SANDBOX_OWNER             required for daytona: the `owner` label on every sandbox; `run` is the experiment name
 #   SANDBOX_IDLE_MINUTES      Daytona stops a sandbox idle this long and then deletes it, so a crashed run's
 #                             sandboxes go away on their own (default 30)
 #   SANDBOX_CPUS, SANDBOX_MEMORY_MB, SANDBOX_STORAGE_MB   per sandbox (default 1, 16384, 10240). The agent's own
@@ -44,7 +50,7 @@
 #   ENGINE_INIT_KWARGS        extra vLLM engine kwargs as a JSON object, e.g. '{"gdn_prefill_backend": "triton"}'
 #                             for Qwen3.5 (vllm-project/vllm#36921)
 #
-# Needs: the GPUs, `DAYTONA_API_KEY=...` in DAYTONA_KEY_FILE, optionally WANDB_API_KEY (or WANDB_KEY_FILE).
+# Needs: the GPUs, `DAYTONA_API_KEY=...` in DAYTONA_KEY_FILE (daytona only), optionally WANDB_API_KEY (or WANDB_KEY_FILE).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
@@ -54,7 +60,13 @@ HERE=examples/train_integrations/harbor_skycap/swebench_multimodal
 #-----------------------
 # Knobs
 #-----------------------
-: "${SANDBOX_OWNER:?set SANDBOX_OWNER, the owner label every sandbox of this run carries}"
+SANDBOX="${SANDBOX:-daytona}"
+case "$SANDBOX" in
+  daytona) : "${SANDBOX_OWNER:?set SANDBOX_OWNER, the owner label every sandbox of this run carries}" ;;
+  ray) ;;
+  *) echo "SANDBOX must be daytona or ray, got $SANDBOX" >&2; exit 1 ;;
+esac
+RAY_SANDBOX_CPUS="${RAY_SANDBOX_CPUS:-0.25}"
 DAYTONA_KEY_FILE="${DAYTONA_KEY_FILE:-$HOME/.config/skyrl/daytona.env}"
 WANDB_KEY_FILE="${WANDB_KEY_FILE:-$HOME/default/wandb_key.key}"
 MODEL="${MODEL:-Qwen/Qwen3.5-9B}"
@@ -101,12 +113,14 @@ SUBSET_DIR="$RUN_DIR/tasks"
 #-----------------------
 # Credentials
 #-----------------------
-[[ -f "$DAYTONA_KEY_FILE" ]] || { echo "no Daytona credentials at $DAYTONA_KEY_FILE" >&2; exit 1; }
-set -a
-# shellcheck disable=SC1090
-source "$DAYTONA_KEY_FILE"
-set +a
-: "${DAYTONA_API_KEY:?$DAYTONA_KEY_FILE must set DAYTONA_API_KEY}"
+if [[ "$SANDBOX" == daytona ]]; then
+  [[ -f "$DAYTONA_KEY_FILE" ]] || { echo "no Daytona credentials at $DAYTONA_KEY_FILE" >&2; exit 1; }
+  set -a
+  # shellcheck disable=SC1090
+  source "$DAYTONA_KEY_FILE"
+  set +a
+  : "${DAYTONA_API_KEY:?$DAYTONA_KEY_FILE must set DAYTONA_API_KEY}"
+fi
 if [[ -z "${WANDB_API_KEY:-}" && -f "$WANDB_KEY_FILE" ]]; then
   set -a
   # shellcheck disable=SC1090
@@ -154,15 +168,28 @@ AGENT_CONFIG="$RUN_DIR/mini_swe_agent.yaml"
 sed "s/^  step_limit: [0-9]*$/  step_limit: $STEP_LIMIT/" "$HERE/mini_swe_agent_textbased.yaml" > "$AGENT_CONFIG"
 grep -q "^  step_limit: $STEP_LIMIT$" "$AGENT_CONFIG" || { echo "could not set step_limit in $AGENT_CONFIG" >&2; exit 1; }
 echo "==> $NUM_PROMPTS tasks x $GROUP_SIZE samples, at most $MAX_CONCURRENCY sandboxes at once"
-echo "==> sandboxes labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, deleted after ${SANDBOX_IDLE_MINUTES}m idle"
+if [[ "$SANDBOX" == ray ]]; then
+  echo "==> Ray sandboxes on this node, each reserving $RAY_SANDBOX_CPUS CPU and $SANDBOX_MEMORY_MB MB"
+  SANDBOX_ARGS=(
+    harbor_trial_config.environment.import_path=skyrl.integration.ray_sandbox.harbor_env:RaySandboxEnvironment
+    harbor_trial_config.environment.kwargs.reserve_cpus="$RAY_SANDBOX_CPUS"
+  )
+else
+  echo "==> sandboxes labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, deleted after ${SANDBOX_IDLE_MINUTES}m idle"
+  SANDBOX_ARGS=(
+    harbor_trial_config.environment.kwargs.labels.owner="$SANDBOX_OWNER"
+    harbor_trial_config.environment.kwargs.labels.project=skyrl-swebm
+    harbor_trial_config.environment.kwargs.labels.run="$EXPERIMENT"
+    harbor_trial_config.environment.kwargs.auto_stop_interval_mins="$SANDBOX_IDLE_MINUTES"
+    harbor_trial_config.environment.kwargs.auto_delete_interval_mins=0
+  )
+fi
 
-if [[ "$SNAPSHOTS" == 1 ]]; then
+if [[ "$SANDBOX" == daytona && "$SNAPSHOTS" == 1 ]]; then
   # build_snapshots.py names each snapshot after the sandbox size and the task; Harbor fills in {name}.
   SNAPSHOT_PREFIX="swebm-c${SANDBOX_CPUS}m$((SANDBOX_MEMORY_MB / 1024))d$((SANDBOX_STORAGE_MB / 1024))-"
   echo "==> sandboxes start from snapshots ${SNAPSHOT_PREFIX}<task> (build them with $HERE/build_snapshots.py)"
-  SANDBOX_ARGS=(harbor_trial_config.environment.kwargs.snapshot_template_name="${SNAPSHOT_PREFIX}{name}")
-else
-  SANDBOX_ARGS=()
+  SANDBOX_ARGS+=(harbor_trial_config.environment.kwargs.snapshot_template_name="${SNAPSHOT_PREFIX}{name}")
 fi
 case "$PACKING" in
   0) REMOVE_MICROBATCH_PADDING=false ;;
@@ -219,7 +246,12 @@ export RAY_enable_ray_event=0
 export RAY_enable_core_worker_ray_event_to_aggregator=0
 echo "==> experiment $EXPERIMENT in $RUN_DIR"
 
-uv run --isolated --extra "$STRATEGY" --extra harbor --extra skycap \
+UV_WITH=()
+if [[ -n "${RAY_WHEEL:-}" ]]; then
+  # No spaces: Ray's uv hook rejoins the uv run arguments without quoting (ray-project/ray#68156).
+  UV_WITH=(--with "ray[default]@$RAY_WHEEL")
+fi
+uv run --isolated --extra "$STRATEGY" --extra harbor --extra skycap "${UV_WITH[@]}" \
   -m examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap \
   data.train_data="['$SUBSET_DIR']" \
   trainer.policy.model.path="$MODEL" \
@@ -238,11 +270,6 @@ uv run --isolated --extra "$STRATEGY" --extra harbor --extra skycap \
   harbor_trial_config.agent.override_timeout_sec="$AGENT_TIMEOUT_SEC" \
   harbor_trial_config.agent.kwargs.config_file="$AGENT_CONFIG" \
   harbor_trial_config.agent.kwargs.version="$MINI_SWE_AGENT_VERSION" \
-  harbor_trial_config.environment.kwargs.labels.owner="$SANDBOX_OWNER" \
-  harbor_trial_config.environment.kwargs.labels.project=skyrl-swebm \
-  harbor_trial_config.environment.kwargs.labels.run="$EXPERIMENT" \
-  harbor_trial_config.environment.kwargs.auto_stop_interval_mins="$SANDBOX_IDLE_MINUTES" \
-  harbor_trial_config.environment.kwargs.auto_delete_interval_mins=0 \
   harbor_trial_config.environment.override_cpus="$SANDBOX_CPUS" \
   harbor_trial_config.environment.override_memory_mb="$SANDBOX_MEMORY_MB" \
   harbor_trial_config.environment.override_storage_mb="$SANDBOX_STORAGE_MB" \
@@ -295,4 +322,6 @@ echo
 echo "==> done: $EXPERIMENT"
 echo "    skycap records: $RUN_DIR/skycap"
 echo "    Harbor trials:  $RUN_DIR/trials"
-echo "    leftover sandboxes: labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, deleted after ${SANDBOX_IDLE_MINUTES}m idle"
+if [[ "$SANDBOX" == daytona ]]; then
+  echo "    leftover sandboxes: labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, deleted after ${SANDBOX_IDLE_MINUTES}m idle"
+fi
