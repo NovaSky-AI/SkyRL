@@ -4,7 +4,9 @@ The quantizer is FlashInfer's ``nvfp4_quantize(x, 1 / (448 * 6), layout_linear, 
 itself (vLLM's ``quantize_nvfp4_per_token_input``; absmax, or 4/6 with its 4over6 MSE fast-error path, set per
 call). Everything else here is layout, done with built-ins:
 
-- the bf16 round trip (``fake_quantize_per_token``) is the decode of FlashInfer's bytes (:mod:`.decode`);
+- the bf16 round trip (``fake_quantize_per_token``) is the decode of FlashInfer's bytes (:mod:`.decode`); on sm_100
+  it and ``pack_per_token`` run as one fused pass instead (:mod:`.fused_rt`, FlashInfer's quantizer arithmetic in
+  registers: bit-identical bytes, round trip and write-back; FlashInfer stays the fallback);
 - the tile-padded, 128x4-swizzled GEMM operand (``pack_per_token``) is a row copy of those bytes into the padded
   rows plus FlashInfer's ``block_scale_interleave``.
 """
@@ -13,7 +15,10 @@ from __future__ import annotations
 
 import torch
 
-from skyrl.backends.skyrl_train.kernels.nvfp4_quant import flashinfer_block_scale_env
+from skyrl.backends.skyrl_train.kernels.nvfp4_quant import (
+    flashinfer_block_scale_env,
+    fused_rt,
+)
 from skyrl.backends.skyrl_train.kernels.nvfp4_quant.decode import (
     PER_TOKEN_SCALE_INV,
     dequantize_rows,
@@ -43,6 +48,8 @@ def fake_quantize_per_token(x: torch.Tensor, inplace: bool = False, four_over_si
     if inplace and not x.is_contiguous():
         raise ValueError("in-place per-token NVFP4 needs a contiguous input")
     y = x if inplace else torch.empty(x.shape, dtype=x.dtype, device=x.device)
+    if x.shape[0] and fused_rt.supports(x) and fused_rt.per_token_quantize(x, four_over_six, out=y):
+        return y
     if x.shape[0]:
         q, sf, t = flashinfer_per_token(x, four_over_six)
         dequantize_rows(q, sf, t, out=y)
@@ -65,6 +72,12 @@ def pack_per_token(
     opts = torch.empty((padded_rows,), dtype=torch.float32, device=x.device)
     if m == 0:  # FlashInfer's kernels reject empty launches
         return oq, torch.zeros((padded_rows * (k // 16),), dtype=torch.uint8, device=x.device), opts
+    if fused_rt.supports(x) and fused_rt.per_token_fits(k):
+        sw = torch.zeros((padded_rows * (k // 16),), dtype=torch.uint8, device=x.device)
+        fused_rt.per_token_quantize(
+            x, four_over_six, out=x if write_back else None, codes=oq, sf_swizzled=sw, t=opts, dst=dst
+        )
+        return oq, sw, opts
     lin = torch.zeros((padded_rows, k // 16), dtype=torch.uint8, device=x.device)
     q, sf, t = flashinfer_per_token(x, four_over_six)
     rows = dst.long()

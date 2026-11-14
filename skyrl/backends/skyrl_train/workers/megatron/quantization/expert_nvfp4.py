@@ -444,6 +444,8 @@ def install_expert_nvfp4(
 ) -> int:
     """``expert_nvfp4`` on a built model (outside ``bf16_layers``): ``w4a16`` rounds the routed-expert weights,
     ``w4a4`` the per-token expert inputs as well (see the module docstring). Returns the number of rounded weights."""
+    from skyrl.backends.skyrl_train.kernels.nvfp4_quant import fused_rt
+
     if mode not in EXPERT_NVFP4_MODES:
         raise ValueError(f"expert_nvfp4_mode must be one of {EXPERT_NVFP4_MODES}, got {mode!r}")
     if torch.cuda.is_available() and torch.cuda.get_device_capability() not in NVFP4_DEVICE_CAPABILITIES:
@@ -455,10 +457,13 @@ def install_expert_nvfp4(
     if w4a4:
         # The pre-hooks round the inputs in place and pack them for the NVFP4 fprop.
         register_routed_expert_input_rounding(model_chunks, block_scale, pack_fp4=True, bf16_layers=bf16_layers)
+    # Builds the fused round-trip kernels now (once per node, a few seconds) rather than in the first step.
+    fused = torch.cuda.is_available() and fused_rt.available()
     logger.info(
         f"expert_nvfp4 ({mode}): {count} routed-expert weights rounded to NVFP4 (block_scale={block_scale}"
         + (", inputs per token" if w4a4 else "")
         + f"; BF16 layers {bf16_layers}); fprop on "
-        + ("NVFP4 tensor cores." if w4a4 else "bf16 GEMMs of the round trips.")
+        + ("NVFP4 tensor cores" if w4a4 else "bf16 GEMMs of the round trips")
+        + f"; round trips and packs on {'the fused sm_100 kernels' if fused else 'FlashInfer + the Triton decode'}."
     )
     return count
