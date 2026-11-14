@@ -283,7 +283,7 @@ verifier:
   disable: false                      # Set to true to skip verification (debugging)
 ```
 
-With `type: runta`, also set `override_storage_mb: 32768` or higher: Runta runtimes take 32-256 GiB of disk, and Harbor requests less for a smaller value, which Runta rejects.
+With `type: runta`, also set `override_storage_mb: 32768` or higher: Runta requires 32-256 GiB of disk per runtime. With a smaller value Harbor requests less than that, and Runta rejects the request.
 
 ### LLM Request Settings
 

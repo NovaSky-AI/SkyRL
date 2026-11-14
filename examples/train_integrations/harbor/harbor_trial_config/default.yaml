@@ -84,7 +84,7 @@ environment:
   # Resource overrides (optional)
   override_cpus: 1
   override_memory_mb: 1024
-  override_storage_mb: 1024 # Runta takes 32-256 GiB of disk: use 32768 or more with type: runta.
+  override_storage_mb: 1024 # Runta requires 32-256 GiB of disk: use 32768 or more with type: runta.
   suppress_override_warnings: true
 
   # Environment-specific settings
