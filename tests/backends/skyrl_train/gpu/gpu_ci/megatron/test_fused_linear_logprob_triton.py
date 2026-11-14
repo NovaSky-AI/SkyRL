@@ -99,6 +99,46 @@ def test_autotune_schedules_include_incumbents_and_variants() -> None:
         assert len(specs) == len(set(specs))
 
 
+def test_autotune_candidates_share_reduction_order() -> None:
+    # BLOCK_SIZE_N sets the fp32 summation order of the softmax statistics. If candidates differ
+    # in it, the tuner's per-bucket choice makes log-probs depend on the micro-batch token count.
+    assert len({spec[1] for spec in _FORWARD_MAINLOOP_CONFIG_SPECS}) == 1
+    assert len({spec[1] for spec in _EPILOGUE_CONFIG_SPECS}) == 1
+
+
+def test_logprobs_do_not_depend_on_autotune_config() -> None:
+    torch.manual_seed(0)
+    # 149 vocab splits, so the epilogue BLOCK_SIZE_N candidates also change the reduction order
+    num_tokens, hidden_size, vocab_size = 1000, 1024, 151936
+    hidden = torch.randn(num_tokens, hidden_size, device="cuda").to(torch.bfloat16)
+    weight = (torch.randn(vocab_size, hidden_size, device="cuda") / 8).to(torch.bfloat16)
+    labels = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
+    kernels = (
+        fused_linear_logprob_triton.efficient_entropy_kernel_general_mainloop,
+        fused_linear_logprob_triton.efficient_entropy_triton_kernel_epilogue,
+    )
+    saved = [list(kernel.configs) for kernel in kernels]
+    results = []
+    try:
+        for which, kernel in enumerate(kernels):
+            for config in saved[which]:
+                for other, other_kernel in enumerate(kernels):
+                    other_kernel.configs = [config] if other == which else [saved[other][0]]
+                    other_kernel.cache.clear()
+                logprobs, entropy, *_ = fused_linear_logprob_triton.efficient_entropy_forward(
+                    hidden, weight, labels, 1.0, None, None, compute_entropy=True
+                )
+                results.append((config, logprobs.clone(), entropy.clone()))
+    finally:
+        for kernel, configs in zip(kernels, saved):
+            kernel.configs = configs
+            kernel.cache.clear()
+    _, ref_logprobs, ref_entropy = results[0]
+    for config, logprobs, entropy in results[1:]:
+        assert torch.equal(logprobs, ref_logprobs), config
+        assert torch.equal(entropy, ref_entropy), config
+
+
 def test_all_triton_entrypoints_use_bucketed_cached_autotune() -> None:
     module = ast.parse(_kernel_source())
     autotune_decorators = {}
