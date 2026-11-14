@@ -1380,7 +1380,10 @@ def test_handle_filter_sampling_all_zero_variance_first_batch():
     """A first batch where every group has zero reward variance must not crash; keep sampling."""
     sampling_config = {"train_batch_size": 2, "n_samples_per_prompt": 2, "max_sample_batches": 20}
     out, uids, keep_sampling, state = handle_filter_sampling(
-        _zero_variance_batch(), ["uid1", "uid1", "uid2", "uid2"], sampling_config, collected_state={"sample_batch_count": 1}
+        _zero_variance_batch(),
+        ["uid1", "uid1", "uid2", "uid2"],
+        sampling_config,
+        collected_state={"sample_batch_count": 1},
     )
     assert keep_sampling is True
     assert state["num_prompts_in_batch"] == 0
@@ -1391,17 +1394,31 @@ def test_handle_filter_sampling_zero_variance_batch_after_partial_collection():
     """A zero-variance batch after a partially filled one keeps what was collected, then a later batch completes it."""
     sampling_config = {"train_batch_size": 2, "n_samples_per_prompt": 2, "max_sample_batches": 20}
     good1 = {
-        "prompt_token_ids": [[1, 2], [3, 4]], "response_ids": [[5, 6], [7, 8]], "rewards": [1.0, 0.0],
-        "loss_masks": [[1, 1]] * 2, "stop_reasons": ["stop"] * 2, "rollout_metrics": None, "rollout_logprobs": None,
+        "prompt_token_ids": [[1, 2], [3, 4]],
+        "response_ids": [[5, 6], [7, 8]],
+        "rewards": [1.0, 0.0],
+        "loss_masks": [[1, 1]] * 2,
+        "stop_reasons": ["stop"] * 2,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
     }
-    _, _, keep1, state = handle_filter_sampling(good1, ["a", "a"], sampling_config, collected_state={"sample_batch_count": 1})
+    _, _, keep1, state = handle_filter_sampling(
+        good1, ["a", "a"], sampling_config, collected_state={"sample_batch_count": 1}
+    )
     assert keep1 is True and state["num_prompts_in_batch"] == 1
-    _, _, keep2, state = handle_filter_sampling(_zero_variance_batch(), ["b", "b", "c", "c"], sampling_config, collected_state=state)
+    _, _, keep2, state = handle_filter_sampling(
+        _zero_variance_batch(), ["b", "b", "c", "c"], sampling_config, collected_state=state
+    )
     assert keep2 is True and state["num_prompts_in_batch"] == 1
     assert len(state["collected_generator_output"]["prompt_token_ids"]) == 2
     good2 = {
-        "prompt_token_ids": [[9, 9], [9, 8]], "response_ids": [[1, 1], [1, 2]], "rewards": [0.0, 1.0],
-        "loss_masks": [[1, 1]] * 2, "stop_reasons": ["stop"] * 2, "rollout_metrics": None, "rollout_logprobs": None,
+        "prompt_token_ids": [[9, 9], [9, 8]],
+        "response_ids": [[1, 1], [1, 2]],
+        "rewards": [0.0, 1.0],
+        "loss_masks": [[1, 1]] * 2,
+        "stop_reasons": ["stop"] * 2,
+        "rollout_metrics": None,
+        "rollout_logprobs": None,
     }
     out, uids, keep3, state3 = handle_filter_sampling(good2, ["d", "d"], sampling_config, collected_state=state)
     assert keep3 is False and state3 is None
