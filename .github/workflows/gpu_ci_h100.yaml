@@ -41,9 +41,12 @@ jobs:
         )
       )
     runs-on: ubuntu-latest
-    # Runs as two parallel shards; see ci/gpu_ci_run_h100.sh.
+    # Runs as two shards, one after the other; see ci/gpu_ci_run_h100.sh. With one free H100
+    # node, a parallel second shard waits in STARTING for the first and its GitHub job hits the
+    # 6 h cap. Sequential legs each get their own 6 h budget.
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         shard: [models, other]
     defaults:
