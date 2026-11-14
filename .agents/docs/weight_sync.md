@@ -381,7 +381,9 @@ patch by XOR-ing directly into the mmap'd safetensors files.
 `iter_tensors`. Note the delta shrinks the *transfer*, not the reload — the whole checkpoint is
 re-read even for an empty delta. The pause/resume bracket and the prefix-cache reset ride the
 engine, not the four-method client protocol: this is the only backend that reloads a whole
-checkpoint in place, so it is the only one that needs generation stopped.
+checkpoint in place, so it is the only one that needs generation stopped. Because this pause is
+issued from the trainer worker, the driver's `RemoteInferenceClient.paused_seconds()` does not see
+it, so fully-async `generate/group_completion_time_*` does not exclude the delta reload pause.
 
 The engine owns its layerwise-reload lifecycle like every other one
 (`start_weight_update` → `initialize_layerwise_reload`, `finish_weight_update` →
