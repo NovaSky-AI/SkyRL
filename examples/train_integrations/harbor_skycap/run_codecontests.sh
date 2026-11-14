@@ -270,7 +270,9 @@ echo "==> experiment $EXPERIMENT in $RUN_DIR"
 #-----------------------
 UV_WITH=()
 if [[ -n "${RAY_WHEEL:-}" ]]; then
-  UV_WITH=(--with "ray[default] @ $RAY_WHEEL")
+  # No spaces: Ray's uv hook rebuilds the worker command as " ".join(uv run args) without
+  # quoting, so "ray[default] @ <url>" would reach the workers as three args (uv: "Failed to spawn: @").
+  UV_WITH=(--with "ray[default]@$RAY_WHEEL")
 fi
 uv run --isolated --extra "$STRATEGY" "${EXTRAS[@]}" "${UV_WITH[@]}" -m "$ENTRYPOINT" \
   data.train_data="['$SUBSET_DIR']" \
