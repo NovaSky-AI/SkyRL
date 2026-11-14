@@ -9,6 +9,7 @@ examples/train_integrations/harbor/
   harbor_generator.py              # HarborGenerator: bridges SkyRL <-> Harbor
   dataset.py                       # HarborTaskDataset: loads task directory paths
   prepare_harbor_dataset.py        # Downloads + extracts datasets from HuggingFace
+  split_tasks.py                   # Seeded split of prepared tasks into training and held-out sets
   harbor_trial_config/
     default.yaml                   # Harbor TrialConfig template
   entrypoints/

@@ -30,6 +30,25 @@ Harbor's `TrialConfig`, with defaults from `../harbor/harbor_trial_config/defaul
 the idle TTL, the renderer pool size, which paths train and how agents inside
 remote sandboxes reach skycap ([below](#agents-inside-remote-sandboxes)).
 
+### Eval
+
+With `data.val_data` set and `trainer.eval_interval > 0`, SkyRL's eval runs its
+trials through the same generator. Three things differ from training:
+
+- **Each trial is scored on its own.** In training, one trial that timed out or
+  failed masks every trial of its task, so GRPO never computes a baseline from a
+  group with holes in it. In eval it scores 0 alone, and the counts reach W&B as
+  `eval/all/generate/skycap/num_timeout_trajectories` and `..._num_error_trajectories`.
+- **Eval samples with `generator.sampling_params`.** skycap applies them to every
+  call, so the trainer's logprobs match what was sampled. The entrypoint raises at
+  startup when `generator.eval_sampling_params` differ in temperature, top_p, top_k
+  or min_p.
+- **Trials go to `<trials_dir>/<phase>/global_step_<N>/`**, so a step's held-out
+  trajectories can be read apart from its training ones.
+
+Eval metrics are grouped by the directories in `data.val_data`
+(`eval/<directory name>/avg_score`, `pass_at_<n>`).
+
 ## Which paths train
 
 `skycap.train_paths` picks the rows of each rollout:

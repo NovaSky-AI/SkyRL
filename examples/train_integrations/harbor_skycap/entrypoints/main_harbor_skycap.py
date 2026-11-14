@@ -182,6 +182,32 @@ def _require_api_key(cfg: Any) -> bool:
     return cfg.skycap.exposure.type != "none" if required is None else bool(required)
 
 
+#: What skycap's servers apply to every call (``start_skycap``'s ``sampling_overrides``).
+SKYCAP_SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "min_p")
+
+
+def _check_eval_sampling(cfg: Any) -> None:
+    """Raise when eval is on and ``generator.eval_sampling_params`` differ from what skycap samples with.
+
+    skycap's servers apply ``generator.sampling_params`` to every call, eval calls included, so the trainer's
+    logprobs match what was sampled.
+    """
+    if cfg.trainer.eval_interval <= 0 or not cfg.data.val_data:
+        return
+    train, evaluate = cfg.generator.sampling_params, cfg.generator.eval_sampling_params
+    different = [
+        f"{name} {getattr(evaluate, name)} vs {getattr(train, name)}"
+        for name in SKYCAP_SAMPLING_FIELDS
+        if getattr(evaluate, name) != getattr(train, name)
+    ]
+    if different:
+        raise ValueError(
+            "skycap samples every call with generator.sampling_params, eval calls included: set "
+            f"generator.eval_sampling_params to the same values ({', '.join(different)}), or turn eval off "
+            "with trainer.eval_interval=-1."
+        )
+
+
 def _exposure(cfg: Any) -> Optional[str]:
     """``skycap.exposure.type``, or None for ``none``. Raises ``ValueError`` on a config that can't be built."""
     kind = cfg.skycap.exposure.type
@@ -246,6 +272,7 @@ def main() -> None:
     cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
     validate_cfg(cfg)
     _exposure(cfg)
+    _check_eval_sampling(cfg)
     if cfg.trainer.algorithm.max_seq_len is None:
         raise ValueError("trainer.algorithm.max_seq_len must be set for Harbor training")
     initialize_ray(cfg)
