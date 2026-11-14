@@ -202,7 +202,7 @@ RUN runsc --version && mkfs.erofs --version && slirp4netns --version && nft --ve
 #   SKYRL_REF when uv.lock changes; small drift only downloads the difference at runtime.
 # - Adds roughly 15-20GB to the image.
 ARG SKYRL_REPO=https://github.com/xinyuangui2/SkyRL.git
-ARG SKYRL_REF=fe13c5ffdd000f778db9a1e86be6f9917a055afc
+ARG SKYRL_REF=d9e1872acbcf8b168882840b06f4f47a095df38b
 RUN mkdir /tmp/skyrl && cd /tmp/skyrl \
     && git init -q && git remote add origin "${SKYRL_REPO}" \
     && git fetch -q --depth 1 origin "${SKYRL_REF}" && git checkout -q FETCH_HEAD \
