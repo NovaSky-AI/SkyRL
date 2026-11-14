@@ -108,7 +108,8 @@ def test_autotune_candidates_share_reduction_order() -> None:
 
 def test_logprobs_do_not_depend_on_autotune_config() -> None:
     torch.manual_seed(0)
-    num_tokens, hidden_size, vocab_size = 1000, 1024, 32000
+    # 149 vocab splits, so the epilogue BLOCK_SIZE_N candidates also change the reduction order
+    num_tokens, hidden_size, vocab_size = 1000, 1024, 151936
     hidden = torch.randn(num_tokens, hidden_size, device="cuda").to(torch.bfloat16)
     weight = (torch.randn(vocab_size, hidden_size, device="cuda") / 8).to(torch.bfloat16)
     labels = torch.randint(0, vocab_size, (num_tokens,), device="cuda")
