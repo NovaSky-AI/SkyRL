@@ -48,7 +48,14 @@ def dot_product_attention(
             implementation="cudnn",
         )
 
-    # CPU/TPU fallback
+    # jax-mps patches this function for every JAX platform, but its fused path
+    # cannot combine causal attention with a padding mask.
     return jax.nn.dot_product_attention(
-        q, k, v, scale=scale, mask=attention_mask[:, None, None, :].astype(bool), is_causal=is_causal
+        q,
+        k,
+        v,
+        scale=scale,
+        mask=attention_mask[:, None, None, :].astype(bool),
+        is_causal=is_causal,
+        implementation="xla" if is_causal else None,
     )

@@ -41,6 +41,10 @@ tpu = [
     "jax[tpu]>=0.7.2; sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
 
+mps = [
+    "jax-mps>=0.11.0,<0.12; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
 tinker = [
     "tinker>=0.25.0,<0.28.0",
     "fastapi[standard]",
@@ -335,9 +339,9 @@ no-build-isolation-package = [
 # unpinned dependencies.
 override-dependencies = [
     "transformer-engine[pytorch]==2.19.0; sys_platform == 'linux'",
-    "transformers>=5.6.1,<=5.16.1; sys_platform == 'linux'",
+    "transformers>=5.6.1,<=5.16.1",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
-    "ml_dtypes>=0.5.0; sys_platform == 'linux'",
+    "ml_dtypes>=0.5.0",
     # `nixl` hard-depends on both nixl-cu12 and nixl-cu13; drop the cu12 variant
     # so it doesn't pull a second, unused CUDA runtime in alongside the cu13 one.
     "nixl-cu12; sys_platform == 'never'",
@@ -387,6 +391,8 @@ override-dependencies = [
     # vLLM 0.33.0 pins torch==2.14.0. Held here so megatron-bridge / mamba-ssm metadata cannot
     # pull a different torch under the CUDA extension wheels, which are built for exactly 2.14.0.
     "torch==2.14.0; sys_platform == 'linux'",
+    # The JAX backend imports PEFT, which needs the native PyTorch wheel on Apple Silicon.
+    "torch==2.13.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     # torchvision is NOT stable-ABI (unlike vLLM), and each release hard-pins one
     # torch: 0.29.0 wants torch 2.14.0, 0.28.0 wants 2.13.0.
     "torchvision==0.29.0; sys_platform == 'linux'",
