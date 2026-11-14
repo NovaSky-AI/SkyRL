@@ -9,20 +9,20 @@ import pytest
 pytest.importorskip("skycap")
 pytest.importorskip("harbor")
 
-from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa: E402
 from examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap import (  # noqa: E402
     HarborSkycapConfig,
     _exposure,
     _require_api_key,
 )
-from examples.train_integrations.harbor_skycap.harbor_generator import (  # noqa: E402
+from skycap import CaptureService  # noqa: E402
+from skycap.exposure import Exposure  # noqa: E402
+from skyrl.integration.harbor_skycap.engine import SkyRLEngine  # noqa: E402
+from skyrl.integration.harbor_skycap.harbor_generator import (  # noqa: E402
     PLACEHOLDER_API_KEY,
     HarborSkycapGenerator,
     runs_in_sandbox,
 )
-from examples.train_integrations.harbor_skycap.servers import exposure_for  # noqa: E402
-from skycap import CaptureService  # noqa: E402
-from skycap.exposure import Exposure  # noqa: E402
+from skyrl.integration.harbor_skycap.servers import exposure_for  # noqa: E402
 from tests.integrations.harbor_skycap import test_harbor_skycap  # noqa: E402
 from tests.integrations.harbor_skycap.fakes import TOP_K, FakeRenderer  # noqa: E402
 from tests.integrations.harbor_skycap.test_harbor_skycap import (  # noqa: E402
