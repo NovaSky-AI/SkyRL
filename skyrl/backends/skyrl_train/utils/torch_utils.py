@@ -100,7 +100,13 @@ def chunked_entropy_from_logits(
 
             # Calculate entropy for this chunk
             chunk_probs = chunk_logprob.exp()
-            chunk_entropy = -(chunk_probs * chunk_logprob).sum(-1)
+            if logits.is_cuda and not requires_grad:
+                # Reuse the private probability buffer when no backward needs it.
+                chunk_probs.mul_(chunk_logprob)
+                chunk_entropy = -chunk_probs.sum(-1)
+                del chunk_probs, chunk_logprob
+            else:
+                chunk_entropy = -(chunk_probs * chunk_logprob).sum(-1)
 
             # Apply attention mask if provided
             if attention_mask is not None:
