@@ -176,8 +176,25 @@ def test_build_new_inference_client_launched_and_external_clients_get_the_same_p
         "model_name",
         "enable_return_routed_experts",
         "enable_return_sample_support_set",
+        "candidate_top_k",
         "enable_return_sample_support_logprobs",
         "uses_lora_weight_sync",
         "data_parallel_size",
     ):
         assert getattr(launched, name) == getattr(external, name), name
+
+
+def test_build_new_inference_client_passes_the_candidate_width(monkeypatch):
+    cfg = SkyRLTrainConfig()
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.enable_return_sample_support_set = True
+    ie_cfg.candidate_top_k = 16
+    canned = InferenceServerSetup(proxy_url="http://router:7000", server_urls=["http://s0:8000"])
+    monkeypatch.setattr(inference_setup, "build_vllm_cli_args", lambda _cfg: "cli-args")
+    monkeypatch.setattr(inference_setup, "create_inference_servers", lambda *_args, **_kwargs: canned)
+
+    client, _ = build_new_inference_client(cfg, tokenizer=None)
+
+    assert client.candidate_top_k == 16
+    # Member logprobs stay score centering's flag; the width does not imply them.
+    assert client.enable_return_sample_support_logprobs is False

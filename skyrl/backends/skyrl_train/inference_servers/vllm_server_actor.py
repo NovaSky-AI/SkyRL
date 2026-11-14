@@ -98,17 +98,31 @@ def _sample_support_from_flat_logprobs(
     top_k: int,
     *,
     with_member_logprobs: bool = False,
+    plain_top_k: bool = False,
 ) -> tuple[list[dict[str, float]], CompactSampleSupport]:
     """Extract sampled scores and post-filter CSR support from vLLM's flat rows.
 
     Each row is ``[sampled token, top-1, ..., top-k]``; filtered candidates are ``-inf``.
     ``with_member_logprobs`` also keeps each member's processed logprob in the support's logprob column.
+    ``plain_top_k`` keeps the plain top-k of an untruncated sampler (``candidate_top_k``): the sampled
+    token is often outside it, so it is not written in, and a non-finite sampled logprob is floored
+    as on the plain path instead of rejected.
     """
     row_width = top_k + 1
     token_ids = np.asarray(logprobs.token_ids, dtype=SAMPLE_SUPPORT_DTYPE).reshape(-1, row_width)
     processed_logprobs = np.asarray(logprobs.logprobs).reshape(-1, row_width)
     sampled_logprobs_values = processed_logprobs[:, 0]
-    if not np.isfinite(sampled_logprobs_values).all():
+    if plain_top_k:
+        # The plain path floors these too (`build_logprobs_content`); replay cannot, so it raises below.
+        num_floored = int((~np.isfinite(sampled_logprobs_values)).sum())
+        if num_floored:
+            sampled_logprobs_values = np.where(
+                np.isfinite(sampled_logprobs_values), sampled_logprobs_values, CLAMPED_LOGPROB
+            )
+            logger.warning(
+                f"candidate capture: floored {num_floored} non-finite sampled logprob(s) to {CLAMPED_LOGPROB}"
+            )
+    elif not np.isfinite(sampled_logprobs_values).all():
         raise ValueError("sample-support capture received non-finite sampled logprob(s)")
     sampled = token_ids[:, 0]
     candidate_ids = token_ids[:, 1:]
@@ -119,9 +133,10 @@ def _sample_support_from_flat_logprobs(
     member_logprobs = processed_logprobs[:, 1:].astype(np.float32) if with_member_logprobs else None
 
     # vLLM's approximate top-k/top-p pivot can omit the sampled token. Replace the
-    # weakest valid candidate so the row keeps its size and contains the sample.
+    # weakest valid candidate so the row keeps its size and contains the sample. A plain
+    # top-k skips this: under untruncated sampling the sample legitimately falls outside it.
     rows_missing_sample = present.any(axis=1) & ~((candidate_ids == sampled[:, None]) & present).any(axis=1)
-    if np.any(rows_missing_sample):
+    if not plain_top_k and np.any(rows_missing_sample):
         rows = np.flatnonzero(rows_missing_sample)
         weakest_col = top_k - 1 - np.argmax(present[rows, ::-1], axis=1)
         candidate_ids = candidate_ids.copy()
@@ -589,22 +604,46 @@ class VLLMServerActor(ServerActorProtocol):
 
             capture_sample_support = body.get("return_sample_support", False)
             capture_sample_support_logprobs = body.get("return_sample_support_logprobs", False)
+            # None: the sampler's own top_k bounds the support. An integer: the plain top candidates
+            # of an untruncated sampler.
+            candidate_top_k = body.get("candidate_top_k")
             if capture_sample_support_logprobs and not capture_sample_support:
                 raise HTTPException(
                     status_code=400,
                     detail="return_sample_support_logprobs requires return_sample_support",
                 )
+            if candidate_top_k is not None and not capture_sample_support:
+                raise HTTPException(status_code=400, detail="candidate_top_k requires return_sample_support")
             if capture_sample_support:
                 # Sample support requires a bounded, non-degenerate top-k set.
-                top_k = sampling_params_dict.get("top_k")
+                top_k = candidate_top_k if candidate_top_k is not None else sampling_params_dict.get("top_k")
                 if not isinstance(top_k, int) or top_k <= 1:
+                    field = "candidate_top_k" if candidate_top_k is not None else "sampling_params.top_k"
                     raise HTTPException(
                         status_code=400,
                         detail=(
-                            "return_sample_support requires sampling_params.top_k > 1, got "
+                            f"return_sample_support requires {field} > 1, got "
                             f"{top_k!r}. Sample-support capture is opt-in per request."
                         ),
                     )
+                if candidate_top_k is not None:
+                    # A truncated sampler masks candidates to -inf and renormalizes the rest, so the rows would
+                    # not be the policy's plain top-k. vLLM disables top_k at 0 or -1.
+                    sampler_top_k = sampling_params_dict.get("top_k")
+                    sampler_top_p = sampling_params_dict.get("top_p")
+                    sampler_min_p = sampling_params_dict.get("min_p")
+                    if (
+                        (sampler_top_k is not None and sampler_top_k not in (0, -1))
+                        or (sampler_top_p is not None and sampler_top_p < 1.0)
+                        or (sampler_min_p is not None and sampler_min_p > 0.0)
+                    ):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "candidate_top_k needs an untruncated sampler, got "
+                                f"top_k={sampler_top_k!r}, top_p={sampler_top_p!r}, min_p={sampler_min_p!r}"
+                            ),
+                        )
                 sampling_params_dict["flat_logprobs"] = True
                 sampling_params_dict["logprobs"] = top_k
                 # This endpoint returns token ids only, so the API-server process need not detokenize
@@ -645,8 +684,9 @@ class VLLMServerActor(ServerActorProtocol):
             if capture_sample_support:
                 content, sample_support = _sample_support_from_flat_logprobs(
                     resp.logprobs,
-                    sampling_params_dict["top_k"],
+                    top_k,
                     with_member_logprobs=capture_sample_support_logprobs,
+                    plain_top_k=candidate_top_k is not None,
                 )
                 logprobs = {"content": content}
                 packed_sample_support = pack_sample_support(sample_support)
