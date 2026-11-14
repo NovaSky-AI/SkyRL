@@ -179,7 +179,7 @@ pull one version, or none to pull every version:
 
 ```bash
 uv run --isolated --extra skyrl-train --extra harbor --extra skycap \
-  python -m examples.train_integrations.harbor_skycap.record_index \
+  python -m skyrl.integration.harbor_skycap.record_index \
   pull my-team/my-project/skycap-records-train-<run id>:train-step-3 ./run-records
 ```
 
@@ -197,11 +197,11 @@ non-zero only when it pulled nothing.
 | Piece | What it does |
 | --- | --- |
 | `entrypoints/main_harbor_skycap.py` | Starts the skycap servers in token mode, in front of the router, from the run's config. Stops them at the end, which writes every trajectory still in memory. |
-| `servers.py` | The server pool: one Ray actor per server, each running a `skycap.CaptureService` on a port of its own. skycap builds how calls reach the model from the options; the integration supplies only its engine wire. |
-| `engine.py` | `SkyRLEngine`: skycap's vLLM wire on `/skyrl/v1/generate`, with packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, and sessions released at `/finish_session`. |
-| `harbor_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
-| `record_index.py` | `SkycapRecordIndex`, a trainer callback: the per-step W&B index of the trajectories the generator logged in a `RecordLog`; and `pull`, which brings a run's records and index back from W&B. Nothing in it is Harbor's. |
-| `compose.py` | Samples to a step-wise `GeneratorOutput`: a trial's paths are contiguous under its `TrajectoryID`, the last one marked `is_last_step` and carrying the reward. |
+| `skyrl/integration/harbor_skycap/servers.py` | The server pool: one Ray actor per server, each running a `skycap.CaptureService` on a port of its own. skycap builds how calls reach the model from the options; the integration supplies only its engine wire. |
+| `skyrl/integration/harbor_skycap/engine.py` | `SkyRLEngine`: skycap's vLLM wire on `/skyrl/v1/generate`, with packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, and sessions released at `/finish_session`. |
+| `skyrl/integration/harbor_skycap/harbor_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
+| `skyrl/integration/harbor_skycap/record_index.py` | `SkycapRecordIndex`, a trainer callback: the per-step W&B index of the trajectories the generator logged in a `RecordLog`; and `pull`, which brings a run's records and index back from W&B. Nothing in it is Harbor's. |
+| `skyrl/integration/harbor_skycap/compose.py` | Samples to a step-wise `GeneratorOutput`: a trial's paths are contiguous under its `TrajectoryID`, the last one marked `is_last_step` and carrying the reward. |
 
 What's imposed on every call:
 - **Sampling:** `generator.sampling_params` (`temperature`, `top_p`, `top_k`, `min_p`), since the trainer computes logprobs with them.
