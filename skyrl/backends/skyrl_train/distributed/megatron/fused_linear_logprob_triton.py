@@ -165,14 +165,14 @@ _AUTOTUNE_MAX_TOKEN_BUCKET = 1048576
 # BLOCK_N is fixed: it sets the order of the online-softmax folds inside a vocab split, so letting
 # the tuner pick it per token bucket made a sequence's log-probs depend on the micro-batch size.
 # BLOCK_M, BLOCK_K, stages and warps do not change the result bits.
-_FORWARD_MAINLOOP_BLOCK_N = 256
+# Literal tuples: the GPU tests load these specs from the source in isolation.
 _FORWARD_MAINLOOP_CONFIG_SPECS = (
-    (128, _FORWARD_MAINLOOP_BLOCK_N, 32, 2, 8),
-    (128, _FORWARD_MAINLOOP_BLOCK_N, 32, 3, 8),
-    (128, _FORWARD_MAINLOOP_BLOCK_N, 32, 4, 8),
-    (128, _FORWARD_MAINLOOP_BLOCK_N, 32, 5, 8),
-    (128, _FORWARD_MAINLOOP_BLOCK_N, 64, 3, 8),
-    (64, _FORWARD_MAINLOOP_BLOCK_N, 32, 4, 4),
+    (128, 256, 32, 2, 8),
+    (128, 256, 32, 3, 8),
+    (128, 256, 32, 4, 8),
+    (128, 256, 32, 5, 8),
+    (128, 256, 64, 3, 8),
+    (64, 256, 32, 4, 4),
 )
 
 # Reduction tiles follow PyTorch Inductor's max-autotune reduction candidates:
@@ -180,12 +180,11 @@ _FORWARD_MAINLOOP_CONFIG_SPECS = (
 # Specs are (BLOCK_M, BLOCK_N, warps); update specs are (BLOCK_M, warps).
 # BLOCK_N is fixed for the same reason as the mainloop: it sets the order in which the per-split
 # partial sums are combined. Only the row tile and warps are tuned.
-_EPILOGUE_BLOCK_N = 64
 _EPILOGUE_CONFIG_SPECS = (
-    (16, _EPILOGUE_BLOCK_N, 4),
-    (32, _EPILOGUE_BLOCK_N, 4),
-    (64, _EPILOGUE_BLOCK_N, 4),
-    (128, _EPILOGUE_BLOCK_N, 8),
+    (16, 64, 4),
+    (32, 64, 4),
+    (64, 64, 4),
+    (128, 64, 8),
 )
 _EPILOGUE_UPDATE_CONFIG_SPECS = ((16, 4), (32, 4), (64, 4), (128, 4), (256, 8), (512, 8))
 
