@@ -167,6 +167,8 @@ if TYPE_CHECKING:
 
 import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  # register extra bridges
 from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
+    apply_rope_override,
+    check_rope_override,
     maybe_force_qwen35_text_bridge,
 )
 from skyrl.backends.skyrl_train.workers.megatron.model_flops import (
@@ -353,6 +355,7 @@ class MegatronWorker:
             if isinstance(transformer_config_kwargs, dict)
             else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         )
+        rope_parameters = transformer_config_kwargs.get("rope_parameters")
         # validate_megatron_cfg resolves fp8_recipe="auto" on the driver when it
         # can see a GPU; a GPU-less driver ships "auto" through unresolved. The
         # worker always has the target device visible, so resolve here and
@@ -386,6 +389,8 @@ class MegatronWorker:
                 "language_model_only=True: forcing Qwen3.5 text->GPTModel bridge "
                 "(native GDN thd packing path; vision tower dropped)"
             )
+        if rope_parameters:
+            apply_rope_override(bridge, rope_parameters)
         if language_model_only and getattr(hf_config_original, "model_type", None) == "kimi_k25":
             # megatron-bridge ships its own KimiK25VLBridge for this architecture, whose
             # provider builds a vision tower this backend cannot train. model_bridges
@@ -411,27 +416,13 @@ class MegatronWorker:
         # Random init needs no extra sync: MegatronStrategy.set_seed seeds every TP rank alike and calls
         # model_parallel_cuda_manual_seed, so TP-replicated parameters come out identical.
         provider = bridge.to_megatron_provider(load_weights=not SKYRL_MEGATRON_RANDOM_INIT)
+        if rope_parameters:
+            check_rope_override(provider, rope_parameters, type(bridge._model_bridge).__name__)
 
         if not enable_mtp and getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
             provider.mtp_num_layers = None
             _clear_mtp_hybrid_pattern(provider)
-
-        # Workaround for megatron-bridge CONFIG_MAPPING dropping None values:
-        # MLA models like Moonlight-16B have q_lora_rank=None (no Q compression),
-        # but CONFIG_MAPPING skips None so the MCoreMLATransformerConfig default
-        # (512) is used instead, causing the wrong model architecture to be built.
-        # see: https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/c8eb587c5fd43163dbcd9c40980225b3fe1981f8/src/megatron/bridge/recipes/moonlight/moonlight_16b.py#L60
-        if hasattr(provider, "q_lora_rank") and hasattr(hf_config, "q_lora_rank"):
-            provider.q_lora_rank = hf_config.q_lora_rank
-
-        # Workaround for transformers v5 moving rope_theta into rope_parameters
-        # (previously it was a top-level config attribute). megatron-bridge's
-        # CONFIG_MAPPING reads config.rope_theta which no longer exists in v5,
-        # causing it to fall back to the default rotary_base of 10000.
-        rope_params = getattr(hf_config, "rope_parameters", None) or getattr(hf_config, "rope_scaling", None)
-        if isinstance(rope_params, dict) and "rope_theta" in rope_params:
-            provider.rotary_base = rope_params["rope_theta"]
 
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
@@ -471,6 +462,10 @@ class MegatronWorker:
 
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
+            # rope_parameters is an HF config key, not a TransformerConfig field: apply_rope_override already
+            # applied it through Megatron-Bridge's HF config before the provider was built.
+            if k == "rope_parameters":
+                continue
             setattr(provider, k, v)
 
         # megatron-core rejects mHC (hyper-connection) models under full activation recompute:

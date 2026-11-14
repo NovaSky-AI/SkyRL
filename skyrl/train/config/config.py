@@ -674,8 +674,9 @@ class MegatronConfig(BaseConfig):
     )
     """Pass-through kwargs for Megatron's ``TransformerConfig``:
     https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py
-    Also the place to put HuggingFace config overrides (e.g. ``rope_parameters``) for the Megatron
-    backend, where FSDP would use ``model_config_kwargs``.
+    ``rope_parameters`` is the one HuggingFace config key read here (the Megatron counterpart of FSDP's
+    ``model_config_kwargs.rope_parameters``): it is applied to the HF config Megatron-Bridge translates, and
+    startup fails if the model's bridge cannot apply its ``rope_type``.
 
     FP8 training is configured through the top-level ``fp8``, ``fp8_recipe``, ``fp8_param``, and
     ``fp8_amax_compute_algo`` fields above, which fold into these kwargs; setting the same keys
@@ -699,8 +700,9 @@ class MegatronConfig(BaseConfig):
     ``True`` / ``False`` force both empties on / off."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
-    Used for bridge and RoPE resolution. Not a general HF-config override -- use
-    ``transformer_config_kwargs`` instead."""
+    Used for bridge resolution. Not a general HF-config override: Megatron settings go in
+    ``transformer_config_kwargs``, and RoPE overrides in ``transformer_config_kwargs.rope_parameters``
+    (RoPE keys here are rejected)."""
     dist_ckpt_optim_fully_reshardable: bool = False
     """When True, use the "fully-reshardable" format for the distributed-optimizer checkpoint.
     When False (default), use the "dp-reshardable" format, which is more efficient but only

@@ -8,10 +8,6 @@ All registrations are guarded by a top-level ``try/except ImportError`` so that
 the rest of the codebase still works in CPU-only (no megatron-bridge) environments.
 """
 
-import logging
-
-logger = logging.getLogger(__name__)
-
 try:
     from megatron.bridge.models.conversion.mapping_registry import (
         MegatronMappingRegistry,
@@ -24,7 +20,6 @@ try:
     from megatron.bridge.models.hf_pretrained.causal_lm import PreTrainedCausalLM
     from megatron.bridge.models.qwen.qwen35_bridge import Qwen35Bridge, Qwen35MoEBridge
     from megatron.core.models.gpt.gpt_model import GPTModel
-    from megatron.core.utils import unwrap_model
 
     # DeepSeek-V4.1-Flash (deepseek_v41, text only) -> HybridModel. Importing registers the bridge, the
     # transformers config class and the V4.1 hybrid-model hooks.
@@ -54,21 +49,6 @@ try:
         TP/MoE/MLA provider attributes) by temporarily normalizing the HF config
         rope fields so the base CONFIG_MAPPING can handle them.
         """
-
-        def build_conversion_tasks(self, hf_pretrained, megatron_model, weight_dtype=None):
-            """Filter out None tasks from the base implementation.
-
-            megatron-bridge 0.3.1 build_conversion_tasks returns None entries
-            for params with no mapping, but load_weights_hf_to_megatron
-            doesn't guard against them.
-
-            ``weight_dtype`` was added to the base signature in megatron-bridge
-            0.7.0 and is passed by keyword from ``load_weights_hf_to_megatron``;
-            overrides must accept and forward it (see upstream's own overrides in
-            ``kimi_k3_bridge`` / ``kimi_k25_vl_bridge``).
-            """
-            tasks = super().build_conversion_tasks(hf_pretrained, megatron_model, weight_dtype=weight_dtype)
-            return [t for t in tasks if t is not None]
 
         def provider_bridge(self, hf_pretrained: PreTrainedCausalLM):
             hf_config = hf_pretrained.config
@@ -213,20 +193,6 @@ try:
     class KimiK25TextBridge(DeepSeekV3Bridge):
         """Kimi K2.5-family language model (``language_model.*``) -> GPTModel."""
 
-        def build_conversion_tasks(self, hf_pretrained, megatron_model, *args, **kwargs):
-            """Filter out None tasks (same megatron-bridge quirk as GLM47FlashBridge).
-
-            Extra positional/keyword arguments are forwarded untouched so the
-            override survives base-signature growth: megatron-bridge 0.7.0
-            adds a ``weight_dtype`` keyword (passed by keyword from
-            ``load_weights_hf_to_megatron``), and a fixed two-argument
-            signature would raise TypeError there. Under 0.7.0 the None-filter
-            itself is redundant (see NovaSky-AI/SkyRL#2042's module-level
-            filter) but harmless.
-            """
-            tasks = super().build_conversion_tasks(hf_pretrained, megatron_model, *args, **kwargs)
-            return [t for t in tasks if t is not None]
-
         def provider_bridge(self, hf_pretrained):
             hf_config = hf_pretrained.config
             text_config = hf_config.text_config
@@ -254,58 +220,6 @@ try:
                 mapping.hf_param = _prefix_hf_param(mapping.hf_param, "language_model.")
             return MegatronMappingRegistry(*mapping_list)
 
-    # ------------------------------------------------------------------
-    # Drop unmapped (None) conversion tasks for *every* bridge.
-    #
-    # `build_conversion_tasks` is typed `List[None | WeightConversionTask]`: it
-    # leaves a None slot for any Megatron parameter its mapping registry has no
-    # entry for ("Skip tasks with no mapping found"). Upstream's consumers only
-    # guard `task.megatron_module is None`, not `task is None`, so a None slot
-    # raises `AttributeError: 'NoneType' object has no attribute
-    # 'megatron_module'` in `load_weights_hf_to_megatron`.
-    #
-    # Skipping is what upstream intends for an unmapped parameter -- the
-    # neighbouring `megatron_module is None` branch does exactly that -- so
-    # filtering here is faithful, and it replaces the per-bridge workaround
-    # `GLM47FlashBridge` has carried since megatron-bridge 0.3.1.
-    #
-    # The dropped names are logged once per process: an unmapped parameter is
-    # expected for Megatron-internal state, but would be a real bug for a weight
-    # that ought to come from the HF checkpoint.
-    # ------------------------------------------------------------------
-    _orig_build_conversion_tasks = MegatronModelBridge.build_conversion_tasks
-
-    def _unmapped_param_names(self, tasks, megatron_model):
-        """Recover the Megatron parameter names behind the None slots in ``tasks``.
-
-        Mirrors how ``build_conversion_tasks`` indexes its task list, so the
-        warning can name the parameters rather than just count them.
-        """
-        names = self._megatron_global_param_names_all_pp_ranks(megatron_model)
-        model_config = unwrap_model(megatron_model)[0].config
-        if self._share_embeddings_and_output_weights(model_config):
-            names = [name for name in names if "output_layer" not in name]
-        return [names[i] if i < len(names) else f"<index {i}>" for i, task in enumerate(tasks) if task is None]
-
-    def _build_conversion_tasks_dropping_unmapped(self, hf_pretrained, megatron_model, *args, **kwargs):
-        tasks = _orig_build_conversion_tasks(self, hf_pretrained, megatron_model, *args, **kwargs)
-        if None not in tasks:
-            return tasks
-
-        kept = [task for task in tasks if task is not None]
-        if not getattr(type(self), "_skyrl_logged_unmapped", False):
-            type(self)._skyrl_logged_unmapped = True
-            try:
-                dropped = _unmapped_param_names(self, tasks, megatron_model)
-            except Exception:  # never let diagnostics break weight loading
-                dropped = [f"<index {i}>" for i, task in enumerate(tasks) if task is None]
-            logger.warning(
-                f"{type(self).__name__}: dropping {len(dropped)} of {len(tasks)} conversion "
-                f"tasks with no entry in the mapping registry: {sorted(set(dropped))}"
-            )
-        return kept
-
-    MegatronModelBridge.build_conversion_tasks = _build_conversion_tasks_dropping_unmapped
     # VL arch -> sentinel ...ForCausalLM key registered above. The ForCausalLM
     # suffix passes AutoBridge's filter; not being a real transformers class makes
     # dispatch fall back to the string key -> our bridge.
@@ -332,3 +246,63 @@ except ImportError:
     def maybe_force_qwen35_text_bridge(bridge, hf_config) -> bool:  # noqa: D103
         # megatron-bridge not installed (e.g. CPU-only environment): nothing to force.
         return False
+
+
+# rope_type -> the provider field Megatron-Bridge sets from the override's "factor" (None: no scaling field).
+_ROPE_FACTOR_FIELDS = {
+    "default": None,
+    "yarn": "yarn_rotary_scaling_factor",
+    "linear": "seq_len_interpolation_factor",
+    "llama3": "rope_scaling_factor",
+}
+
+
+def apply_rope_override(bridge, rope_parameters: dict) -> None:
+    """Write a RoPE override into the HF config Megatron-Bridge translates into the provider.
+
+    This is the same write vLLM makes for ``hf_overrides.rope_parameters`` (top-level ``rope_parameters``), so
+    the trainer and the inference engine start from the same config. Call it before
+    ``bridge.to_megatron_provider()``, then confirm the result with :func:`check_rope_override`.
+    """
+    config = bridge.hf_pretrained.config
+    config.rope_parameters = dict(rope_parameters)
+    # Megatron-Bridge maps a top-level rope_theta before it reads rope_parameters, so set both.
+    if "rope_theta" in rope_parameters:
+        config.rope_theta = rope_parameters["rope_theta"]
+
+
+def _expected_rope_fields(provider, rope_parameters: dict) -> dict:
+    """The provider fields, and values, that Megatron-Bridge sets for this override."""
+    rope_type = rope_parameters.get("rope_type") or rope_parameters.get("type") or "default"
+    if rope_type not in _ROPE_FACTOR_FIELDS:
+        raise ValueError(
+            f"transformer_config_kwargs.rope_parameters.rope_type={rope_type!r} is not supported on the Megatron "
+            f"backend; supported: {', '.join(_ROPE_FACTOR_FIELDS)}."
+        )
+    expected = {"rotary_base": rope_parameters["rope_theta"]} if "rope_theta" in rope_parameters else {}
+    field = _ROPE_FACTOR_FIELDS[rope_type]
+    if field is not None:
+        if "factor" not in rope_parameters:
+            raise ValueError(
+                f"transformer_config_kwargs.rope_parameters with rope_type={rope_type!r} needs a 'factor'."
+            )
+        if rope_type == "yarn" and getattr(provider, "multi_latent_attention", False):
+            field = "rotary_scaling_factor"
+        expected[field] = rope_parameters["factor"]
+    return expected
+
+
+def check_rope_override(provider, rope_parameters: dict, bridge_name: str) -> None:
+    """Raise unless ``provider`` carries every field the RoPE override implies.
+
+    Megatron-Bridge drops RoPE settings it cannot translate for a model without an error (``linear`` outside the
+    Llama bridges, for example), which would leave the trainer on different positions than the inference engine.
+    """
+    expected = _expected_rope_fields(provider, rope_parameters)
+    actual = {field: getattr(provider, field, None) for field in expected}
+    if actual != expected:
+        raise ValueError(
+            f"transformer_config_kwargs.rope_parameters={dict(rope_parameters)} did not reach the Megatron model: "
+            f"{bridge_name} does not translate it (expected provider fields {expected}, got {actual}). Use a "
+            "rope_type this model's Megatron-Bridge bridge supports."
+        )
