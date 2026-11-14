@@ -3,7 +3,7 @@
 # Modal-compatible API instead of Modal's cloud. See README.md.
 #
 #   MODE=colocated  sandboxes run in this Ray cluster, through a facade on every
-#                   node's loopback (node_facades.py). Set EXPECTED_NODES on
+#                   node's loopback (skyrl/integration/ray_sandbox/node_facades.py). Set EXPECTED_NODES on
 #                   multi-node clusters so every node gets one.
 #   MODE=service    sandboxes run in a Ray Sandbox service: set MODAL_SERVER_URL
 #                   (https://...) and MODAL_TOKEN_SECRET (its RAY_SANDBOX_API_TOKEN).
@@ -22,7 +22,7 @@ case "${MODE:?set MODE=colocated or service}" in
     # URL. A loopback facade needs no token: sandboxes can't reach it.
     export MODAL_SERVER_URL=http://127.0.0.1:50051
     export MODAL_TOKEN_ID=ak-ray MODAL_TOKEN_SECRET=as-ray
-    python "$HERE/node_facades.py" --port 50051 --expected-nodes "${EXPECTED_NODES:-1}"
+    python -m skyrl.integration.ray_sandbox.node_facades --port 50051 --expected-nodes "${EXPECTED_NODES:-1}"
     ;;
   service)
     : "${MODAL_SERVER_URL:?set MODAL_SERVER_URL to the service URL}"

@@ -58,7 +58,7 @@ cluster with the same image and pod spec.
 
 - **Colocated, multi-node:** add worker groups with the same pod spec, set the
   head to `resources: {CPU: 0}`, and pass `--env EXPECTED_NODES=<nodes>` so
-  `node_facades.py` starts a facade on each. Facades start only on nodes alive
+  `skyrl/integration/ray_sandbox/node_facades.py` starts a facade on each. Facades start only on nodes alive
   at launch, so keep the cluster fixed-size.
 - **Service edge:** it must be Envoy (Envoy Gateway). The SDK's command-router
   connection does TLS without ALPN, which ingress-nginx refuses. Before

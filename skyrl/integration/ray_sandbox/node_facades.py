@@ -10,9 +10,10 @@ facade created them.
 A facade bound to loopback needs no API token: sandboxes with network access
 can't reach their node's loopback (slirp4netns --disable-host-loopback).
 
-    python examples/train_integrations/harbor/ray_sandbox/node_facades.py --port 50051 --expected-nodes 4
+    python -m skyrl.integration.ray_sandbox.node_facades --port 50051 --expected-nodes 4
 
-Run it with the image's system Python, which carries the sandbox overlay.
+Run it from the SkyRL checkout root with the image's system Python, which carries the
+sandbox overlay. The module imports only Ray and the standard library.
 The facades are detached actors, so they outlive this script and stop with
 the cluster. The cluster must be fixed-size: nodes that join later get none.
 """

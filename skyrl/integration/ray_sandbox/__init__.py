@@ -1,9 +1,10 @@
-"""Ray sandboxes (``ray.experimental.sandbox``) as an agent environment.
+"""Ray Sandbox (``ray.experimental.sandbox``) behind Harbor's ``modal`` environment.
 
-* ``actor.HarborSandbox``: a Ray actor that owns one gVisor sandbox. It needs only Ray.
-* ``harbor_env.RaySandboxEnvironment``: a Harbor environment on that actor. Select it in a
-  Harbor trial config with ``environment.import_path``; it needs the ``harbor`` extra.
+Ray Sandbox serves a Modal-compatible gRPC API (ray-project/ray#66820), so Harbor runs its trials
+on Ray with ``environment.type=modal``, the stock Modal SDK, and ``MODAL_SERVER_URL`` pointing at a
+Ray Sandbox server. ``node_facades`` starts one such server on every node's loopback.
 
-The harbor and harbor_skycap integrations both use it. Nodes that host sandboxes need the
-tools in docker/Dockerfile.ray-sandbox, and Ray at the commit that pyproject.toml pins.
+SkyRL's own environment stays on its Ray release: only the cluster image carries the sandbox
+package, from Ray master (examples/train_integrations/harbor/ray_sandbox/Containerfile). The
+harbor and harbor_skycap integrations both use it.
 """

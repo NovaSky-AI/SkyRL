@@ -98,21 +98,24 @@ skips the check, e.g. for an agent that never calls the model.
 
 ## Ray sandboxes
 
-`run_codecontests.sh` with `SANDBOX=ray` needs no provider account. It runs each
-trial in a gVisor sandbox on the run's own Ray cluster, through
-`skyrl.integration.ray_sandbox`. The node needs the tools in
-`docker/Dockerfile.ray-sandbox`. Every task runs in one prebuilt image
-(`RAY_SANDBOX_IMAGE`), and each sandbox reserves `RAY_SANDBOX_CPUS` of the
-node's CPUs.
+`run_codecontests.sh` with `SANDBOX=ray` needs no provider account. Harbor keeps
+its `modal` environment and the Modal SDK, and Ray Sandbox's Modal-compatible
+API serves it on the run's own Ray cluster: `skyrl.integration.ray_sandbox`
+starts one server on every node's loopback, and `MODAL_SERVER_URL` points the
+SDK at it. SkyRL's environment keeps its Ray release.
 
-A Ray sandbox with network reaches the public internet only, not the cluster.
-For an installed agent, expose skycap at the node's address and add that
-address to the sandbox's allowlist:
+1. Start the Ray cluster from the image in
+   [`../harbor/ray_sandbox/Containerfile`](../harbor/ray_sandbox/Containerfile),
+   with its pod spec ([`job-colocated.yaml`](../harbor/ray_sandbox/job-colocated.yaml)).
+   The image adds gVisor and Ray Sandbox from Ray master.
+2. Run the script on that cluster with `SANDBOX=ray`, and `EXPECTED_NODES=<n>`
+   for more than one node.
 
-```bash
-  skycap.exposure.type=external_host skycap.exposure.kwargs.host=$NODE_IP \
-  "harbor_trial_config.environment.kwargs.cidr_allowlist=[internet,$NODE_IP/32]"
-```
+Ray Sandbox builds no Dockerfiles, so the script writes the tasks with a
+registry image (`RAY_SANDBOX_IMAGE`, default the image `prepare_tasks.py`
+names). Each sandbox requests 0.125 CPU (`cpu_enforcement_policy=limit`).
+See [`../harbor/ray_sandbox/README.md`](../harbor/ray_sandbox/README.md) for the
+concurrency limits.
 
 ## Sharing a sandbox provider
 

@@ -24,11 +24,13 @@
 #   LOGGER=console|wandb       W&B (project harbor-compare, run named after the experiment) by
 #                              default when a key is found, else the console
 #   SANDBOX=daytona|modal|ray  where Harbor runs each trial's sandbox (default daytona). ray runs
-#                              each one as a gVisor sandbox on this run's own Ray cluster
-#                              (skyrl.integration.ray_sandbox), so the node needs the tools in
-#                              docker/Dockerfile.ray-sandbox; RAY_SANDBOX_IMAGE is the prebuilt image
-#                              every task runs in (default python:3.12-slim), and
-#                              RAY_SANDBOX_CPUS the CPUs each sandbox reserves (default 0.25)
+#                              Harbor's modal environment against Ray Sandbox on the Ray cluster
+#                              this script joins (RAY_ADDRESS, default auto), through a server on
+#                              every node's loopback (skyrl.integration.ray_sandbox). Start that
+#                              cluster from the image in harbor/ray_sandbox/Containerfile; set
+#                              EXPECTED_NODES on more than one node. Its tasks name a registry image
+#                              (RAY_SANDBOX_IMAGE), since Ray Sandbox builds no Dockerfiles, and each
+#                              sandbox reserves 0.125 CPU (cpu_enforcement_policy=limit)
 #   STRATEGY=fsdp|megatron     the training backend (default fsdp); megatron takes MEGATRON_TP,
 #                              MEGATRON_PP, MEGATRON_EP (default 1; e.g. 8 for an MoE such as
 #                              Qwen3-30B-A3B on 8 GPUs) and MEGATRON_ETP, and OPTIMIZER_OFFLOAD=1
@@ -52,9 +54,10 @@ cd "$REPO"
 SANDBOX="${SANDBOX:-daytona}"
 DAYTONA_KEY_FILE="${DAYTONA_KEY_FILE:-$HOME/default/daytona.key}"
 MODAL_KEY_FILE="${MODAL_KEY_FILE:-$HOME/default/model_key.key}"
-# terminus-2 runs tmux in the sandbox and apt-installs it if the image lacks it, which needs network.
-RAY_SANDBOX_IMAGE="${RAY_SANDBOX_IMAGE:-python:3.12-slim}"
-RAY_SANDBOX_CPUS="${RAY_SANDBOX_CPUS:-0.25}"
+# Empty: prepare_tasks.py's default, a public python 3.13 image with WORKDIR /app.
+RAY_SANDBOX_IMAGE="${RAY_SANDBOX_IMAGE:-}"
+RAY_SANDBOX_PORT="${RAY_SANDBOX_PORT:-50051}"
+EXPECTED_NODES="${EXPECTED_NODES:-1}"
 WANDB_KEY_FILE="${WANDB_KEY_FILE:-$HOME/default/wandb_key.key}"
 GENERATOR="${GENERATOR:-skycap}"
 MODEL="${MODEL:-Qwen/Qwen3-8B}"
@@ -87,6 +90,9 @@ OPTIMIZER_OFFLOAD="${OPTIMIZER_OFFLOAD:-1}"
 
 DATA_ROOT="/tmp/harbor/data"
 TASKS_DIR="$DATA_ROOT/$(basename "$DATASET")"
+if [[ "$SANDBOX" == ray ]]; then
+  TASKS_DIR="$TASKS_DIR-registry${RAY_SANDBOX_IMAGE:+-$(echo "$RAY_SANDBOX_IMAGE" | tr '/:' '__')}"
+fi
 
 EXPERIMENT="harbor-$GENERATOR-$SANDBOX-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
 RUN_DIR="/tmp/harbor/runs/$EXPERIMENT"
@@ -191,11 +197,15 @@ case "$SANDBOX" in
     SANDBOX_ARGS=(harbor_trial_config.environment.type=modal)
     ;;
   ray)
-    # Harbor builds the environment from import_path, ahead of type.
+    # The Modal SDK takes a plain-http server only on localhost. A loopback server needs no
+    # token, since sandboxes can't reach their node's loopback, so these are placeholders.
+    export MODAL_SERVER_URL="http://127.0.0.1:$RAY_SANDBOX_PORT"
+    export MODAL_TOKEN_ID=ak-ray MODAL_TOKEN_SECRET=as-ray
+    # Ray Sandbox's sandboxes are detached; the timeout ends any a dead run leaves behind.
     SANDBOX_ARGS=(
-      harbor_trial_config.environment.import_path=skyrl.integration.ray_sandbox.harbor_env:RaySandboxEnvironment
-      harbor_trial_config.environment.kwargs.image="$RAY_SANDBOX_IMAGE"
-      harbor_trial_config.environment.kwargs.reserve_cpus="$RAY_SANDBOX_CPUS"
+      harbor_trial_config.environment.type=modal
+      harbor_trial_config.environment.kwargs.sandbox_timeout_secs=3600
+      harbor_trial_config.environment.cpu_enforcement_policy=limit
     )
     ;;
 esac
@@ -218,6 +228,13 @@ fi
 #-----------------------
 if [[ -d "$TASKS_DIR" ]] && [[ -n "$(ls -A "$TASKS_DIR" 2>/dev/null)" ]]; then
   echo "==> tasks already at $TASKS_DIR"
+elif [[ "$SANDBOX" == ray ]]; then
+  echo "==> preparing $DATASET into $TASKS_DIR, each task on a registry image"
+  mkdir -p "$DATA_ROOT"
+  PARQUET="$DATA_ROOT/$(basename "$DATASET").parquet"
+  [[ -f "$PARQUET" ]] || curl -fsSL -o "$PARQUET" "https://huggingface.co/datasets/$DATASET/resolve/main/tasks.parquet"
+  uv run --no-project --with pyarrow python examples/train_integrations/harbor/ray_sandbox/prepare_tasks.py \
+    --parquet "$PARQUET" --out "$TASKS_DIR" --count 1000000 ${RAY_SANDBOX_IMAGE:+--docker-image "$RAY_SANDBOX_IMAGE"}
 else
   echo "==> preparing $DATASET into $TASKS_DIR"
   mkdir -p "$DATA_ROOT"
@@ -240,12 +257,20 @@ NUM_PROMPTS="${#tasks[@]}"
 echo "==> $NUM_PROMPTS tasks x $GROUP_SIZE samples in $SUBSET_DIR"
 
 #-----------------------
-# Ray: a fresh local cluster for this run
+# Ray: a fresh local cluster for this run, or for SANDBOX=ray the running one
 #-----------------------
-# A workspace may already run a Ray cluster of another version, and export settings
-# (resource overrides, event export) that a local one can't use. Start clean.
-export RAY_ADDRESS=local
-if [[ -n "${RAY_OVERRIDE_RESOURCES:-}" ]]; then
+if [[ "$SANDBOX" == ray ]]; then
+  # Ray Sandbox comes from the cluster image's Python, not this run's uv environment, so the
+  # sandbox servers start on a cluster that the image's Ray already runs.
+  export RAY_ADDRESS="${RAY_ADDRESS:-auto}"
+  echo "==> Ray Sandbox servers at $MODAL_SERVER_URL on $EXPECTED_NODES node(s)"
+  python -m skyrl.integration.ray_sandbox.node_facades --port "$RAY_SANDBOX_PORT" --expected-nodes "$EXPECTED_NODES"
+else
+  # A workspace may already run a Ray cluster of another version, and export settings
+  # (resource overrides, event export) that a local one can't use. Start clean.
+  export RAY_ADDRESS=local
+fi
+if [[ "$RAY_ADDRESS" == local && -n "${RAY_OVERRIDE_RESOURCES:-}" ]]; then
   RAY_OVERRIDE_RESOURCES="$(python3 -c '
 import json, os
 resources = json.loads(os.environ["RAY_OVERRIDE_RESOURCES"])
