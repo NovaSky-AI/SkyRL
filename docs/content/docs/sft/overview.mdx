@@ -32,6 +32,25 @@ bash examples/train/sft/run_sft_fsdp.sh
 Trains `Qwen/Qwen2.5-0.5B-Instruct` on 1 GPU with FSDP (max length 512, batch
 size 4, 10 steps).
 
+### QLoRA with Gemma 4 E2B
+
+```bash
+bash examples/train/sft/run_sft_gemma4_e2b_qlora.sh
+```
+
+This example loads `google/gemma-4-E2B-it` with bitsandbytes NF4 base weights
+and trains LoRA adapters with BF16 computation. Accept the Gemma license on
+Hugging Face before running it. The `qlora` extra installs bitsandbytes.
+
+QLoRA is available only with FSDP and requires `model.lora.rank > 0`. Configure
+it through `model.bitsandbytes_4bit`; `quant_type` accepts `nf4` or `fp4`, and
+`use_double_quant` controls nested quantization. Gemma 4 uses SDPA because its
+attention layout is incompatible with this FlashAttention 2 path. SDPA requires
+`remove_microbatch_padding=false`, as set in the example. Multi-GPU FSDP keeps
+packed 4-bit weights uncast during all-gathers while using BF16 for computation.
+Single-GPU 4-bit training skips FSDP wrapping, so keep `fsdp_config.cpu_offload=false`
+to use SkyRL's manual phase offload.
+
 ### Megatron (multi-GPU with TP/PP)
 
 ```bash
