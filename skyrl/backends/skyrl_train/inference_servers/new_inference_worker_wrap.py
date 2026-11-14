@@ -197,6 +197,13 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import
 
 apply_pp_kv_cache_projection_patch()
 
+# Opt-in (SKYRL_VLLM_MXFP4_TRTLLM_LORA_MOE=1): MXFP4 MoE + LoRA on FlashInfer's TRT-LLM kernel instead of Marlin.
+from skyrl.backends.skyrl_train.patches.vllm.patch_mxfp4_trtllm_lora_moe import (  # noqa: E402
+    apply_mxfp4_trtllm_lora_moe_patch,
+)
+
+apply_mxfp4_trtllm_lora_moe_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
