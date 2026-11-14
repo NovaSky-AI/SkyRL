@@ -32,6 +32,18 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# Model-specific MoE layer classes that vLLM's LoRA manager wraps as expert layers but that are not
+# ``MoERunner``s (e.g. Inkling2's ``Inkling2MoE``, see ``patches/vllm/inkling2``). Their LoRA
+# wrappers must take the slot rank from the ``lora_config`` they are built with.
+_EXTRA_MOE_LAYER_TYPES: list = []
+
+
+def register_moe_layer_type(layer_type: type) -> None:
+    """Treat ``layer_type`` as an MoE expert layer: its LoRA slots get the expert rank."""
+    if layer_type not in _EXTRA_MOE_LAYER_TYPES:
+        _EXTRA_MOE_LAYER_TYPES.append(layer_type)
+
+
 ADDITIONAL_CONFIG_KEY = "max_expert_lora_rank"
 
 _PATCHED = False
@@ -137,7 +149,14 @@ def apply_moe_expert_lora_rank_patch() -> None:
         original_from_layer = model_manager.from_layer
 
         def from_layer(layer, max_loras, lora_config, *args, **kwargs):
-            if isinstance(layer, MoERunner):
+            if isinstance(layer, tuple(_EXTRA_MOE_LAYER_TYPES)):
+                if lora_config.fully_sharded_loras:
+                    raise ValueError(
+                        f"{type(layer).__name__}: fully_sharded_loras is not supported with an MoE expert "
+                        "LoRA slot rank."
+                    )
+                lora_config = expert_config
+            elif isinstance(layer, MoERunner):
                 tp_size = layer.moe_config.moe_parallel_config.tp_size
                 if lora_config.fully_sharded_loras and rank % tp_size != 0:
                     raise ValueError(

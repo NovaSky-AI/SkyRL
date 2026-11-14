@@ -22,6 +22,17 @@ SkyRL uses Megatron-Bridge for HF-to-Megatron model conversion. Installed from g
   FP8 spec (`weight_sync/fp8/models/beam.py`); see `patches/megatron/README.md`. Tiny-model GPU rows: `beam-tiny_*` in
   `gpu_ci/megatron/test_megatron_{,lora_}models.py` (`megatron_tiny_models/create_beam_tiny.py`).
 
+- Inkling2 (`inkling2_mm_model`): `skyrl/backends/skyrl_train/patches/megatron/inkling2/` (block
+  attention residuals carried through `TransformerBlock` as one packed state tensor, relative-bias
+  attention on FlexAttention, short convolutions, stock megatron-core MoE). The bridge loads the
+  NVFP4 / MXFP8 release directly (experts dequantized to BF16 on import). Requires
+  `language_model_only=True`; no PP or CP; TP needs sequence parallelism. `reference.py` is the
+  plain-PyTorch oracle the tests compare against. Removal plan: `patches/megatron/README.md`.
+  vLLM serves it through `patches/vllm/inkling2/` on the pinned Inkling2 vLLM build
+  (`pyproject.toml`). LoRA syncs merged (`merge_lora=true`) or as an adapter
+  (`merge_lora=false`, served by the build's `vllm/models/inkling2/lora.py`; use
+  `normalize_moe_lora=true`, as the full-rank 384-expert adapter is ~19 GiB per vLLM GPU).
+
 ## Optimizer state on disk
 
 `megatron_config.optimizer_offload_to_disk` (`skyrl/backends/skyrl_train/distributed/megatron/optimizer_offload_to_disk.py`):

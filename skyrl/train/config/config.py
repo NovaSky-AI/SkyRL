@@ -462,8 +462,9 @@ class MegatronOptimizerOffloadToDiskConfig(BaseConfig):
     Instead of 12 B/param of optimizer state per DP shard on the GPU (or in host RAM with
     ``optimizer_cpu_offload``), the state lives in files and the optimizer step streams it through the GPU one
     chunk at a time; the update itself still runs on the GPU. Requires the distributed optimizer, bf16 training,
-    ``grad_reduce_in_fp32=True``, ``optimizer_cpu_offload=False``, ``use_precision_aware_optimizer=False``, and no
-    fp8/fp4 params or LoRA. Checkpoints resume with the same parallelism only, from a local ``ckpt_path``.
+    ``optimizer_cpu_offload=False``, ``use_precision_aware_optimizer=False``, and no fp8/fp4 params or LoRA.
+    ``ddp_config.grad_reduce_in_fp32=False`` also works (a bf16 grad buffer: 2 instead of 4 B/param on the GPU;
+    each chunk's gradient is upcast for its step). Checkpoints resume with the same parallelism only, from a local ``ckpt_path``.
     Implementation: ``skyrl/backends/skyrl_train/distributed/megatron/optimizer_offload_to_disk.py``."""
 
     dir: Optional[str] = None
@@ -480,10 +481,32 @@ class MegatronOptimizerOffloadToDiskConfig(BaseConfig):
     """Size in MB of the pinned host staging buffer for disk <-> GPU transfers, per rank and optimizer.
 
     MoE models have a dense and an expert optimizer, so two buffers per rank."""
+    storage: str = "disk"
+    """Where the state lives between steps: ``"disk"`` (a file under ``dir``, streamed through the page cache and a
+    staging buffer) or ``"host"``: at the first optimizer step, as many chunks as fit this rank's share of the
+    node's spare memory (``host_reserve_fraction``, ``host_max_gb_per_rank``) move from the file to page-locked
+    host memory, and are copied to and from the GPU by DMA while the previous chunk's Adam step runs; the rest
+    stream from disk as with ``"disk"``.
+
+    The whole state is about 8 B x (local params / DP size) per GPU with bf16 moments: ~1.1 TiB per node of 8 GPUs
+    for Inkling2 at EP32, more than fits beside the trainer, so part of it stays on disk there. Allocating it all at
+    start-up, beside the trainer's start-up allocations, OOM-killed the nodes."""
+
+    host_reserve_fraction: float = 0.25
+    """``storage="host"``: the fraction of the node's memory left free when the state moves to host memory (at
+    the first optimizer step). The node's ranks split MemAvailable beyond it equally; chunks that do not fit stay
+    on disk. It must cover what grows after the first step: the colocated trainer's params offloaded to CPU
+    during generation (~0.3 TiB per node for Inkling2) and the inference engines' host memory."""
+    host_max_gb_per_rank: Optional[float] = None
+    """``storage="host"``: an upper bound on each rank's host-memory share, in GiB (``None``: no bound)."""
 
     def __post_init__(self) -> None:
         if self.moment_storage_dtype not in ("fp32", "bf16"):
             raise ValueError(f"moment_storage_dtype must be 'fp32' or 'bf16', got {self.moment_storage_dtype!r}")
+        if not 0.0 <= self.host_reserve_fraction < 1.0:
+            raise ValueError(f"host_reserve_fraction must be in [0, 1), got {self.host_reserve_fraction}")
+        if self.storage not in ("disk", "host"):
+            raise ValueError(f"storage must be 'disk' or 'host', got {self.storage!r}")
         if self.staging_buffer_mb < 1:
             raise ValueError(f"staging_buffer_mb must be >= 1, got {self.staging_buffer_mb}")
 
@@ -617,6 +640,12 @@ class MegatronConfig(BaseConfig):
         default_factory=MegatronOptimizerOffloadToDiskConfig
     )
     """Hold the optimizer state on node-local disk; off unless ``optimizer_offload_to_disk.dir`` is set."""
+    weight_sync_from_offloaded_params: bool = False
+    """Colocated full-weight sync (``placement.colocate_all=true``, no LoRA adapter sync) without
+    reloading the policy onto the GPUs: the params are offloaded before the engines wake their
+    weights, and the export reads each param from its pinned CPU copy, one at a time. For models
+    whose trainer params and inference weights do not fit on the GPUs together (e.g. a ~600B model
+    at EP32 next to a TP8 engine). Costs a host-to-device copy of every param per sync."""
     fp8: Optional[str] = None
     """TransformerEngine FP8 compute format for linear-layer GEMMs, e.g. ``"e4m3"`` or
     ``"hybrid"``. ``None`` (default) trains without FP8. Folded into
@@ -1457,6 +1486,25 @@ class InferenceEngineConfig(BaseConfig):
     Applies to both push backends -- ``nccl`` and colocated ``ipc``. Raised to fit the
     model's largest single parameter when that exceeds it, since a tensor too large for
     the buffer cannot be packed at all."""
+    weight_sync_num_ipc_buffers: int = 1
+    """Colocated CUDA-IPC only. Number of packed IPC buffers in the send ring. ``2`` pipelines
+    the sync: rank 0 ships chunk k on a helper thread while every rank gathers and packs chunk
+    k+1 into the next buffer. Each buffer is ``weight_transfer_threshold_cuda_ipc_GB``."""
+    weight_sync_layer_aligned_chunks: bool = False
+    """Colocated CUDA-IPC only. Cut packed chunks at decoder-layer boundaries (a chunk never
+    spans two ``model.layers.<N>.`` prefixes, and a layer larger than the buffer is split), so
+    one round trip carries about one layer."""
+    weight_sync_local_shard: bool = False
+    """Colocated CUDA-IPC only. Each trainer rank packs only the expert weights the vLLM worker
+    on its own GPU serves (vLLM expert parallelism), sent as per-worker payloads."""
+    selective_weight_sleep: bool = False
+    """Colocated full-weight sync only. Sleep the engine's weights at level 2 but keep (on CPU)
+    every ``weights``-pool allocation the reload does not fully rewrite, instead of saving
+    named buffers by list."""
+    staged_weight_wake: bool = False
+    """Requires ``selective_weight_sleep``. After a selective sleep, leave the weights pool
+    unmapped at the pre-sync wake and map each layer's allocations just before the reload
+    writes it (wake-on-write); the rest is mapped before finalize. Experimental (M4b)."""
     delta_weight_sync: Optional[DeltaWeightSyncConfig] = None
     """Required when ``weight_sync_backend="delta"``."""
     tensor_parallel_size: int = 1

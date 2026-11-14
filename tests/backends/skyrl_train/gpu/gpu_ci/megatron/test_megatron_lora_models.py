@@ -47,11 +47,13 @@ from tests.backends.skyrl_train.gpu.gpu_ci.megatron.megatron_tiny_models.create_
 )
 from tests.backends.skyrl_train.gpu.gpu_ci.megatron.test_megatron_models import (
     BEAM_TINY,
+    INKLING2_SLICE,
     MAX_GENERATE_LENGTH,
     QWEN38_4LAYER,
     _engine_overrides_for_model,
     _extra_env_vars_for_model,
     _is_beam,
+    _needs_inkling2,
     generate_with_vllm,
     get_test_actor_config,
 )
@@ -117,7 +119,9 @@ BEAM_VLLM_LORA_TARGET_MODULES = [
 # The 4-layer GLM-5.3-Flash slice is far more sensitive to its adapter than the default rows. At a
 # LoRA-B std of 0.008 the stale-sampler diff is about 0.155 (phase 2) and the updated adapter
 # still matches at about 0.062 (phase 3, same as the zero adapter).
-LORA_B_MULTIPLIER_OVERRIDES = {"glm-5.3-flash": 8.0}
+# The Inkling2 slice's rank-128 adapter (alpha 32, scale 0.25) needs a larger LoRA B: at the
+# default 30x the stale-sampler diff is only 0.044, not above the 0.05 bound phase 2 requires.
+LORA_B_MULTIPLIER_OVERRIDES = {"glm-5.3-flash": 8.0, "inkling2": 120.0}
 
 
 def _lora_b_multiplier(model_name: str) -> float:
@@ -157,6 +161,18 @@ def get_test_lora_actor_config(
     cfg.trainer.policy.megatron_config.lora_config.merge_lora = merge_lora
     if "glm-5.3-flash" in model_name.lower():
         cfg.trainer.policy.model.lora.target_modules = list(GLM5_3_FLASH_LORA_TARGET_MODULES)
+    if "inkling2" in model_name.lower():
+        # The colocated DAPO LoRA recipe's adapter (run_dapo_inkling2_lora_colocated.sh): rank 128,
+        # one adapter per expert at rank 128 // top-8 = 16, synced in memory over CUDA IPC with
+        # vLLM's expert slots at the expert rank. Every vLLM rank (TP4 here) serves 16 of the 64
+        # experts, so it must stage only those (SkyrlLoraStagingMixin._skyrl_lora_expert_slice).
+        lora = cfg.trainer.policy.model.lora
+        lora.rank = 128
+        lora.alpha = 32
+        lora.share_expert_adapters = False
+        lora.sync_mode = "memory"
+        cfg.trainer.policy.megatron_config.lora_config.normalize_moe_lora = True
+        cfg.generator.inference_engine.scale_moe_lora_rank = True
     validate_cfg(cfg)
     return cfg
 
@@ -280,6 +296,39 @@ async def _sync_weights(policy, client, cfg, label: str):
             "disk",
             id="qwen3.8-flash-next-4layer_h100_tp2_ep4_adapter",
             marks=pytest.mark.h100,
+        ),
+        # Inkling2 8-layer / 64-expert slice, same mesh as its row in test_megatron_models.py, with
+        # the colocated recipe's adapter (see get_test_lora_actor_config): per-expert adapters,
+        # in-memory sync, each vLLM rank staging only its own experts.
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            INKLING2_SLICE,
+            5e-2,
+            False,
+            "disk",
+            id="inkling2-8layer-64exp_tp2_ep4_adapter_r128_per_expert",
+            marks=_needs_inkling2,
+        ),
+        pytest.param(
+            2,
+            1,
+            1,
+            4,
+            1,
+            4,
+            4,
+            INKLING2_SLICE,
+            5e-2,
+            False,
+            "memory",
+            id="inkling2-8layer-64exp_tp2_ep4_adapter_r128_per_expert_memory",
+            marks=_needs_inkling2,
         ),
     ],
 )

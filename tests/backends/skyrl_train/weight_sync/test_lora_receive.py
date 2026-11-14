@@ -237,6 +237,71 @@ class TestArmedRound:
         assert engine.model is model
 
 
+class _Experts(torch.nn.Module):
+    def __init__(self, start, count, total):
+        super().__init__()
+        self._ids = (range(start, start + count), total)
+
+    def skyrl_local_expert_ids(self):
+        return self._ids
+
+
+class _ExpertShardedModel(_FakeModel, torch.nn.Module):
+    """A model serving experts [start, start + count) of ``total`` per MoE layer."""
+
+    def __init__(self, loaded, start, count, total, opt_in=True, layers=2):
+        torch.nn.Module.__init__(self)
+        _FakeModel.__init__(self, loaded)
+        self.layers = torch.nn.ModuleList(_Experts(start, count, total) for _ in range(layers))
+        self.skyrl_lora_local_experts = opt_in
+
+
+class TestLocalExpertStaging:
+    """3D expert adapters are staged cut to the experts this worker serves."""
+
+    E, START, COUNT = 8, 2, 2
+    A = "base_model.model.model.llm.layers.0.mlp.experts.w13_weight.lora_A.weight"
+    B = "base_model.model.model.llm.layers.0.mlp.experts.w2_weight.lora_B.weight"
+
+    def _stage(self, model_kwargs):
+        a = torch.arange(self.E * 3 * 4, dtype=torch.float32).reshape(self.E, 3, 4)
+        b = torch.arange(self.E * 5 * 3, dtype=torch.float32).reshape(self.E, 5, 3)
+        dense = torch.ones(3, 4)
+        engine = _Engine([(self.A, a), (self.B, b), ("layers.0.attn.wo_ud.lora_A.weight", dense)])
+        engine.model = _ExpertShardedModel(engine.loaded, self.START, self.COUNT, self.E, **model_kwargs)
+        engine.skyrl_set_lora_receive_target(build_lora_receive_target("t", {"r": 3}, {}))
+        _run_round(engine)
+        return patch._STAGED["t"].tensors, a, b, dense
+
+    def test_keeps_only_this_workers_experts(self):
+        staged, a, b, dense = self._stage({})
+        sl = slice(self.START, self.START + self.COUNT)
+        assert torch.equal(staged[self.A], a[sl]) and torch.equal(staged[self.B], b[sl])
+        # A private copy of the slice, not a view pinning the whole received tensor.
+        assert staged[self.A].untyped_storage().nbytes() == a[sl].numel() * a.element_size()
+        assert torch.equal(staged["layers.0.attn.wo_ud.lora_A.weight"], dense)
+
+    def test_a_model_that_does_not_opt_in_gets_whole_tensors(self):
+        staged, a, b, _ = self._stage({"opt_in": False})
+        assert torch.equal(staged[self.A], a) and torch.equal(staged[self.B], b)
+
+    def test_inconsistent_placement_keeps_whole_tensors(self):
+        a = torch.zeros(self.E, 3, 4)
+        engine = _Engine([(self.A, a)])
+        model = _ExpertShardedModel(engine.loaded, self.START, self.COUNT, self.E)
+        model.layers[1]._ids = (range(4, 6), self.E)
+        engine.model = model
+        engine.skyrl_set_lora_receive_target(build_lora_receive_target("t", {"r": 3}, {}))
+        _run_round(engine)
+        assert patch._STAGED["t"].tensors[self.A].shape[0] == self.E
+
+    def test_every_expert_local_is_left_alone(self):
+        a = torch.zeros(self.E, 3, 4)
+        engine = _Engine([(self.A, a)])
+        engine.model = _ExpertShardedModel(engine.loaded, 0, self.E, self.E)
+        assert engine._skyrl_lora_expert_slice() is None
+
+
 class TestUnarmedRound:
     def test_is_an_ordinary_base_model_update(self):
         engine = _Engine([("w", torch.ones(2))])
@@ -251,6 +316,19 @@ class TestUnarmedRound:
         _run_round(engine)
         assert engine.calls == ["start", "receive", "finish"]
         assert engine.releases == 0
+
+
+class TestInPlaceRound:
+    """A model with ``skyrl_load_weights_in_place`` skips vLLM's layerwise reload."""
+
+    def test_loads_without_layerwise_reload_and_releases_buffers(self):
+        engine = _BufferHoldingEngine([("w", torch.ones(2))])
+        engine.model.skyrl_load_weights_in_place = True
+        _run_round(engine)
+        assert engine.calls == ["receive"]
+        ((name, _),) = engine.loaded[0]
+        assert name == "w"
+        assert engine.releases == 1
 
 
 @pytest.mark.vllm

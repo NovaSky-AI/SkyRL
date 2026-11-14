@@ -19,10 +19,17 @@ Per chunk, the step:
 so the GPU holds one chunk of state at a time. For native-fp32 params the main is the param buffer itself, and only
 the moments stream.
 
-Gradients are megatron-core's: with ``grad_reduce_in_fp32`` (required), ``_copy_model_grads_to_main_grads`` sets
+Gradients are megatron-core's: with ``grad_reduce_in_fp32``, ``_copy_model_grads_to_main_grads`` sets
 each main param's ``.grad`` to a view of the grad buffer, so grad norm, clipping and zero counting run unchanged, on
 the same memory the chunks read their gradients from. Adam is the regular optimizer's class over slices of the
 same values, so with fp32 moments the step is bit-identical to the regular optimizer.
+
+Without ``grad_reduce_in_fp32`` the grad buffer of the bf16 params is bf16 (2 instead of 4 B/param on the GPU, which
+decides whether a model's full fine-tuning fits at all). megatron-core would then give every main param an fp32
+copy of its whole gradient shard; instead the (storage-less) main shards of the bf16 params are created bf16, so
+their ``.grad`` is a view of the bf16 grad buffer, and each chunk's gradient is upcast to fp32 for its Adam step
+only. The master copy on disk stays fp32. Gradients are then accumulated and reduced in bf16, as with any
+``grad_reduce_in_fp32=False`` run.
 
 How it plugs into megatron-core:
 
@@ -46,9 +53,10 @@ import json
 import os
 import shutil
 import textwrap
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import megatron.core.optimizer as mcore_optimizer
 import torch
@@ -189,6 +197,109 @@ class _StateFile:
             pass
 
 
+class _HostState:
+    """The first ``nbytes`` of a store's state in page-locked host memory (``storage="host"``).
+
+    One pageable allocation registered with CUDA (``cudaHostRegister``) rather than ``pin_memory=True``, whose caching
+    host allocator rounds each allocation up to a power of two (138 GiB would take 256 GiB).
+    """
+
+    def __init__(self, nbytes: int, file: "_StateFile"):
+        """Allocate, fill from ``file``'s first ``nbytes`` and register."""
+        self.nbytes = nbytes
+        self.data = torch.empty(max(nbytes, 1), dtype=torch.uint8)
+        host = self.data.numpy()
+        step = 1 << 30
+        for pos in range(0, nbytes, step):
+            _transfer_all(os.preadv, file.fd, pos, host[pos : min(pos + step, nbytes)])
+        err = torch.cuda.cudart().cudaHostRegister(self.data.data_ptr(), self.data.numel(), 0)
+        if int(err) != 0:
+            raise RuntimeError(f"cudaHostRegister of {nbytes / 1024**3:.1f} GiB failed: {err}")
+        self._registered = True
+        self._streams = None
+
+    def streams(self):
+        """The (host -> GPU, GPU -> host) copy streams, created on first use (on the current device)."""
+        if self._streams is None:
+            self._streams = (torch.cuda.Stream(), torch.cuda.Stream())
+        return self._streams
+
+    def view(self, offset: int, nbytes: int) -> torch.Tensor:
+        return self.data[offset : offset + nbytes]
+
+    def read(self, offset: int, out: torch.Tensor) -> None:
+        data = out.view(-1).view(torch.uint8)
+        data.copy_(self.view(offset, data.numel()))
+
+    def write(self, offset: int, tensor: torch.Tensor) -> int:
+        data = tensor.view(-1).view(torch.uint8)
+        self.view(offset, data.numel()).copy_(data)
+        return data.numel()
+
+    def write_to(self, fd: int) -> None:
+        """Write the held bytes at the start of ``fd``."""
+        torch.cuda.synchronize()  # pending GPU -> host copies of the last step
+        host = self.data.numpy()
+        step = 1 << 30
+        for pos in range(0, self.nbytes, step):
+            _transfer_all(os.pwritev, fd, pos, host[pos : min(pos + step, self.nbytes)])
+
+    def read_from(self, fd: int) -> None:
+        """Fill the held bytes from the start of ``fd``."""
+        torch.cuda.synchronize()
+        host = self.data.numpy()
+        step = 1 << 30
+        for pos in range(0, self.nbytes, step):
+            _transfer_all(os.preadv, fd, pos, host[pos : min(pos + step, self.nbytes)])
+
+    def close(self) -> None:
+        if self._registered:
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaHostUnregister(self.data.data_ptr())
+            self._registered = False
+        self.data = torch.empty(0, dtype=torch.uint8)
+
+
+def _mem_available_bytes(meminfo: str = "/proc/meminfo") -> Tuple[int, int]:
+    """(MemAvailable, MemTotal) in bytes."""
+    values = {}
+    with open(meminfo) as f:
+        for line in f:
+            key, rest = line.split(":", 1)
+            values[key] = int(rest.split()[0]) * 1024
+    return values["MemAvailable"], values["MemTotal"]
+
+
+def host_grant_bytes(need: int, available: int, total: int, reserve_fraction: float, ranks: int) -> int:
+    """Bytes of host memory a store may take: an equal share, among the node's ``ranks``, of what was available
+    beyond ``reserve_fraction`` of the node's memory; at most ``need``."""
+    spare = available - int(reserve_fraction * total)
+    return max(0, min(need, spare // max(1, ranks)))
+
+
+# Bytes this process has already placed in host memory, per ledger: a rank's stores (dense and expert) share one
+# per-rank budget, taken from a single per-node MemAvailable reading.
+_HOST_PLACED: Dict[str, int] = {}
+
+
+@contextmanager
+def _node_ledger(path: str):
+    """A node-local JSON ledger under an exclusive lock: ``{"node": [MemAvailable, MemTotal]}``."""
+    fd = os.open(path + ".lock", os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ledger = {}
+        if os.path.exists(path):
+            with open(path) as f:
+                ledger = json.load(f)
+        yield ledger
+        with open(path, "w") as f:
+            json.dump(ledger, f)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 class DiskOptimizerStateStore:
     """The on-disk state of one ``OffloadedDistributedOptimizer`` and the streamed step over it."""
 
@@ -209,8 +320,6 @@ class DiskOptimizerStateStore:
             raise ValueError("optimizer_offload_to_disk does not support optimizer_cuda_graph.")
         if ddp_config.use_megatron_fsdp:
             raise ValueError("optimizer_offload_to_disk does not support Megatron-FSDP.")
-        if not ddp_config.grad_reduce_in_fp32:
-            raise ValueError("optimizer_offload_to_disk requires grad_reduce_in_fp32=True.")
         params = [p for group in dist_opt.model_float16_groups for p in group]
         # The fp8 and NVFP4 main -> param copies are DP collectives over the whole param set (quantize_param_shard),
         # which cannot be split into chunks.
@@ -232,9 +341,19 @@ class DiskOptimizerStateStore:
             chunk.offset = nbytes
             nbytes += self._chunk_nbytes(chunk)
 
+        self.nbytes = nbytes
         self.dir = os.path.join(settings.dir, self.relative_dir)
         os.makedirs(self.dir, exist_ok=True)
+        # The file always holds the state; with storage="host" a prefix of the chunks moves to page-locked host
+        # memory at the first step (_place_in_host), after the trainer's start-up allocations are gone.
         self.file = _StateFile(os.path.join(self.dir, "state.bin"), nbytes, settings.staging_buffer_mb * 1024 * 1024)
+        self.host: Optional[_HostState] = None
+        self.host_chunks = 0
+        self.host_bytes = 0
+        self.settings = settings
+        self._place_host_pending = settings.storage == "host"
+        self.ledger = None if _build_context is None else _build_context.ledger
+        self.local_ranks = 1 if _build_context is None else _build_context.local_ranks
         logger.info(
             f"optimizer_offload_to_disk: {len(self.chunks)} chunks, {nbytes / 1024**3:.1f} GiB at {self.file.path}, "
             f"moments stored as {settings.moment_storage_dtype}"
@@ -255,7 +374,7 @@ class DiskOptimizerStateStore:
         for buffer_index, buffer in enumerate(dist_opt.buffers):
             if buffer.param_data is None or buffer.param_data.dtype not in (torch.bfloat16, torch.float32):
                 raise ValueError("optimizer_offload_to_disk requires bf16 or fp32 DDP param buffers.")
-            assert buffer.grad_data.dtype == torch.float32
+            assert buffer.grad_data.dtype in (torch.float32, buffer.param_dtype), buffer.grad_data.dtype
             dp_rank, dp_size = buffer.data_parallel_group.rank(), buffer.data_parallel_group.size()
             (bucket_ranges,) = dist_opt.gbuf_ranges[buffer_index].values()
             for bucket, bucket_range in zip(buffer.buckets, bucket_ranges, strict=True):
@@ -283,13 +402,68 @@ class DiskOptimizerStateStore:
     def _grad_data(self, chunk: _Chunk) -> torch.Tensor:
         return self.dist_opt.buffers[chunk.buffer_index].grad_data[chunk.start : chunk.end]
 
+    def _read(self, offset: int, out: torch.Tensor) -> None:
+        if offset < self.host_bytes:
+            self.host.read(offset, out)
+        else:
+            self.file.read(offset, out)
+
+    def _write(self, offset: int, tensor: torch.Tensor) -> int:
+        if offset < self.host_bytes:
+            return self.host.write(offset, tensor)
+        return self.file.write(offset, tensor)
+
+    def _place_in_host(self) -> None:
+        """Move the longest prefix of chunks that fits this store's share of the node's spare memory from the file
+        into page-locked host memory (``storage="host"``; once, at the first step).
+
+        The share is an equal split, among the node's ranks, of MemAvailable beyond ``host_reserve_fraction`` of
+        MemTotal (kept for the colocated trainer's offloaded params, the inference engines and the page cache),
+        capped by ``host_max_gb_per_rank``. MemAvailable is read once per node, by the first rank to get here (a
+        node-local ledger under a lock), before any rank allocates; every rank then allocates and fills its share
+        in parallel. A rank's later stores get what its earlier ones left of its share, so no store's placement
+        depends on how far the other ranks have got.
+        """
+        self._place_host_pending = False
+        placed = 0
+        if self.ledger is None:
+            available, total = _mem_available_bytes()
+        else:
+            with _node_ledger(self.ledger) as ledger:
+                if "node" not in ledger:
+                    ledger["node"] = list(_mem_available_bytes())
+                available, total = ledger["node"]
+            placed = _HOST_PLACED.get(self.ledger, 0)
+        need = placed + self.nbytes
+        if self.settings.host_max_gb_per_rank is not None:
+            need = min(need, int(self.settings.host_max_gb_per_rank * 1024**3))
+        share = host_grant_bytes(need, available, total, self.settings.host_reserve_fraction, self.local_ranks)
+        self._allocate_host(max(0, share - placed))
+        if self.ledger is not None:
+            _HOST_PLACED[self.ledger] = placed + self.host_bytes
+        logger.info(
+            f"optimizer_offload_to_disk (rank {torch.distributed.get_rank()}, opt{self.index}): {self.host_chunks} of "
+            f"{len(self.chunks)} chunks ({self.host_bytes / 1024**3:.1f} of {self.nbytes / 1024**3:.1f} GiB) in host "
+            f"memory; node MemAvailable was {available / 1024**3:.0f} of {total / 1024**3:.0f} GiB"
+        )
+
+    def _allocate_host(self, grant: int) -> None:
+        k, nbytes = 0, 0
+        while k < len(self.chunks) and nbytes + self._chunk_nbytes(self.chunks[k]) <= grant:
+            nbytes += self._chunk_nbytes(self.chunks[k])
+            k += 1
+        if k == 0:
+            return
+        self.host = _HostState(nbytes, self.file)
+        self.host_chunks, self.host_bytes = k, nbytes
+
     def load_chunk(self, chunk: _Chunk) -> dict:
         """The chunk's fp32 main, exp_avg and exp_avg_sq on the GPU (the main is a param buffer view if not on disk)."""
         state = {} if chunk.main_on_disk else {"main": self._param_data(chunk)}
         offset = chunk.offset
         for name, dtype in self._segments(chunk):
             stored = torch.empty(chunk.numel, dtype=dtype, device=torch.cuda.current_device())
-            self.file.read(offset, stored)
+            self._read(offset, stored)
             state[name] = stored.float()
             offset += chunk.numel * dtype.itemsize
         return state
@@ -297,12 +471,35 @@ class DiskOptimizerStateStore:
     def _store_chunk(self, chunk: _Chunk, state: dict) -> None:
         offset = chunk.offset
         for name, dtype in self._segments(chunk):
-            self.file.write(offset, state[name].to(dtype))
+            self._write(offset, state[name].to(dtype))
             offset += chunk.numel * dtype.itemsize
+
+    def _unpack(self, chunk: _Chunk, stored: torch.Tensor) -> dict:
+        """The chunk's state as fp32 GPU tensors from ``stored``, its segments' bytes on the GPU (fp32 segments are
+        views of ``stored``)."""
+        state = {} if chunk.main_on_disk else {"main": self._param_data(chunk)}
+        pos = 0
+        for name, dtype in self._segments(chunk):
+            n = chunk.numel * dtype.itemsize
+            state[name] = stored[pos : pos + n].view(dtype).float()
+            pos += n
+        return state
+
+    def _pack(self, chunk: _Chunk, state: dict, stored: torch.Tensor) -> None:
+        """Write ``state`` back into ``stored`` in the stored dtypes (a no-op for fp32 views of it)."""
+        pos = 0
+        for name, dtype in self._segments(chunk):
+            n = chunk.numel * dtype.itemsize
+            view = stored[pos : pos + n].view(dtype)
+            if view.data_ptr() != state[name].data_ptr():
+                view.copy_(state[name])
+            pos += n
 
     def _adam(self, chunk: _Chunk, state: dict):
         """The regular optimizer's Adam over this chunk's runs, with each run's param group hyperparameters."""
         grads = self._grad_data(chunk)
+        if grads.dtype != torch.float32:
+            grads = grads.float()  # bf16 grad buffer: this chunk's gradient in fp32, for its step only
         params_by_group: dict = {}
         moments = {}
         for start, end, group_index in chunk.runs:
@@ -326,22 +523,86 @@ class DiskOptimizerStateStore:
 
         The grad buffer was reduced and clipped by megatron-core before this runs.
         """
-        for chunk in self.chunks:
+        if self._place_host_pending:
+            self._place_in_host()
+        clock = time.perf_counter
+        started = clock()
+        if self.host_chunks:
+            self._step_from_host(self.chunks[: self.host_chunks])
+        host_s = clock() - started
+        spent = {"read": 0.0, "adam": 0.0, "write": 0.0}
+        nbytes = 0
+        for chunk in self.chunks[self.host_chunks :]:
+            t0 = clock()
             state = self.load_chunk(chunk)
+            torch.cuda.synchronize()
+            t1 = clock()
             self._adam(chunk, state).step()
             if chunk.main_on_disk:
                 self._param_data(chunk).copy_(state["main"])
+            torch.cuda.synchronize()
+            t2 = clock()
             self._store_chunk(chunk, state)
+            spent["read"] += t1 - t0
+            spent["adam"] += t2 - t1
+            spent["write"] += clock() - t2
+            nbytes += self._chunk_nbytes(chunk)
             # Free this chunk before the next load allocates one, so the GPU holds one chunk at a time.
             del state
         self.steps += 1
+        if torch.distributed.get_rank() == 0:
+            torch.cuda.synchronize()
+            logger.info(
+                f"optimizer_offload_to_disk step (opt{self.index}): host {self.host_bytes / 1024**3:.1f} GiB in "
+                f"{host_s:.1f}s, disk {nbytes / 1024**3:.1f} GiB: "
+                + ", ".join(f"{k} {v:.1f}s" for k, v in spent.items())
+            )
+
+    @torch.no_grad()
+    def _step_from_host(self, chunks: List[_Chunk]) -> None:
+        """The step over the chunks in page-locked host memory, pipelined over three CUDA streams: chunk ``i + 1`` is copied in
+        (``h2d``) and chunk ``i - 1`` out (``d2h``) while chunk ``i``'s Adam step runs, so the step takes about as
+        long as its host <-> GPU traffic. The GPU holds two chunks' stored bytes plus one chunk's fp32 working set."""
+        compute = torch.cuda.current_stream()
+        h2d, d2h = self.host.streams()
+        device = torch.cuda.current_device()
+
+        def fetch(chunk):
+            nbytes = self._chunk_nbytes(chunk)
+            with torch.cuda.stream(h2d):
+                stored = torch.empty(nbytes, dtype=torch.uint8, device=device)
+                stored.copy_(self.host.view(chunk.offset, nbytes), non_blocking=True)
+                ready = torch.cuda.Event()
+                ready.record(h2d)
+            return stored, ready
+
+        # The step reads gradients and writes params on the compute stream: order it after what ran there before.
+        h2d.wait_stream(compute)
+        nxt = fetch(chunks[0]) if chunks else None
+        for i, chunk in enumerate(chunks):
+            stored, ready = nxt
+            nxt = fetch(chunks[i + 1]) if i + 1 < len(chunks) else None
+            compute.wait_event(ready)
+            stored.record_stream(compute)
+            state = self._unpack(chunk, stored)
+            self._adam(chunk, state).step()
+            if chunk.main_on_disk:
+                self._param_data(chunk).copy_(state["main"])
+            self._pack(chunk, state, stored)
+            del state
+            d2h.wait_stream(compute)
+            with torch.cuda.stream(d2h):
+                self.host.view(chunk.offset, stored.numel()).copy_(stored, non_blocking=True)
+                stored.record_stream(d2h)
+            del stored
+        compute.wait_stream(d2h)
 
     @torch.no_grad()
     def copy_main_to_model_params(self) -> None:
         for chunk in self.chunks:
             if chunk.main_on_disk:
                 main = torch.empty(chunk.numel, dtype=torch.float32, device=torch.cuda.current_device())
-                self.file.read(chunk.offset, main)
+                self._read(chunk.offset, main)
                 self._param_data(chunk).copy_(main)
                 del main
 
@@ -351,11 +612,20 @@ class DiskOptimizerStateStore:
         written = 0
         for chunk in self.chunks:
             if chunk.main_on_disk:
-                written += self.file.write(chunk.offset, self._param_data(chunk).float())
+                written += self._write(chunk.offset, self._param_data(chunk).float())
         return written
 
     def close(self) -> None:
         """Close the state file and delete this store's directory, then the rank and run directories if empty."""
+        if self.host is not None:
+            self.host.close()
+            self.host, self.host_chunks, self.host_bytes = None, 0, 0
+        if self.ledger is not None:
+            for path in (self.ledger, self.ledger + ".lock"):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass  # another rank of the node removed it
         self.file.close()
         shutil.rmtree(self.dir, ignore_errors=True)
         rank_dir = os.path.dirname(self.dir)
@@ -380,7 +650,13 @@ class DiskOptimizerStateStore:
         dirpath = os.path.join(base_dir, self.relative_dir)
         os.makedirs(dirpath, exist_ok=True)
         target = os.path.join(dirpath, "state.bin")
-        shutil.copyfile(self.file.path, target)
+        shutil.copyfile(self.file.path, target)  # the host-held prefix in it is stale: overwritten next
+        if self.host is not None:
+            fd = os.open(target, os.O_WRONLY | os.O_CLOEXEC)
+            try:
+                self.host.write_to(fd)
+            finally:
+                os.close(fd)
         with open(os.path.join(dirpath, "manifest.json"), "w") as f:
             json.dump(self._manifest(), f)
         logger.info(f"optimizer_offload_to_disk: saved {len(self.chunks)} chunks to {dirpath}")
@@ -411,13 +687,17 @@ class DiskOptimizerStateStore:
         if os.path.getsize(source) != expected:
             raise ValueError(f"{source} has {os.path.getsize(source)} bytes, expected {expected}.")
         shutil.copyfile(source, self.file.path)
+        if self.host is not None:
+            self.host.read_from(self.file.fd)
         self.steps = manifest["steps"]
         logger.info(f"optimizer_offload_to_disk: loaded {len(self.chunks)} chunks from {dirpath}")
 
 
 _ANCHOR = "shard_main_param = shard_model_param.clone().float()"
+# ``_skyrl_main_dtype`` is set in the generated method's globals for each build: fp32, or the model param's dtype
+# when the grad buffer is (``grad_reduce_in_fp32=False``), so ``.grad`` can be a view of it.
 _DEFERRED = (
-    "shard_main_param = torch.empty_like(shard_model_param, dtype=torch.float32)",
+    "shard_main_param = torch.empty_like(shard_model_param, dtype=_skyrl_main_dtype or torch.float32)",
     "shard_main_param.untyped_storage().resize_(0)",
 )
 
@@ -449,7 +729,9 @@ def _deferred_build_model_and_main_param_groups() -> classmethod:
 
     namespace: dict = {}
     code = compile("\n".join(lines) + "\n", f"<optimizer_offload_to_disk: {inspect.getsourcefile(func)}>", "exec")
-    exec(code, vars(_distrib_optimizer_module), namespace)
+    # A copy of the module's globals, so ``_skyrl_main_dtype`` does not leak into megatron-core's namespace.
+    method_globals = {**vars(_distrib_optimizer_module), "_skyrl_main_dtype": None}
+    exec(code, method_globals, namespace)
     generated = namespace[func.__name__]
     generated.__qualname__ = f"OffloadedDistributedOptimizer.{func.__name__}"
     generated.__doc__ = func.__doc__
@@ -460,6 +742,10 @@ def _deferred_build_model_and_main_param_groups() -> classmethod:
 class _BuildContext:
     settings: MegatronOptimizerOffloadToDiskConfig
     next_index: int = 0
+    ledger: Optional[str] = None
+    """Node-local ledger file for host-memory placement (``storage="host"``)."""
+    local_ranks: int = 1
+    """Ranks of this job on this node."""
 
 
 _build_context: Optional[_BuildContext] = None
@@ -475,7 +761,15 @@ class OffloadedDistributedOptimizer(DistributedOptimizer):
     def __init__(self, *args, **kwargs):
         context = _build_context
         assert context is not None, "construct through build_optimizer_offloaded_to_disk()"
-        super().__init__(*args, **kwargs)
+        model_chunks = kwargs["model_chunks"] if "model_chunks" in kwargs else args[4]
+        ddp_config = model_chunks[0].ddp_config
+        build = type(self).__dict__["_build_model_and_main_param_groups"].__func__
+        # bf16 grad buffer: bf16 main shards (see the module docstring); built below, by super().__init__.
+        build.__globals__["_skyrl_main_dtype"] = None if ddp_config.grad_reduce_in_fp32 else torch.bfloat16
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            build.__globals__["_skyrl_main_dtype"] = None
         self.disk_state: Optional[DiskOptimizerStateStore] = None
         if self.is_stub_optimizer:
             return
@@ -497,6 +791,22 @@ class OffloadedDistributedOptimizer(DistributedOptimizer):
             return super().step_with_ready_grads()
         finally:
             self.is_stub_optimizer = False
+
+    def _copy_model_grads_to_main_grads(self):
+        if self.ddp_config.grad_reduce_in_fp32 or self.is_stub_optimizer:
+            return super()._copy_model_grads_to_main_grads()
+        # megatron-core's, without the ``.float()``: each main shard's ``.grad`` is a view of the grad buffer in the
+        # main shard's own dtype (bf16 for bf16 params, whose grad buffer is bf16; fp32 for native-fp32 params).
+        for model_groups, shard_main_groups in (
+            (self.model_float16_groups, self.shard_fp32_from_float16_groups),
+            (self.model_fp32_groups, self.shard_fp32_groups),
+        ):
+            for model_group, shard_main_group in zip(model_groups, shard_main_groups):
+                for model_param, shard_main_param in zip(model_group, shard_main_group):
+                    param_range = self._get_model_param_range_map(model_param)["param"]
+                    assert param_range.size == shard_main_param.nelement()
+                    shard_grad = model_param.main_grad.view(-1)[param_range.start : param_range.end]
+                    shard_main_param.grad = shard_grad.to(shard_main_param.dtype)
 
     @torch.no_grad()
     def _copy_main_params_to_model_params(self):
@@ -580,10 +890,31 @@ def build_optimizer_offloaded_to_disk(model_chunks, config, settings: MegatronOp
     shutil.rmtree(rank_dir, ignore_errors=True)
     os.makedirs(rank_dir, exist_ok=True)
 
+    if any(not chunk.ddp_config.grad_reduce_in_fp32 for chunk in model_chunks):
+        # bf16 grad buffer: the main grads megatron-core norms and clips are bf16 views, plus fp32 ones for
+        # native-fp32 params, and its multi-tensor kernels need a list of one dtype.
+        from skyrl.backends.skyrl_train.patches.megatron.patch_clip_grads_mixed_dtype import (
+            apply_clip_grads_mixed_dtype_patch,
+        )
+
+        apply_clip_grads_mixed_dtype_patch()
+
     if "_build_model_and_main_param_groups" not in OffloadedDistributedOptimizer.__dict__:
         OffloadedDistributedOptimizer._build_model_and_main_param_groups = _deferred_build_model_and_main_param_groups()
 
     _build_context = _BuildContext(settings)
+    if settings.storage == "host":
+        # Collective (every rank builds its optimizer): the ranks sharing this node, and a ledger name unique to this
+        # launch, so a relaunch on the same node does not read a dead run's ledger.
+        import socket
+
+        hosts = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(hosts, socket.gethostname())
+        nonce = [os.urandom(8).hex() if torch.distributed.get_rank() == 0 else None]
+        torch.distributed.broadcast_object_list(nonce, src=0)
+        _build_context.local_ranks = hosts.count(socket.gethostname())
+        # In /dev/shm: node-local, and outside the state directory, which close() removes.
+        _build_context.ledger = f"/dev/shm/skyrl_optimizer_host_ledger_{nonce[0]}.json"
     try:
         with _construct_distributed_optimizer_as(OffloadedDistributedOptimizer):
             optimizer = get_megatron_optimizer(config=config, model_chunks=model_chunks)

@@ -39,7 +39,7 @@ _STEPS = 10
 _CHUNK_NUMEL = 3000
 
 
-def build_model(moe: bool, seed: int):
+def build_model(moe: bool, seed: int, grad_fp32: bool = True):
     from megatron.core import tensor_parallel
     from megatron.core.distributed import (
         DistributedDataParallel,
@@ -80,12 +80,12 @@ def build_model(moe: bool, seed: int):
     model.odd_param = torch.nn.Parameter(torch.randn(1001, device="cuda", dtype=torch.bfloat16))
     # Small DDP buckets, so the model spans several of them.
     ddp_config = DistributedDataParallelConfig(
-        use_distributed_optimizer=True, grad_reduce_in_fp32=True, overlap_grad_reduce=False, bucket_size=40_000
+        use_distributed_optimizer=True, grad_reduce_in_fp32=grad_fp32, overlap_grad_reduce=False, bucket_size=40_000
     )
     return DistributedDataParallel(config=config, ddp_config=ddp_config, module=model)
 
 
-def build_optimizer(model, state_dir, moment_dtype):
+def build_optimizer(model, state_dir, moment_dtype, storage="disk"):
     from megatron.core.optimizer import OptimizerConfig
 
     from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
@@ -105,7 +105,13 @@ def build_optimizer(model, state_dir, moment_dtype):
     settings = (
         None
         if state_dir is None
-        else MegatronOptimizerOffloadToDiskConfig(dir=state_dir, moment_storage_dtype=moment_dtype)
+        else MegatronOptimizerOffloadToDiskConfig(
+            dir=state_dir,
+            moment_storage_dtype=moment_dtype,
+            storage="host" if storage.startswith("host") else storage,
+            # host_partial: a few chunks in host memory, the rest on disk.
+            host_max_gb_per_rank=1e-4 if storage == "host_partial" else None,
+        )
     )
     return get_megatron_optimizer([model], config, offload_to_disk=settings)
 
@@ -247,7 +253,9 @@ def load_checkpoint(model, opt, ckpt_dir):
         store.load_from(os.path.join(ckpt_dir, "optimizer_offload_to_disk"))
 
 
-def _compare_optimizers(state_root: str, moe: bool, moment_dtype: str) -> list:
+def _compare_optimizers(
+    state_root: str, moe: bool, moment_dtype: str, grad_fp32: bool = True, storage: str = "disk"
+) -> list:
     from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
         load_megatron_grads_to_gpu,
         load_megatron_model_to_gpu,
@@ -260,9 +268,9 @@ def _compare_optimizers(state_root: str, moe: bool, moment_dtype: str) -> list:
         disk_state_stores,
     )
 
-    ref_model, test_model = build_model(moe, seed=1234), build_model(moe, seed=1234)
+    ref_model, test_model = build_model(moe, 1234, grad_fp32), build_model(moe, 1234, grad_fp32)
     ref_opt = build_optimizer(ref_model, None, "fp32")
-    test_opt = build_optimizer(test_model, os.path.join(state_root, "state"), moment_dtype)
+    test_opt = build_optimizer(test_model, os.path.join(state_root, "state"), moment_dtype, storage)
     assert not disk_state_stores(ref_opt)
     assert_mains_released(test_opt)
     assert_layouts_occur(test_opt)
@@ -277,7 +285,9 @@ def _compare_optimizers(state_root: str, moe: bool, moment_dtype: str) -> list:
         )
         for _ in range(_STEPS)
     ]
-    exact = moment_dtype == "fp32"
+    # With a bf16 grad buffer, the regular optimizer clips fp32 copies of the gradients and the offloaded one
+    # clips the bf16 buffer in place (then upcasts per chunk), so the two round differently.
+    exact = moment_dtype == "fp32" and grad_fp32
     ckpt_dir = os.path.join(state_root, "ckpt")
     half = _STEPS // 2
     history = []
@@ -310,8 +320,8 @@ def _compare_optimizers(state_root: str, moe: bool, moment_dtype: str) -> list:
         assert_state_equal(ref_opt, test_opt)
 
     # Resume into a fresh model (different init) and a fresh optimizer with its own state directory.
-    resume_model = build_model(moe, seed=4321)
-    resume_opt = build_optimizer(resume_model, os.path.join(state_root, "resume_state"), moment_dtype)
+    resume_model = build_model(moe, 4321, grad_fp32)
+    resume_opt = build_optimizer(resume_model, os.path.join(state_root, "resume_state"), moment_dtype, storage)
     load_checkpoint(resume_model, resume_opt, ckpt_dir)
     for step in range(half, _STEPS):
         resumed = train_step(resume_model, resume_opt, batches[step])
@@ -342,7 +352,7 @@ class _Rank:
             sock.bind(("", 0))
             return get_node_ip_address(), sock.getsockname()[1]
 
-    def run(self, rank, master_addr, master_port, state_root, moe, moment_dtype):
+    def run(self, rank, master_addr, master_port, state_root, moe, moment_dtype, grad_fp32, storage):
         from megatron.core import parallel_state
 
         from skyrl.backends.skyrl_train.distributed.megatron import (
@@ -354,7 +364,7 @@ class _Rank:
         dist.init_process_group("nccl", init_method=f"tcp://{master_addr}:{master_port}", rank=rank, world_size=_WORLD)
         try:
             parallel_state.initialize_model_parallel(expert_model_parallel_size=_WORLD if moe else 1)
-            return _compare_optimizers(state_root, moe, moment_dtype)
+            return _compare_optimizers(state_root, moe, moment_dtype, grad_fp32, storage)
         finally:
             parallel_state.destroy_model_parallel()
             dist.destroy_process_group()
@@ -363,7 +373,11 @@ class _Rank:
 @pytest.mark.megatron
 @pytest.mark.parametrize("moe", [False, True], ids=["dense", "moe_ep2"])
 @pytest.mark.parametrize("moment_dtype", ["fp32", "bf16"])
-def test_offloaded_optimizer_matches_regular_optimizer(ray_init_fixture, tmp_path, moe, moment_dtype):
+@pytest.mark.parametrize("grad_fp32", [True, False], ids=["fp32_grads", "bf16_grads"])
+@pytest.mark.parametrize("storage", ["disk", "host", "host_partial"])
+def test_offloaded_optimizer_matches_regular_optimizer(
+    ray_init_fixture, tmp_path, moe, moment_dtype, grad_fp32, storage
+):
     from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
         filesystem_type,
     )
@@ -376,7 +390,10 @@ def test_offloaded_optimizer_matches_regular_optimizer(ray_init_fixture, tmp_pat
     workers = [_Rank.options(scheduling_strategy=strategy).remote() for _ in range(_WORLD)]
     master_addr, master_port = ray.get(workers[0].endpoint.remote())
     histories = ray.get(
-        [w.run.remote(r, master_addr, master_port, str(tmp_path), moe, moment_dtype) for r, w in enumerate(workers)]
+        [
+            w.run.remote(r, master_addr, master_port, str(tmp_path), moe, moment_dtype, grad_fp32, storage)
+            for r, w in enumerate(workers)
+        ]
     )
     assert all(len(history) == _STEPS for history in histories), histories
 

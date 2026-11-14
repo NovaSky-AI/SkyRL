@@ -1,5 +1,7 @@
 """Tokenization related utilities"""
 
+import json
+
 from transformers import (
     AutoConfig,
     AutoProcessor,
@@ -22,10 +24,33 @@ def get_tokenizer(model_name_or_path, **tokenizer_kwargs) -> AutoTokenizer:
         # eagerly calls get_vocab() and crashes. Fall back to the fast tokenizer.
         tokenizer_kwargs.pop("use_fast", None)
         tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name_or_path, **tokenizer_kwargs)
+    if tokenizer.eos_token_id is None:
+        _eos_from_model_config(tokenizer, model_name_or_path, tokenizer_kwargs)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
+
+
+def _eos_from_model_config(tokenizer, model_name_or_path, tokenizer_kwargs) -> None:
+    """Name the tokenizer's eos token from the model's ``config.json`` ``eos_token_id`` when its
+    tokenizer files leave it out (e.g. Inkling2, whose release sets only the config's id)."""
+    from transformers.utils import cached_file
+
+    kwargs = {k: tokenizer_kwargs[k] for k in ("revision", "token", "cache_dir") if k in tokenizer_kwargs}
+    try:
+        path = cached_file(model_name_or_path, "config.json", **kwargs)
+        with open(path) as f:
+            config = json.load(f)
+    except (OSError, ValueError):
+        return
+    eos = config.get("eos_token_id")
+    if eos is None:
+        eos = (config.get("text_config") or {}).get("eos_token_id")
+    if isinstance(eos, list):
+        eos = eos[0] if eos else None
+    if isinstance(eos, int) and 0 <= eos < len(tokenizer):
+        tokenizer.eos_token = tokenizer.convert_ids_to_tokens(eos)
 
 
 def check_is_vlm(model_config_or_path) -> bool:

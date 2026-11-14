@@ -133,6 +133,9 @@ class DistributedTorchRayActor:
     def __init__(
         self, world_size, rank, local_rank, master_addr, master_port, sequence_parallel_size, record_memory=False
     ):
+        from skyrl.utils.rlimits import raise_open_file_limit
+
+        raise_open_file_limit()  # NCCL over InfiniBand across nodes needs more than the default 1024 fds
         logging.basicConfig(
             format="%(asctime)s %(levelname)-8s %(message)s",
             level=logging.INFO,
@@ -509,6 +512,24 @@ class Worker(DistributedTorchRayActor):
             "total": total,
         }
 
+    def reconfigure_for_test(self, cfg: Any) -> None:
+        """Test-only: adopt another run config's trainer section and drop the transfer engine.
+
+        Lets a GPU test compare two weight-sync paths on the same trained weights; the
+        caller re-runs ``init_weight_sync_state`` afterwards.
+        """
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
+            teardown_engine,
+        )
+
+        self.cfg = cfg.trainer
+        engine, self._weight_sync_engine = getattr(self, "_weight_sync_engine", None), None
+        teardown_engine(engine)
+
+    def get_last_weight_sync_stats(self) -> Optional[Dict[str, Any]]:
+        """Per-phase memory/time of this rank's last weight sync (``SKYRL_COLOCATED_SYNC_DEBUG=1`` only)."""
+        return getattr(self, "last_weight_sync_stats", None)
+
     def save_memory_snapshot(self, tag: str = ""):
         """Save a snapshot of memory usage on the Worker's CUDA device.
 
@@ -596,6 +617,19 @@ class Worker(DistributedTorchRayActor):
             data_parallel_size=int(inference_engine_client.data_parallel_size),
             base_model_path=self.cfg.policy.model.path,
         )
+
+        if (
+            getattr(inference_engine_cfg, "selective_weight_sleep", False)
+            and self.cfg.placement.colocate_all
+            and torch.distributed.get_rank() == 0
+        ):
+            # M4a of docs/design/colocated_weight_sync.md: from now on a level-2 sleep
+            # backs up what the last reload did not rewrite, and discards the rest.
+            await self._weight_sync_thread(
+                self._weight_sync_engine.client.collective_rpc,
+                "skyrl_enable_selective_sleep",
+                {"staged_wake": bool(getattr(inference_engine_cfg, "staged_weight_wake", False))},
+            )
 
         # # Register signal handlers for termination only on rank 0
         # NOTE (sumanthrh): This doesn't work yet, and is thus commented out.
@@ -699,8 +733,24 @@ class Worker(DistributedTorchRayActor):
         # is incompatible with the VMM addresses expandable segments use; some
         # engines (sharded_rdt) share GPU memory on every run and ask for the
         # toggle unconditionally.
-        with self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments):
-            await self._weight_sync_thread(engine.send_weights)
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            PhaseRecorder,
+            debug_enabled,
+            instrument_send,
+            trainer_memory_cap,
+        )
+
+        recorder = PhaseRecorder("trainer_send") if debug_enabled() else None
+        with (
+            self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments),
+            trainer_memory_cap(),
+        ):
+            if recorder is None:
+                await self._weight_sync_thread(engine.send_weights)
+            else:
+                with recorder.phase("send"), instrument_send(engine, recorder):
+                    await self._weight_sync_thread(engine.send_weights)
+                self.last_weight_sync_stats = {"phases": recorder.phases, "counters": recorder.counters}
 
         if cache_reset_task is not None:
             await cache_reset_task

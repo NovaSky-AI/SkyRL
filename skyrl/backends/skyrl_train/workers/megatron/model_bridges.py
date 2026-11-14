@@ -34,6 +34,11 @@ try:
     # registers the bridge for ``Glm5NextForConditionalGeneration`` -> GPTModel.
     import skyrl.backends.skyrl_train.patches.megatron.glm5_next.bridge  # noqa: F401
 
+    # Inkling2 (model_type inkling2, or the pre-release inkling2_mm_model): attn-res MoE with relative-bias attention. Importing
+    # registers the config with AutoConfig and the bridge for
+    # ``Inkling2ForConditionalGeneration`` -> GPTModel (language model only).
+    import skyrl.backends.skyrl_train.patches.megatron.inkling2.bridge  # noqa: F401
+
     # Qwen3.8-Flash-Next (qwen4_exp): GDN/gated-attention MoE with gated low-rank hyper-connections
     # and a PLE n-gram embedding. Importing registers ``Qwen4ExpForConditionalGeneration`` -> GPTModel.
     import skyrl.backends.skyrl_train.patches.megatron.qwen4_exp.bridge  # noqa: F401

@@ -97,6 +97,7 @@ from skyrl.train.utils.trainer_utils import (
     run_on_each_node,
     validate_consistency_for_latest_checkpoint,
     validate_generator_output,
+    write_files,
     zero_variance_filter,
 )
 from skyrl.train.utils.trajectory_logging import TrajectoryLogger, pretty_print_example
@@ -1653,12 +1654,15 @@ class RayPPOTrainer:
         # Training loop over epochs and mini-batches
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             for chunk_refs in all_chunk_refs:
-                status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
+                # Summed over the step's mini-batches into timing/{model}_forward_backward and timing/{model}_optim_step.
+                with Timer(f"{model}_forward_backward", self.all_timings):
+                    status = self.dispatch.forward_backward_from_staged(model, chunk_refs)
                 for k, v in status.metrics.items():
                     all_metrics[k].append(v)
 
                 # Optimizer step after each mini batch
-                grad_norm = self.dispatch.optim_step(model)
+                with Timer(f"{model}_optim_step", self.all_timings):
+                    grad_norm = self.dispatch.optim_step(model)
                 if grad_norm is not None:
                     all_metrics["grad_norm"].append(grad_norm)
 
@@ -1811,6 +1815,18 @@ class RayPPOTrainer:
         latest_checkpoint_file = os.path.join(self.cfg.trainer.ckpt_path, "latest_ckpt_global_step.txt")
         with io.open_file(latest_checkpoint_file, "w") as f:
             f.write(str(self.global_step))
+
+        if not io.is_cloud_path(self.cfg.trainer.ckpt_path):
+            # A node-local ckpt_path (e.g. NVMe) exists only on the driver's node; copy the trainer state to
+            # every training node so a resume can run its driver on any of them. The tracking file goes last.
+            files = {}
+            for path in (dataloader_save_path, trainer_state_path, latest_checkpoint_file):
+                if os.path.exists(path):
+                    with open(path, "rb") as f:
+                        files[path] = f.read()
+            if not self._node_ids:
+                self._node_ids = self.dispatch.get_node_ids()
+            run_on_each_node(self._node_ids, write_files, files)
 
         logger.info(f"Successfully saved checkpoint for global_step_{self.global_step} to: {global_step_folder}")
 

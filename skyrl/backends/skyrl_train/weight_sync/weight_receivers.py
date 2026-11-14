@@ -188,6 +188,41 @@ class SkyrlLoraStagingMixin:
     def skyrl_begin_lora_update(self) -> None:
         self._skyrl_lora_staged = {}
 
+    def _skyrl_lora_expert_slice(self) -> tuple[int, int, int] | None:
+        """``(start, count, total)`` of the routed experts this worker serves, when the model
+        takes a LoRA adapter's 3D expert tensors (``[E, ...]``) cut to them.
+
+        A model opts in with ``skyrl_lora_local_experts = True`` (its expert LoRA layer must
+        accept ``[count, ...]`` as well as ``[total, ...]``) and declares its experts with
+        ``skyrl_local_expert_ids() -> (ids, total)`` on its expert modules. Under vLLM-side
+        expert sharding (Inkling2 at TP8 serves 48 of 384 experts per rank) the adapter's
+        expert tensors otherwise arrive and are staged whole on every rank: 8x the bytes
+        this rank's LoRA slots hold, which a colocated engine has no room for.
+        """
+        cached = self.__dict__.get("_skyrl_lora_expert_slice_cache", False)
+        if cached is not False:
+            return cached
+        found = None
+        if getattr(self.model, "skyrl_lora_local_experts", False):
+            for module in self.model.modules():
+                declared = getattr(module, "skyrl_local_expert_ids", None)
+                if not callable(declared):
+                    continue
+                ids, total = declared()
+                ids = list(ids)
+                current = (ids[0], len(ids), int(total)) if ids else None
+                if current is None or ids != list(range(ids[0], ids[0] + len(ids))):
+                    found = None
+                    break
+                if found is not None and found != current:
+                    found = None
+                    break
+                found = current
+        if found is not None and found[1] == found[2]:
+            found = None  # every expert is local: nothing to cut
+        self.__dict__["_skyrl_lora_expert_slice_cache"] = found
+        return found
+
     @contextmanager
     def skyrl_lora_staging(self) -> Iterator[None]:
         """Install a proxy whose ``load_weights`` stages instead of loading."""
@@ -195,12 +230,22 @@ class SkyrlLoraStagingMixin:
         if staged is None:
             raise RuntimeError("skyrl_begin_lora_update must run before receiving a LoRA stream.")
         model = self.model
+        expert_slice = self._skyrl_lora_expert_slice()
 
         def load_weights(weights: Any, **kwargs: Any) -> set:
             loaded = set()
             for name, tensor in weights:
                 if name in staged:
                     raise ValueError(f"LoRA tensor {name!r} received twice in one weight update")
+                if (
+                    expert_slice is not None
+                    and tensor.dim() == 3
+                    and ".experts." in name
+                    and tensor.shape[0] == expert_slice[2]
+                ):
+                    # Keep only this rank's experts (see _skyrl_lora_expert_slice).
+                    start, count, _ = expert_slice
+                    tensor = tensor[start : start + count]
                 # The transport buffers (the IPC-mapped view, the packed NCCL
                 # buffer) are reused or freed right after the chunk, so the
                 # private copy is required, not an optimization.
@@ -253,13 +298,28 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
     base class they mix into, and every step here is the same for both.
     """
 
+    def skyrl_loads_in_place(self) -> bool:
+        """Whether the target model loads synced weights straight into its
+        parameters (``skyrl_load_weights_in_place``), bypassing vLLM's layerwise
+        reload. Only for a model whose weights need no post-load processing:
+        the reload re-materializes each layer next to the live one, which a
+        model that fills the GPU (Inkling2 BF16 at TP8) has no room for."""
+        return bool(getattr(self.model, "skyrl_load_weights_in_place", False))
+
     def start_weight_update(self) -> None:
         if self.skyrl_lora_armed():
             # No layerwise reload: an adapter update never writes to the base
             # model's parameters, so there is nothing to reload.
             self.skyrl_begin_lora_update()
             return
+        if self.skyrl_loads_in_place():
+            return
         skyrl_before_weight_update()
+        from skyrl.backends.skyrl_train.weight_sync.colocated import selective_sleep
+
+        if selective_sleep.is_enabled():
+            # Record what this reload rewrites; the next level-2 sleep discards only that.
+            selective_sleep.begin_recording()
         with torch.device(self.device):
             super().start_weight_update()
 
@@ -301,11 +361,27 @@ class SkyrlReceiveLifecycleMixin(SkyrlLoraStagingMixin, SkyrlCheckpointLoadMixin
         from skyrl.backends.skyrl_train.patches.vllm.patch_moe_kernel_constants import (
             restore_moe_kernel_constants,
         )
+        from skyrl.backends.skyrl_train.weight_sync.colocated import selective_sleep
 
-        with torch.device(self.device):
-            super().finish_weight_update()
+        if self.skyrl_loads_in_place():
             # A level-2 sleep zeroes MoE kernel constants that no reload rebuilds.
             restore_moe_kernel_constants(self.model)
+            self.skyrl_release_receive_buffers()
+            return
+        ok = False
+        try:
+            # Wake-on-write (M4b): map whatever the reload did not write before finalize,
+            # which runs process_weights_after_loading on deferred attention layers'
+            # kernel tensors directly, outside the write hook.
+            selective_sleep.finish_staged_wake()
+            with torch.device(self.device):
+                super().finish_weight_update()
+                # A level-2 sleep zeroes MoE kernel constants that no reload rebuilds.
+                restore_moe_kernel_constants(self.model)
+            ok = True
+        finally:
+            if selective_sleep.is_enabled():
+                selective_sleep.end_recording(ok)
         skyrl_after_weight_update()
         empty_cuda_cache_rocm()
 
@@ -324,6 +400,67 @@ def _build_skyrl_ipc_engine() -> type:
 
     class SkyrlIPCWeightTransferEngine(SkyrlReceiveLifecycleMixin, IPCWeightTransferEngine):
         """vLLM's CUDA IPC receive engine plus SkyRL receive targets."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            from skyrl.backends.skyrl_train.weight_sync.colocated.slot_ring import (
+                MultiSlotImporter,
+            )
+
+            super().__init__(*args, **kwargs)
+            # One mapping per IPC slot of a transfer, released together at finish:
+            # the colocated send may ring over several packed buffers, and vLLM's
+            # one-slot importer would rebuild/release on every chunk (see
+            # MultiSlotImporter). Identical to vLLM's with a single slot.
+            self._packed_importer = MultiSlotImporter()
+            self.skyrl_receive_stats = {"chunks": 0, "bytes": 0, "tensors": 0}
+
+        def receive_weights(self, update_info: Any) -> None:
+            sizes = getattr(update_info, "tensor_sizes", None) or []
+            stats = self.skyrl_receive_stats
+            stats["chunks"] += 1
+            stats["bytes"] += int(sum(sizes))
+            stats["tensors"] += len(getattr(update_info, "names", None) or [])
+            if self.packed and self.skyrl_loads_in_place() and not self.skyrl_lora_armed():
+                self._skyrl_receive_packed_in_place(update_info)
+                return
+            super().receive_weights(update_info)
+
+        def _skyrl_receive_packed_in_place(self, update_info: Any) -> None:
+            """Load a packed chunk straight from the trainer's IPC buffer, without cloning it.
+
+            vLLM's ``packed_ipc_consumer`` clones every chunk because its layerwise
+            reload may keep the views past this call. An in-place model copies each
+            tensor into its parameter during ``load_weights`` and keeps nothing, so
+            the clone is only a second, slot-sized transient allocation -- which a
+            GPU filled by the woken weights (Inkling2 BF16 at TP8, colocated) has no
+            room for. The stream is drained before returning: the trainer reuses the
+            slot as soon as this round trip ends.
+            """
+            from vllm.distributed.weight_transfer.packed_tensor import unpack_tensor
+            from vllm.model_executor.model_loader.mtp_validation import (
+                disable_mtp_completeness_check,
+            )
+
+            if update_info.tensor_sizes is None:
+                raise ValueError("`tensor_sizes` is required when packed=True")
+            device_index = self.device.index
+            uuid = str(torch.cuda.get_device_properties(device_index).uuid)
+            handles = update_info.ipc_handles
+            if uuid not in handles:
+                raise ValueError(f"IPC handle not found for GPU UUID {uuid}. Available UUIDs: {list(handles)}")
+            list_args = list(handles[uuid])
+            list_args[6] = device_index
+            packed = self._packed_importer.rebuild(list_args)[: sum(update_info.tensor_sizes)]
+            dtypes = [getattr(torch, dn) for dn in update_info.dtype_names]
+            weights = unpack_tensor(packed, update_info.names, update_info.shapes, dtypes, update_info.tensor_sizes)
+            with torch.device(self.device), self.skyrl_checkpoint_load(), disable_mtp_completeness_check():
+                self.model.load_weights(weights)
+            del weights, packed
+            torch.cuda.current_stream(self.device).synchronize()
+
+        def start_weight_update(self) -> None:
+            self.skyrl_receive_stats = {"chunks": 0, "bytes": 0, "tensors": 0}
+            super().start_weight_update()
 
         def skyrl_release_receive_buffers(self) -> None:
             # The importer holds this worker's mapping of the trainer's packed

@@ -20,9 +20,20 @@ Imports vLLM at module scope, so import this lazily from anything that must work
 without the wheel.
 """
 
+import contextlib
 import re
 from functools import cached_property
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import torch
 from loguru import logger
@@ -125,6 +136,18 @@ class FsdpWeightSource(WeightSource):
             yield f"{self._prefix}{key}", full
 
 
+def _megatron_global_name(chunks: List[Any], chunk: torch.nn.Module, name: str, vp_stage: int) -> str:
+    """``name`` (local to this rank's model ``chunk``) as the bridge names it: layer and expert
+    numbers made global. Unchanged outside a Megatron model (no ``config``)."""
+    if getattr(chunk, "config", None) is None or not torch.distributed.is_initialized():
+        return name
+    from megatron.bridge.models.conversion.model_bridge import (
+        _megatron_local_name_to_global,
+    )
+
+    return _megatron_local_name_to_global(chunks, chunk.config, name, vp_stage)
+
+
 class MegatronWeightSource(WeightSource):
     """``WeightSource`` over a Megatron model, via Megatron-Bridge.
 
@@ -144,6 +167,11 @@ class MegatronWeightSource(WeightSource):
     ``param_filter`` keeps the conversion tasks whose global Megatron name it
     accepts. Every rank filters the same global list, so they enter the same
     collectives, and a filter by name keeps each ``group_key`` whole.
+
+    A model bridge may define ``split_for_weight_sync(name, tensor)`` to send an
+    exported tensor as several (e.g. a layer's packed experts one expert at a
+    time), with ``weight_sync_numel(name, shape)`` giving the largest piece of a
+    checkpoint tensor for sizing the transfer buffer (:attr:`wire_numel`).
     """
 
     def __init__(
@@ -157,8 +185,38 @@ class MegatronWeightSource(WeightSource):
         self._module = module
         self._dtype = dtype
         self._param_filter = param_filter
+        self._fp32_names: Optional[set] = None
+        model_bridge = getattr(bridge, "_model_bridge", None)
+        self._split = getattr(model_bridge, "split_for_weight_sync", None)
+        self.wire_numel: Optional[Callable[[str, Tuple[int, ...]], int]] = getattr(
+            model_bridge, "weight_sync_numel", None
+        )
 
-    def _export(self) -> Iterator[Tuple[str, torch.Tensor]]:
+    def _fp32_megatron_names(self) -> set:
+        """Global, unwrapped names of the Megatron parameters and buffers held in FP32, gathered from
+        every rank so that all ranks pick the same wire dtype for a tensor (the bridge names sources
+        globally; a rank's own names restart at layer 0 and expert 0 under PP / EP)."""
+        if self._fp32_names is None:
+            chunks = list(self._module) if isinstance(self._module, (list, tuple)) else [self._module]
+            fp32 = set()
+            for vp_stage, chunk in enumerate(chunks):
+                inner = chunk
+                while hasattr(inner, "module"):
+                    inner = inner.module
+                if not isinstance(inner, torch.nn.Module):
+                    continue
+                for name, tensor in list(inner.named_parameters()) + list(inner.named_buffers()):
+                    if tensor.dtype == torch.float32:
+                        fp32.add(_megatron_global_name(chunks, inner, name, vp_stage))
+            if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+                gathered = [None] * torch.distributed.get_world_size()
+                torch.distributed.all_gather_object(gathered, sorted(fp32))
+                fp32 = set().union(*gathered)
+            self._fp32_names = fp32
+        return self._fp32_names
+
+    def _export(self) -> Iterator[Tuple[str, torch.Tensor, torch.dtype]]:
+        """``(name, tensor, wire dtype)``; see :meth:`_wire_dtype`."""
         tasks = None
         if self._param_filter is not None:
             tasks = [
@@ -166,24 +224,54 @@ class MegatronWeightSource(WeightSource):
                 for task in self._bridge.get_conversion_tasks(self._module)
                 if self._param_filter(task.global_param_name)
             ]
-        return self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=tasks)
+        fp32 = self._fp32_megatron_names()
+        # A model bridge may export differently for weight sync (e.g. Inkling2 streams packed experts
+        # one at a time instead of stacking whole layers).
+        export_context = getattr(getattr(self._bridge, "_model_bridge", None), "weight_sync_export", None)
+        from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+            export_from_offloaded_params,
+        )
 
-    def _wire_dtype(self, tensor: torch.Tensor) -> torch.dtype:
-        return wire_dtype(tensor, self._dtype)
+        # Offloaded params (colocated sync with megatron_config.weight_sync_from_offloaded_params)
+        # are read from their CPU copies one at a time.
+        with (
+            export_context() if export_context is not None else contextlib.nullcontext(),
+            export_from_offloaded_params(self._module),
+        ):
+            for name, tensor, sources in self._bridge.export_hf_weights(
+                self._module, show_progress=False, conversion_tasks=tasks, with_megatron_names=True
+            ):
+                dtype = self._wire_dtype(tensor, sources, fp32)
+                for piece_name, piece in self._split(name, tensor) if self._split is not None else [(name, tensor)]:
+                    yield piece_name, piece, dtype
+
+    def _wire_dtype(self, tensor: torch.Tensor, sources: Sequence[str] = (), fp32: Optional[set] = None) -> torch.dtype:
+        """Integer tensors (DeepSeek-V4's hash-routing ``tid2eid``) keep their dtype: bf16 holds
+        integers exactly only up to 256. A float tensor goes out in FP32 when every Megatron tensor
+        it comes from is FP32 (router expert bias, attention sinks, mHC mixing weights,
+        ``keep_in_fp32`` parameters): vLLM keeps those in FP32 too, and a bf16 round trip changes
+        them by ~1/256, enough to flip near-tied router top-k choices. Everything else -- including
+        LoRA-merged weights, which the bridge returns in FP32 -- goes out in the inference dtype.
+        One-byte floats keep their dtype too (see :func:`wire_dtype`). Without the FP32 name set, an
+        FP32 tensor counts as FP32-sourced."""
+        if not tensor.is_floating_point() or tensor.element_size() == 1:
+            return tensor.dtype
+        if tensor.dtype == torch.float32 and (fp32 is None or (sources and all(s in fp32 for s in sources))):
+            return torch.float32
+        return self._dtype
 
     @cached_property
     def metadata(self) -> List[ParamMeta]:
         meta: List[ParamMeta] = []
-        for name, tensor in self._export():
-            meta.append(ParamMeta(name, self._wire_dtype(tensor), tuple(tensor.shape)))
+        for name, tensor, dtype in self._export():
+            meta.append(ParamMeta(name, dtype, tuple(tensor.shape)))
             del tensor
         return meta
 
     def iter_full(self) -> Iterator[Tuple[str, torch.Tensor]]:
         # See FsdpWeightSource.iter_full on the device.
         device = torch.cuda.current_device() if torch.cuda.is_available() else None
-        for name, tensor in self._export():
-            dtype = self._wire_dtype(tensor)
+        for name, tensor, dtype in self._export():
             full = tensor.to(device=device, dtype=dtype, non_blocking=True).detach().contiguous()
             yield name, full
 
@@ -259,6 +347,10 @@ class LoraAdapterWeightSource(WeightSource):
     sources avoid, and is affordable for exactly the same reason the dedupe
     exists: it is the deduplicated adapter, not the model.
     """
+
+    #: The stream is the adapter, not checkpoint tensors: the sender's packed buffer is
+    #: not floored at the checkpoint's largest parameter (see ``build_trainer_engine``).
+    sends_checkpoint_tensors = False
 
     def __init__(self, *, dtype: torch.dtype, experts_per_shared_adapter: int) -> None:
         self._dtype = dtype
@@ -405,8 +497,14 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
         actor_module: Any,
         lora_cls: Any,
         base_model_name_or_path: str,
+        stage_on_host: bool = False,
     ) -> None:
         super().__init__(dtype=dtype, experts_per_shared_adapter=experts_per_shared_adapter)
+        # Hold the prepared adapter in host memory, one tensor moved to the GPU at a time as it is
+        # sent (``__iter__``). For a colocated trainer: every rank holds the whole adapter between
+        # prepare() and the send, and Inkling2's per-expert adapter (384 experts gathered over EP)
+        # was ~20 GiB per GPU, more than is free beside the woken engine.
+        self._stage_on_host = stage_on_host
         self._bridge = bridge
         self._actor_module = actor_module
         self._lora_cls = lora_cls
@@ -414,6 +512,8 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
 
     def export_adapter_stream(self) -> Iterator[Tuple[str, torch.Tensor]]:
         for name, tensor in self._bridge.export_adapter_weights(self._actor_module, cpu=False, show_progress=False):
+            if self._stage_on_host:
+                tensor = tensor.to("cpu")
             yield f"base_model.model.{name}", tensor
 
     def finalize_adapter(

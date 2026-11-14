@@ -186,6 +186,24 @@ def test_runtime_env_forwards_te_block_scale_mode(monkeypatch):
     assert env_vars["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "1"
 
 
+def test_runtime_env_forwards_nccl_settings(monkeypatch):
+    """The driver's NCCL_* (transport selection) reach the workers; SkyRL's own NCCL values win."""
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setenv("NCCL_NET", "IB")
+    monkeypatch.setenv("NCCL_IB_HCA", "=mlx5_0,mlx5_1")
+    monkeypatch.setenv("NCCL_CUMEM_ENABLE", "1")
+
+    cfg = example_dummy_config()
+    cfg.generator.inference_engine.weight_sync_backend = "nccl"
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert env_vars["NCCL_NET"] == "IB"
+    assert env_vars["NCCL_IB_HCA"] == "=mlx5_0,mlx5_1"
+    # SkyRL sets NCCL_CUMEM_ENABLE=0 itself for NCCL weight sync and keeps it.
+    assert env_vars["NCCL_CUMEM_ENABLE"] == "0"
+
+
 def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
     monkeypatch.delenv("NVTE_FP8_BLOCK_AMAX_EPSILON", raising=False)
