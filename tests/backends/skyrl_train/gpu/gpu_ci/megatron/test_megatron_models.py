@@ -228,9 +228,9 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
             scale_mode, e8m0_mode = "1", "0"
         env["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", scale_mode)
         env["VLLM_USE_DEEP_GEMM_E8M0"] = os.environ.get("VLLM_USE_DEEP_GEMM_E8M0", e8m0_mode)
-        # The first blockwise-FP8 row per model JIT-compiles the FP8 kernels on a cold cache:
-        # ~530 s engine init for qwen3.5-0.8b on H100, at the 600 s health-wait default. Later
-        # rows reuse the cache (~100 s). A ceiling, not a duration.
+        # The first blockwise-FP8 row per model starts slowly: ~530 s of vLLM engine init for
+        # qwen3.5-0.8b on H100, which with server start-up reaches the 600 s health-wait default.
+        # Later FP8 rows for the same model start in ~100 s. A ceiling, not a duration.
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
             "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
         )
