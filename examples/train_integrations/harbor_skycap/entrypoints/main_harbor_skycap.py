@@ -1,7 +1,7 @@
 """Train on Harbor tasks, with skycap capturing each rollout's exact tokens.
 
 The sibling ``main_harbor`` with two changes: a pool of skycap servers (Ray
-actors, see ``skyrl/integration/harbor_skycap/servers.py``) starts in front of the inference router, and the
+actors, see ``servers.py``) starts in front of the inference router, and the
 generator points each trial at its own trajectory on one of them. Agents that
 run inside their sandbox (mini-swe-agent, ...) reach it through
 ``skycap.exposure``.
@@ -33,9 +33,9 @@ from ...harbor.entrypoints.main_harbor import (
     HarborSkyRLConfig,
     _deep_merge,
 )
-from skyrl.integration.harbor_skycap.harbor_generator import HarborSkycapGenerator
-from skyrl.integration.harbor_skycap.record_index import RecordLog, SkycapRecordIndex
-from skyrl.integration.harbor_skycap.servers import SkycapServers, exposure_for, start_servers
+from ..harbor_generator import HarborSkycapGenerator
+from ..record_index import RecordLog, SkycapRecordIndex
+from ..servers import SkycapServers, exposure_for, start_servers
 
 
 @dataclass

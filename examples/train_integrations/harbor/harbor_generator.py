@@ -8,18 +8,17 @@ from uuid import uuid4
 
 # Suppress LiteLLM verbose logging
 import litellm
-from harbor.models.agent.rollout_detail import RolloutDetail
-from harbor.models.trial.config import TrialConfig
-from harbor.trial.trial import Trial
 from loguru import logger
 from omegaconf import DictConfig
 from tqdm import tqdm
 
+from harbor.models.agent.rollout_detail import RolloutDetail
+from harbor.models.trial.config import TrialConfig
+from harbor.trial.trial import Trial
 from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     InferenceEngineInterface,
 )
-from skyrl.integration.harbor.trial_metrics import TrialAttempts, trial_metrics
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -28,6 +27,8 @@ from skyrl.train.generators.base import (
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt, get_rollout_metrics
 from skyrl.train.utils.rate_limiter import create_rate_limiter
+
+from .trial_metrics import TrialAttempts, trial_metrics
 
 litellm.suppress_debug_info = True  # Suppress the "Provider List" output
 litellm.set_verbose = False

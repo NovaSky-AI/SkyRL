@@ -20,6 +20,15 @@ from aiohttp.test_utils import TestServer  # noqa: E402
 from examples.train_integrations.harbor.entrypoints.main_harbor import (
     HARBOR_DEFAULT_CONFIG,  # noqa: E402
 )
+from examples.train_integrations.harbor_skycap import harbor_generator  # noqa: E402
+from examples.train_integrations.harbor_skycap.compose import (  # noqa: E402
+    TrialOutcome,
+    compose,
+)
+from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa: E402
+from examples.train_integrations.harbor_skycap.harbor_generator import (
+    HarborSkycapGenerator,  # noqa: E402
+)
 from skycap import CaptureService, Sample, record  # noqa: E402
 from skycap.graph import MessageGraph  # noqa: E402
 from skycap.paths import Row, final_path  # noqa: E402
@@ -28,15 +37,6 @@ from skycap.tokens.renderer import Media  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
     pack_sample_support_logprobs,  # noqa: E402
-)
-from skyrl.integration.harbor_skycap import harbor_generator  # noqa: E402
-from skyrl.integration.harbor_skycap.compose import (  # noqa: E402
-    TrialOutcome,
-    compose,
-)
-from skyrl.integration.harbor_skycap.engine import SkyRLEngine  # noqa: E402
-from skyrl.integration.harbor_skycap.harbor_generator import (
-    HarborSkycapGenerator,  # noqa: E402
 )
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
 from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402

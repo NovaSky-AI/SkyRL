@@ -5,12 +5,9 @@ RL training with [Harbor](https://github.com/laude-institute/harbor) as the envi
 ### Structure
 
 ```
-skyrl/integration/harbor/
+examples/train_integrations/harbor/
   harbor_generator.py              # HarborGenerator: bridges SkyRL <-> Harbor
   dataset.py                       # HarborTaskDataset: loads task directory paths
-  trial_metrics.py                 # Per-step trial phase and retry metrics
-
-examples/train_integrations/harbor/
   prepare_harbor_dataset.py        # Downloads + extracts datasets from HuggingFace
   harbor_trial_config/
     default.yaml                   # Harbor TrialConfig template

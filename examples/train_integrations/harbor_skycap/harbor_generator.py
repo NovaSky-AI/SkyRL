@@ -37,14 +37,11 @@ from harbor.models.agent.name import AgentName
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 from loguru import logger
-from tqdm import tqdm
-
 from skycap import CapturePool, PathRuleError
 from skycap.paths import load_rule
+from tqdm import tqdm
+
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
-from skyrl.integration.harbor.trial_metrics import TrialAttempts, trial_metrics
-from skyrl.integration.harbor_skycap.compose import TrialOutcome, compose, split
-from skyrl.integration.harbor_skycap.record_index import RecordLog
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -53,6 +50,10 @@ from skyrl.train.generators.base import (
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt
 from skyrl.train.utils.rate_limiter import create_rate_limiter
+
+from ..harbor.trial_metrics import TrialAttempts, trial_metrics
+from .compose import TrialOutcome, compose, split
+from .record_index import RecordLog
 
 litellm.suppress_debug_info = True
 

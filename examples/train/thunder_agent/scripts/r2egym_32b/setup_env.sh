@@ -89,7 +89,7 @@ for name, expected_prefix in expected.items():
 from examples.train.thunder_agent.main_harbor_thunder_agent import HarborThunderAgentFullyAsyncExp
 from examples.train.thunder_agent.skyrl_integration.generator import ThunderAgentHarborGenerator
 from examples.train.thunder_agent.skyrl_integration.remote_inference_client import ThunderAgentRemoteInferenceClient
-from skyrl.integration.harbor.dataset import HarborTaskDataset
+from examples.train_integrations.harbor.dataset import HarborTaskDataset
 from skyrl.backends.skyrl_train.inference_servers.new_inference_worker_wrap import NewInferenceWorkerWrap
 
 print("pr_core_thunder_agent_imports=ok")

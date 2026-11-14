@@ -11,7 +11,7 @@ pytest.importorskip("harbor")
 import ray  # noqa: E402
 from aiohttp.test_utils import TestServer  # noqa: E402
 
-from skyrl.integration.harbor_skycap.servers import (
+from examples.train_integrations.harbor_skycap.servers import (
     start_servers,  # noqa: E402
 )
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
@@ -39,7 +39,7 @@ def local_ray():
 
 @pytest.mark.asyncio
 async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_path, monkeypatch) -> None:
-    from skyrl.integration.harbor_skycap import harbor_generator
+    from examples.train_integrations.harbor_skycap import harbor_generator
     from tests.integrations.harbor_skycap.fakes import FakeTrial
     from tests.integrations.harbor_skycap.test_harbor_skycap import (
         batch,
@@ -86,7 +86,7 @@ EXPOSURES = "tests.integrations.harbor_skycap.test_exposure"
 
 @pytest.mark.asyncio
 async def test_each_server_exposes_its_harness_routes_to_agents_in_sandboxes(local_ray, tmp_path, monkeypatch) -> None:
-    from skyrl.integration.harbor_skycap import harbor_generator
+    from examples.train_integrations.harbor_skycap import harbor_generator
     from tests.integrations.harbor_skycap.fakes import FakeTrial
     from tests.integrations.harbor_skycap.test_harbor_skycap import (
         batch,

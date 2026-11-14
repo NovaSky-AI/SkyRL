@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from skycap.tokens.engine import EngineError, EngineOutput, VLLMEngine
+
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     PackedField,
     decode_packed_routed_experts,

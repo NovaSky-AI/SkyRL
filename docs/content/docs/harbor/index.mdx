@@ -57,15 +57,12 @@ A `GeneratorInput` provides a batch of prompts with trajectory IDs. A `Generator
 
 ## Code Structure
 
-The generator lives in `skyrl/integration/harbor/`, and the entrypoints and configs in `examples/train_integrations/harbor/`:
+The integration lives in `examples/train_integrations/harbor/`:
 
 ```
-skyrl/integration/harbor/
+examples/train_integrations/harbor/
   harbor_generator.py          # HarborGenerator: core bridge between SkyRL and Harbor
   dataset.py                   # HarborTaskDataset: loads task directory paths
-  trial_metrics.py             # Per-step trial phase and retry metrics
-
-examples/train_integrations/harbor/
   harbor_trial_config/
     default.yaml               # Harbor TrialConfig template
   entrypoints/

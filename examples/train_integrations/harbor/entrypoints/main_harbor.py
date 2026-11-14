@@ -15,8 +15,8 @@ from skyrl.train.config import SkyRLTrainConfig, GeneratorConfig, get_config_as_
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 from skyrl.train.utils.rate_limiter import RateLimiterConfig
-from skyrl.integration.harbor.harbor_generator import HarborGenerator
-from skyrl.integration.harbor.dataset import HarborTaskDataset
+from ..harbor_generator import HarborGenerator
+from ..dataset import HarborTaskDataset
 
 # NOTE (sumanthrh): We use a YAML to store the defaults for the Harbor trial configuration
 # TODO: Convert to a dataclass

@@ -10,14 +10,14 @@ from omegaconf import OmegaConf
 
 pytest.importorskip("harbor")
 
+from examples.train_integrations.harbor import harbor_generator  # noqa: E402
 from examples.train_integrations.harbor.entrypoints.main_harbor import (  # noqa: E402
     HARBOR_DEFAULT_CONFIG,
 )
-from skyrl.integration.harbor import harbor_generator  # noqa: E402
-from skyrl.integration.harbor.harbor_generator import (  # noqa: E402
+from examples.train_integrations.harbor.harbor_generator import (  # noqa: E402
     HarborGenerator,
 )
-from skyrl.integration.harbor.trial_metrics import (  # noqa: E402
+from examples.train_integrations.harbor.trial_metrics import (  # noqa: E402
     TrialAttempts,
     _seconds,
     trial_metrics,
