@@ -162,37 +162,30 @@ _AUTOTUNE_MAX_TOKEN_BUCKET = 1048576
 
 # Matmul specs adapt Triton 3.6's CUDA matmul set (tile sizes, stages, warps):
 # https://github.com/triton-lang/triton/blob/v3.6.0/python/tutorials/03-matrix-multiplication.py#L164-L199
+# BLOCK_N is fixed: it sets the order of the online-softmax folds inside a vocab split, so letting
+# the tuner pick it per token bucket made a sequence's log-probs depend on the micro-batch size.
+# BLOCK_M, BLOCK_K, stages and warps do not change the result bits.
+_FORWARD_MAINLOOP_BLOCK_N = 256
 _FORWARD_MAINLOOP_CONFIG_SPECS = (
-    (128, 256, 32, 2, 8),
-    (128, 256, 32, 3, 8),
-    (128, 256, 32, 4, 8),
-    (128, 256, 32, 5, 8),
-    (128, 256, 64, 3, 8),
-    (64, 256, 32, 4, 4),
-    (128, 128, 32, 4, 4),
-    (128, 64, 32, 4, 4),
-    (64, 128, 32, 4, 4),
-    (64, 64, 32, 3, 4),
-    (128, 32, 32, 4, 4),
-    (64, 32, 32, 5, 2),
-    (32, 64, 32, 5, 2),
-    (32, 32, 32, 2, 4),
+    (128, _FORWARD_MAINLOOP_BLOCK_N, 32, 2, 8),
+    (128, _FORWARD_MAINLOOP_BLOCK_N, 32, 3, 8),
+    (128, _FORWARD_MAINLOOP_BLOCK_N, 32, 4, 8),
+    (128, _FORWARD_MAINLOOP_BLOCK_N, 32, 5, 8),
+    (128, _FORWARD_MAINLOOP_BLOCK_N, 64, 3, 8),
+    (64, _FORWARD_MAINLOOP_BLOCK_N, 32, 4, 4),
 )
 
 # Reduction tiles follow PyTorch Inductor's max-autotune reduction candidates:
 # https://github.com/pytorch/pytorch/blob/v2.11.0/torch/_inductor/runtime/triton_heuristics.py#L3240-L3253
 # Specs are (BLOCK_M, BLOCK_N, warps); update specs are (BLOCK_M, warps).
+# BLOCK_N is fixed for the same reason as the mainloop: it sets the order in which the per-split
+# partial sums are combined. Only the row tile and warps are tuned.
+_EPILOGUE_BLOCK_N = 64
 _EPILOGUE_CONFIG_SPECS = (
-    (16, 32, 2),
-    (16, 64, 4),
-    (32, 32, 4),
-    (32, 64, 4),
-    (32, 128, 4),
-    (64, 32, 4),
-    (64, 64, 4),
-    (64, 128, 8),
-    (128, 32, 4),
-    (128, 64, 8),
+    (16, _EPILOGUE_BLOCK_N, 4),
+    (32, _EPILOGUE_BLOCK_N, 4),
+    (64, _EPILOGUE_BLOCK_N, 4),
+    (128, _EPILOGUE_BLOCK_N, 8),
 )
 _EPILOGUE_UPDATE_CONFIG_SPECS = ((16, 4), (32, 4), (64, 4), (128, 4), (256, 8), (512, 8))
 
