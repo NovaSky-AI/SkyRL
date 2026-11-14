@@ -372,11 +372,13 @@ class NewInferenceWorkerWrap:
     # abort, no prefill recompute. Mirrors GPUWorker.sleep/wake_up; re-verify on
     # vLLM bumps.
 
-    def skyrl_sleep_for_weight_sync(self, offload_kv: bool = True) -> None:
+    def skyrl_sleep_for_weight_sync(self, offload_kv: bool = True, offload_weights: bool = False) -> None:
         """Free GPU memory for weight sync by sleeping the allocator.
 
-        Weights are discarded rather than backed up since the broadcast overwrites
-        every parameter on wake. ``offload_kv`` controls whether the KV cache is
+        By default, weights are discarded rather than backed up since the broadcast
+        overwrites every parameter on wake. ``offload_weights=True`` offloads them to
+        CPU instead: a LoRA adapter sync does not send the base model again, so the
+        wake must restore it. ``offload_kv`` controls whether the KV cache is
         offloaded to CPU (preserved for frozen in-flight requests) or discarded. Model
         buffers live in the weights pool but are not sent by the broadcast (e.g.
         non-persistent rotary ``inv_freq``), so save them here and restore on
@@ -399,6 +401,8 @@ class NewInferenceWorkerWrap:
         )
         self._skyrl_saved_model_state = save_model_state_tensors(self.model_runner)
         offload_tags = ("runtime", "cudagraph", "kv_cache") if offload_kv else ("runtime", "cudagraph")
+        if offload_weights:
+            offload_tags += ("weights",)
         get_mem_allocator_instance().sleep(offload_tags=offload_tags)
 
     def skyrl_wake_for_weight_sync(self, tags: list) -> None:
