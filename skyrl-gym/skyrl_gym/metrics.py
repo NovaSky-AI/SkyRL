@@ -8,16 +8,13 @@ def default_aggregate_metrics(metrics: List[Dict[str, Any]]) -> Dict[str, float]
     """
     if not metrics:
         return {}
-    aggregated_metrics: Dict[str, list[float]] = {}
+    aggregated_metrics: Dict[str, List[float]] = {}
     for m in metrics:
         for k, v in m.items():
-            if isinstance(v, bool):
-                v = float(v)
-            elif isinstance(v, (int, float)):
-                v = float(v)
-            else:
+            # bool is a subclass of int, so this also covers boolean flags.
+            if not isinstance(v, (int, float)):
                 continue
-            aggregated_metrics.setdefault(k, []).append(v)
+            aggregated_metrics.setdefault(k, []).append(float(v))
     return {k: sum(vals) / len(vals) for k, vals in aggregated_metrics.items()}
 
 
