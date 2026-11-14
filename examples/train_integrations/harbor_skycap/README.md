@@ -209,7 +209,7 @@ counted in `generate/skycap/num_missing_route_trajectories`.
 ## Tests
 
 ```bash
-uv run --isolated --extra skyrl-train --extra harbor --extra skycap --extra dev pytest tests/integrations/harbor_skycap
+uv run --isolated --extra skyrl-train --extra harbor --extra skycap --extra dev pytest tests/integrations
 ```
 
 A fake Harbor trial talks HTTP to a real skycap server, which calls a mock of
