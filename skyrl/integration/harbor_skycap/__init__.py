@@ -32,7 +32,14 @@ _EXPORTS = {
     "exposure_for": "skyrl.integration.harbor_skycap.servers",
 }
 
-__all__ = list(_EXPORTS)
+__all__ = [
+    "HarborSkycapGenerator",
+    "RecordLog",
+    "SkycapRecordIndex",
+    "SkycapServers",
+    "start_servers",
+    "exposure_for",
+]
 
 
 def __getattr__(name: str) -> Any:

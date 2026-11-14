@@ -44,3 +44,11 @@ def test_record_index_imports_without_harbor():
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_all_matches_exports():
+    import skyrl.integration.harbor as harbor
+    import skyrl.integration.harbor_skycap as harbor_skycap
+
+    for pkg in (harbor, harbor_skycap):
+        assert sorted(pkg.__all__) == sorted(pkg._EXPORTS)

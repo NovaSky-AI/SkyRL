@@ -19,7 +19,10 @@ _EXPORTS = {
     "HarborTaskDataset": "skyrl.integration.harbor.dataset",
 }
 
-__all__ = list(_EXPORTS)
+__all__ = [
+    "HarborGenerator",
+    "HarborTaskDataset",
+]
 
 
 def __getattr__(name: str) -> Any:
