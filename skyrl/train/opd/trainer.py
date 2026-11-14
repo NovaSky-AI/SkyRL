@@ -3,10 +3,13 @@
 - ``generate_on_input_batch`` runs one ``generator.generate`` call per prompt group concurrently and scores
   each group under the teacher as soon as its rollouts are back, so only the last groups to finish wait on the
   teacher. The base ``generate`` then logs the rollout metrics and validates the output, as for any trainer.
-- ``postprocess_generator_output`` zeroes the rewards in pure mode, after their metrics are logged.
-- ``convert_to_training_input`` pads the teacher logprobs into the batch, right-aligned like ``rollout_logprobs``.
+- ``postprocess_generator_output`` logs the truncation and repetition rates, records which rollouts are correct,
+  and zeroes the rewards in pure mode, after their metrics are logged.
+- ``convert_to_training_input`` pads the teacher logprobs into the batch, right-aligned like ``rollout_logprobs``,
+  next to the correctness flags.
 - ``compute_advantages_and_returns`` subtracts ``kl_coef * (action_log_probs - teacher_logprobs)`` on trainable
-  tokens, after the configured advantage estimator and regulated by the ``opd`` stabilization settings.
+  tokens, after the configured advantage estimator and regulated by the ``opd`` stabilization settings, and logs
+  the teacher's informativeness.
 """
 
 import asyncio
@@ -20,8 +23,16 @@ from tqdm.asyncio import tqdm
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput
 from skyrl.train.generators.utils import concatenate_generator_outputs
+from skyrl.train.opd.metrics import (
+    informativeness,
+    is_repetitive,
+    rollout_correct,
+    truncation_rate,
+)
 from skyrl.train.opd.teacher_client import TeacherLogprobClient
 from skyrl.train.opd.utils import (
+    ROLLOUT_CORRECT_KEY,
+    STUDENT_LOGPROB_FLOOR,
     TEACHER_LOGPROBS_KEY,
     apply_opd_to_advantages,
     pad_teacher_logprobs,
@@ -101,10 +112,14 @@ class OPDTrainer(RayPPOTrainer):
         self, generator_output: GeneratorOutput, uids: List[str]
     ) -> Tuple[GeneratorOutput, List[str]]:
         generator_output, uids = super().postprocess_generator_output(generator_output, uids)
+        generator_output[ROLLOUT_CORRECT_KEY] = [rollout_correct(reward) for reward in generator_output["rewards"]]
+        # Metrics: Repetition Rate and Truncation Rate
+        responses = generator_output["response_ids"]
+        self.all_metrics["opd/repetition_rate"] = sum(map(is_repetitive, responses)) / len(responses)
+        if generator_output.get("stop_reasons") is not None:
+            self.all_metrics["opd/truncation_rate"] = truncation_rate(generator_output["stop_reasons"])
+        # Pure OPD: advantage is from the teacher alone. Rewards are set to 0.
         if not self.cfg.trainer.algorithm.opd.use_task_reward:
-            # Pure OPD: the estimator sees zeros, so A_rl = 0 and the advantage is the teacher term
-            # alone. super() already logged the verifier's pass rate (reward/avg_pass_at_n) from the
-            # real rewards, which stays a free diagnostic for pure runs.
             generator_output["rewards"] = [[0.0] * len(reward) for reward in generator_output["rewards"]]
         return generator_output, uids
 
@@ -115,29 +130,45 @@ class OPDTrainer(RayPPOTrainer):
                 f"GeneratorOutput has no {TEACHER_LOGPROBS_KEY!r}: rollouts must come from "
                 "OPDTrainer.generate_on_input_batch"
             )
+        correct = generator_output.pop(ROLLOUT_CORRECT_KEY, None)
+        if correct is None:
+            raise RuntimeError(
+                f"GeneratorOutput has no {ROLLOUT_CORRECT_KEY!r}: rollouts must go through "
+                "OPDTrainer.postprocess_generator_output"
+            )
         batch = super().convert_to_training_input(generator_output, uids)
-        batch[TEACHER_LOGPROBS_KEY] = pad_teacher_logprobs(
-            teacher_logprobs, batch["response_mask"], batch.metadata.get("pad_size", 0)
-        )
+        pad_size = batch.metadata.get("pad_size", 0)
+        batch[TEACHER_LOGPROBS_KEY] = pad_teacher_logprobs(teacher_logprobs, batch["response_mask"], pad_size)
+        # Padding rows have an all-zero loss mask, so informativeness never counts their flag.
+        batch[ROLLOUT_CORRECT_KEY] = torch.tensor(correct + [False] * pad_size)
         return batch
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, data: TrainingInputBatch) -> TrainingInputBatch:
         data = super().compute_advantages_and_returns(data)  # the configured estimator; moves data to CPU
         teacher_logprobs: torch.Tensor = data.pop(TEACHER_LOGPROBS_KEY)  # never shipped to the workers
+        correct: torch.Tensor = data.pop(ROLLOUT_CORRECT_KEY)  # never shipped to the workers
         action_log_probs = data["action_log_probs"]
         if action_log_probs is None:
             raise RuntimeError(
                 "action_log_probs is None: the policy forward pass was skipped, but the OPD term needs the "
                 "old-policy logprobs (see validate_opd_cfg)"
             )
+        teacher_logprobs = teacher_logprobs.to(action_log_probs.device)
         advantages, metrics = apply_opd_to_advantages(
             advantages=data["advantages"],
             action_log_probs=action_log_probs,
-            teacher_logprobs=teacher_logprobs.to(action_log_probs.device),
+            teacher_logprobs=teacher_logprobs,
             loss_mask=data["loss_mask"],
             opd=self.cfg.trainer.algorithm.opd,
         )
+        value = informativeness(
+            teacher_logprobs - action_log_probs.clamp(min=STUDENT_LOGPROB_FLOOR),
+            data["loss_mask"],
+            correct,
+        )
+        if value is not None:
+            metrics["opd/informativeness"] = value
         data["advantages"] = advantages
         self.all_metrics.update(metrics)
         return data
