@@ -31,7 +31,8 @@ PHASES = (
 class TrainingPhaseGauge:
     """Sets ``skyrl_training_phase{phase=...}`` to 1.0 while the trainer is in that macro-phase.
 
-    Exactly one phase is 1.0 at a time, or none between phases.
+    Exactly one phase is 1.0 at a time, or none between phases. With ``trainer.fully_async.save_during_eval``,
+    ``eval`` and a save phase can be 1.0 at the same time.
     """
 
     def __init__(self) -> None:
