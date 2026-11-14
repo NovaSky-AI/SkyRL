@@ -1493,6 +1493,9 @@ class InferenceEngineConfig(BaseConfig):
     ``min_p=0.0``). Rows are the plain top-k, so the sampled token may be outside its row. Member logprobs are
     the sampler's processed ones, which are the policy's own at temperature 1. ``None`` records the sampler's
     own support, bounded by ``sampling_params.top_k``, for sample-support replay."""
+    enable_return_sample_support_logprobs: bool = False
+    """Also return each captured member's sampler logprob. Requires ``enable_return_sample_support_set``.
+    Score centering turns it on regardless."""
     max_num_batched_tokens: int = 8192
     """vLLM continuous-batching parameter: maximum number of tokens to pack into a batch."""
     enforce_eager: bool = False
@@ -2210,6 +2213,15 @@ class SkyRLTrainConfig(BaseConfig):
             if algorithm.enable_score_centering and reason is not None:
                 raise ValueError(reason)
             algorithm.enable_score_centering = reason is None
+
+        if (
+            self.generator.inference_engine.enable_return_sample_support_logprobs
+            and not self.generator.inference_engine.enable_return_sample_support_set
+        ):
+            raise ValueError(
+                "generator.inference_engine.enable_return_sample_support_logprobs requires "
+                "enable_return_sample_support_set"
+            )
 
         # Eval requests opt out of capture and do not use these constraints.
         if self.generator.inference_engine.enable_return_sample_support_set:

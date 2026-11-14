@@ -3,14 +3,16 @@
 Entry point: ``skyrl.train.entrypoints.main_opd``; read run scripts and documentation under
 ``examples/train/on_policy_distillation``.
 
-- ``teacher_client``: ``TeacherLogprobClient`` (abstract base) with the launched (``SkyRLTeacherClient``
-  over a ``RemoteInferenceClient``) and vLLM-URL backends.
+- ``teacher_client``: ``TeacherLogprobClient`` (abstract base), which scores a ``[tokens, width]`` id matrix
+  in one prefill and can return the teacher's own top-K, with the launched (``SkyRLTeacherClient`` over a
+  ``RemoteInferenceClient``) and vLLM-URL backends.
 - ``teacher_launch``: launching the teacher's vLLM deployment inside the job (``backend="skyrl"``).
-- ``trainer``: ``OPDTrainer``. Its ``generate_on_input_batch`` runs one ``generator.generate`` call per prompt group
-  concurrently and scores each group under the teacher as it finishes (any generator works); three
+- ``trainer``: ``OPDTrainer``. Its ``generate_on_input_batch`` runs one ``generator.generate`` call per row
+  concurrently and scores each row under the teacher as it finishes (any generator works); three
   more ``RayPPOTrainer`` overrides consume the teacher logprobs.
 - ``config``: ``trainer.teacher`` and ``trainer.algorithm.opd`` blocks, ``OPDExpConfig``, ``validate_opd_cfg``.
 - ``utils``: the pure helpers (batch splitting, padding, the advantage term).
+- ``metrics``: the rollout diagnostics, and the top-K overlap metrics (``opd.topk_metrics``).
 """
 
 from skyrl.train.opd.config import (
@@ -18,11 +20,15 @@ from skyrl.train.opd.config import (
     OPDAlgorithmConfig,
     OPDConfig,
     OPDExpConfig,
+    OPDTopKMetricsConfig,
     OPDTrainerConfig,
     TeacherConfig,
+    teacher_logprob_width,
+    teacher_topk,
     validate_opd_cfg,
 )
 from skyrl.train.opd.teacher_client import (
+    CandidateScores,
     SkyRLTeacherClient,
     TeacherLogprobClient,
     VLLMTeacherClient,
@@ -41,10 +47,14 @@ __all__ = [
     "OPDAlgorithmConfig",
     "OPDConfig",
     "OPDExpConfig",
+    "OPDTopKMetricsConfig",
     "OPDTrainerConfig",
     "TeacherConfig",
+    "teacher_logprob_width",
+    "teacher_topk",
     "validate_opd_cfg",
     "TEACHER_LOGPROBS_KEY",
+    "CandidateScores",
     "SkyRLTeacherClient",
     "TeacherLogprobClient",
     "VLLMTeacherClient",

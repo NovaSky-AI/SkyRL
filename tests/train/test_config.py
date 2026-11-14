@@ -706,6 +706,20 @@ def test_candidate_capture_rejects_sample_support_replay():
         )
 
 
+def test_member_logprobs_require_support_capture():
+    with pytest.raises(ValueError, match="enable_return_sample_support_logprobs requires"):
+        SkyRLTrainConfig.from_cli_overrides(["generator.inference_engine.enable_return_sample_support_logprobs=true"])
+    cfg = SkyRLTrainConfig.from_cli_overrides(
+        [
+            "generator.inference_engine.enable_return_sample_support_set=true",
+            "generator.inference_engine.candidate_top_k=16",
+            "generator.inference_engine.enable_return_sample_support_logprobs=true",
+            "generator.sampling_params.top_k=-1",
+        ]
+    )
+    assert cfg.generator.inference_engine.enable_return_sample_support_logprobs is True
+
+
 def test_routed_expert_capture_rejects_the_vision_language_generator():
     with pytest.raises(ValueError, match="vision_language_generator"):
         SkyRLTrainConfig.from_cli_overrides(
