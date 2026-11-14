@@ -17,6 +17,7 @@ import ray
 from skyrl.backends.skyrl_train.utils.routed_experts import RoutedExpertTrace
 from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
 from skyrl.train.config import SkyRLTrainConfig
+from skyrl.train.dataset.preprocess import compute_prompt_mini_batch_boundaries
 from skyrl.train.generators.base import GeneratorInput, GeneratorOutput, TrajectoryID
 from skyrl.train.utils.trainer_utils import (
     build_dataloader,
@@ -380,8 +381,16 @@ def test_handle_dynamic_sampling_invalid_strategy():
 
 
 def test_handle_replace_sampling_sufficient_good_samples():
-    """Test replace sampling when there are sufficient good samples (>0.3)."""
+    """Replacement preserves destination prompt groups when enough good samples exist."""
     # Create test data with some good UIDs (high variance) and some bad UIDs (zero variance)
+    trajectory_ids = [
+        TrajectoryID("uid1", 0),
+        TrajectoryID("uid1", 1),
+        TrajectoryID("uid2", 0),
+        TrajectoryID("uid2", 1),
+        TrajectoryID("uid3", 0),
+        TrajectoryID("uid3", 1),
+    ]
     generator_output = {
         "prompt_token_ids": [[1, 2], [1, 2], [3, 4], [3, 4], [5, 6], [5, 6]],
         "response_ids": [[13, 14], [15, 16], [17, 18], [19, 20], [21, 22], [23, 24]],
@@ -398,6 +407,7 @@ def test_handle_replace_sampling_sufficient_good_samples():
         "rollout_metrics": None,
         "rollout_logprobs": [[0.1, 0.2], [0.3, 0.4], [0.5, 0.25], [0.15, 0.25], [0.1, 0.2], [0.3, 0.4]],
         "rollout_expert_indices": [np.asarray([[[i, i + 1]]], dtype=np.uint8) for i in range(6)],
+        "trajectory_ids": trajectory_ids,
     }
     uids = ["uid1", "uid1", "uid2", "uid2", "uid3", "uid3"]  # 2 samples per prompt
     sampling_config = {"n_samples_per_prompt": 2, "min_replace_ratio": 0.3}
@@ -420,10 +430,24 @@ def test_handle_replace_sampling_sufficient_good_samples():
     for response, routes in zip(result_output["response_ids"], result_output["rollout_expert_indices"]):
         assert np.array_equal(routes, route_by_response[tuple(response)])
 
-    # Check that bad uid2 samples were replaced with good samples
-    uid2_indices = [i for i, uid in enumerate(result_uids) if uid == "uid2"]
-    # After replacement, uid2 indices should now contain UIDs from good samples
-    assert len(uid2_indices) == 0  # uid2 should be completely replaced
+    assert result_uids == uids
+    assert result_output["trajectory_ids"] == [
+        TrajectoryID(uid, repetition_id) for uid in ("uid1", "uid2", "uid3") for repetition_id in range(2)
+    ]
+    assert trajectory_ids == [
+        TrajectoryID(uid, repetition_id) for uid in ("uid1", "uid2", "uid3") for repetition_id in range(2)
+    ]
+    assert result_output["response_ids"][2:4] in (
+        generator_output["response_ids"][0:2],
+        generator_output["response_ids"][4:6],
+    )
+    assert compute_prompt_mini_batch_boundaries(
+        result_uids,
+        mini_batch_size=1,
+        train_batch_size=3,
+        is_stepwise=False,
+        n_samples_per_prompt=2,
+    ) == [(0, 2), (2, 4), (4, 6)]
 
 
 def test_handle_replace_sampling_insufficient_good_samples():

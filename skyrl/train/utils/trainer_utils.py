@@ -24,7 +24,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
 )
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.dataset import PromptDataset
-from skyrl.train.generators.base import GeneratorOutput
+from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import (
     concatenate_generator_outputs,
     get_metrics_from_generator_output,
@@ -504,10 +504,14 @@ def handle_replace_sampling(
         if bad_indices:
             generator_output = slice_generator_output(generator_output, source_indices)
 
-        # Update UIDs accordingly
+        # Keep destination group IDs so copied prompts remain separate groups.
         replaced_uids = uids.copy()
-        for bad_idx, replacement_idx in zip(bad_indices, replacement_indices):
-            replaced_uids[bad_idx] = uids[replacement_idx]
+        trajectory_ids = generator_output.get("trajectory_ids")
+        if trajectory_ids is not None:
+            generator_output["trajectory_ids"] = [
+                TrajectoryID(instance_id=uid, repetition_id=trajectory_id.repetition_id)
+                for uid, trajectory_id in zip(replaced_uids, trajectory_ids)
+            ]
 
         logger.info(f"After replacement - Replaced {len(bad_indices) // n_samples_per_prompt} bad prompts")
         logger.info("==================================================")
