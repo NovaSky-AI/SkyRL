@@ -29,7 +29,8 @@ export WANDB_API_KEY=your_wandb_api_key
 export DAYTONA_API_KEY=your_daytona_api_key
 # export MODAL_TOKEN_ID=your_modal_token_id
 # export MODAL_TOKEN_SECRET=your_modal_token_secret
-# Or no provider: Ray sandboxes on your own Ray cluster, see ray_sandbox/README.md.
+# Or no provider: run_codecontest_ray_sandbox.sh runs each trial in a Ray sandbox
+# on your own Ray cluster (skyrl.integration.ray_sandbox).
 
 # 2. Prepare dataset
 uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
