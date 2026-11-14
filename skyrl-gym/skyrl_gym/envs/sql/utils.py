@@ -100,7 +100,7 @@ def execute_sql_wrapper_single(db_file, sql, timeout, output_str):
     return res
 
 
-def calculate_reward_single(completion, reference, db_file, timeout=30):
+def calculate_reward_single(completion, reference, db_file, timeout=30, reward_empty_gold=False):
     reward = 0.0
     num_comparisons = 0
 
@@ -118,15 +118,22 @@ def calculate_reward_single(completion, reference, db_file, timeout=30):
     _, _, gt_results, _, _ = ref
 
     if pred_results is not None and gt_results is not None and pred_results == gt_results:
-        reward = 1.0
+        if not gt_results and not reward_empty_gold:
+            # An empty gold result set matches every query that also returns no
+            # rows (e.g. "SELECT 1 WHERE 0;"), so the execution comparison
+            # carries no signal and the task is trivially reward-hackable.
+            # See https://github.com/NovaSky-AI/SkyRL/issues/2451
+            reward = 0.0
+        else:
+            reward = 1.0
     else:
         reward = 0.0
     return reward
 
 
-def compute_score_single(completion, reference, db_file):
+def compute_score_single(completion, reference, db_file, reward_empty_gold=False):
     try:
-        res = calculate_reward_single(completion, reference, db_file)
+        res = calculate_reward_single(completion, reference, db_file, reward_empty_gold=reward_empty_gold)
         return res
     except Exception as e:
         print(f"Unexpected error: {e}; Setting reward as 0")
