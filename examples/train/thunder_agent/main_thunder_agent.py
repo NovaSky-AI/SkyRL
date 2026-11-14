@@ -6,7 +6,6 @@ layer. ThunderAgent intercepts /v1/chat/completions for program scheduling
 while routing SkyRL's token-based generation endpoint through the same router.
 """
 
-import asyncio
 import os
 from pathlib import Path
 
@@ -49,7 +48,9 @@ class FullyAsyncThunderAgentExp(BasePPOExp):
         )
 
     def get_inference_client(self) -> InferenceEngineInterface:
-        return self._get_new_inference_client()
+        # Preserve BasePPOExp's SamplingService composition while
+        # dispatching _get_new_inference_client() to the ThunderAgent backend.
+        return super().get_inference_client()
 
     def _get_new_inference_client(self):
         """Override to use ThunderAgentRouter instead of InferenceRouter."""
