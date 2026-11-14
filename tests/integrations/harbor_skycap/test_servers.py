@@ -48,11 +48,16 @@ async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_pat
     )
 
     router = MockRouter()
-    server = TestServer(router.app(), host="0.0.0.0")
+    server = TestServer(router.app(), host="127.0.0.1")
     await server.start_server()
     servers = start_servers(
         # The fake renderer goes to each actor with the settings, in place of a tokenizer.
-        {"upstream_url": str(server.make_url("")).rstrip("/"), "renderer": FakeRenderer(), "model": "policy"},
+        {
+            "upstream_url": str(server.make_url("")).rstrip("/"),
+            "renderer": FakeRenderer(),
+            "model": "policy",
+            "host": "127.0.0.1",
+        },
         num_servers=2,
         num_cpus_per_server=1,
         placement_strategy="SPREAD",
@@ -63,6 +68,7 @@ async def test_a_pool_of_servers_serves_a_batch_and_writes_it(local_ray, tmp_pat
     try:
         # Each server picked its own port.
         assert len(set(servers.urls)) == 2
+        assert all(url.startswith("http://127.0.0.1:") for url in servers.urls)
         FakeTrial.configs = []
         monkeypatch.setattr(harbor_generator, "Trial", FakeTrial)
         gen = harbor_generator.HarborSkycapGenerator(
