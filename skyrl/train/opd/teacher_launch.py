@@ -1,14 +1,14 @@
-"""Launching the teacher's vLLM deployment inside the job (``trainer.teacher.backend="skyrl"``).
+"""Launching a teacher's vLLM deployment inside the job (a teacher's ``backend="skyrl"``).
 
-The deployment follows the rollout inference engine's launch path, ``create_inference_servers``
+Each deployment follows the rollout inference engine's launch path, ``create_inference_servers``
 (server groups plus a router), with a frozen-model argument set from ``build_frozen_vllm_cli_args``.
-The teacher model has no weight transfer, no sleep mode, no LoRA. It gets its own placement group
-(never the colocate group), a port window past the student's, and is driven through a
-``RemoteInferenceClient``.
+A teacher model has no weight transfer, no sleep mode, no LoRA. Each launched teacher gets its own placement
+group (never the colocate group) and its own port windows, past the student's and the previous teacher's, and is
+driven through a ``RemoteInferenceClient``.
 """
 
 from argparse import Namespace
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Dict, Tuple
 
 from skyrl.backends.skyrl_train.inference_servers.common import (
     SERVER_PORT_STRIDE,
@@ -39,8 +39,28 @@ def _teacher_start_port(cfg: "SkyRLTrainConfig") -> int:
     return VLLM_START_PORT + windows * SERVER_PORT_STRIDE
 
 
-def launch_teacher(cfg: "SkyRLTrainConfig") -> Tuple["RemoteInferenceClient", "InferenceServerSetup"]:
-    """Launch the teacher deployment; return the client that drives it and the setup that owns its actors.
+def teacher_start_ports(cfg: "SkyRLTrainConfig") -> Dict[str, int]:
+    """Each launched teacher's first port, by its ``trainer.teachers`` name, in config order.
+
+    The first starts past the student's windows; each next one past the previous teacher's
+    ``num_engines * data_parallel_size`` windows, as ``create_inference_servers`` lays them out.
+    Teachers on servers you run (``backend="vllm"``) take no ports.
+    """
+    port = _teacher_start_port(cfg)
+    ports = {}
+    for name, teacher in cfg.trainer.teachers.items():
+        if teacher.backend != "skyrl":
+            continue
+        ports[name] = port
+        port += teacher.inference_engine.num_engines * teacher.inference_engine.data_parallel_size * SERVER_PORT_STRIDE
+    return ports
+
+
+def launch_teacher(
+    cfg: "SkyRLTrainConfig", teacher: TeacherConfig, start_port: int
+) -> Tuple["RemoteInferenceClient", "InferenceServerSetup"]:
+    """Launch one teacher's deployment from ``start_port``; return the client that drives it and the setup that
+    owns its actors.
 
     The setup has to be referenced during the entire run. Ray terminates a non-detached actor once every
     handle to it is gone, and only the setup's server groups hold the handles.
@@ -60,8 +80,6 @@ def launch_teacher(cfg: "SkyRLTrainConfig") -> Tuple["RemoteInferenceClient", "I
         build_frozen_vllm_cli_args,
     )
 
-    teacher: TeacherConfig = cfg.trainer.teacher
-
     def make_cli_args() -> Namespace:
         args = build_frozen_vllm_cli_args(teacher.model, teacher.inference_engine, cfg.trainer.seed)
         # vLLM refuses a request above --max-logprobs (-1 is no cap) by the ids it scores per position and,
@@ -75,5 +93,5 @@ def launch_teacher(cfg: "SkyRLTrainConfig") -> Tuple["RemoteInferenceClient", "I
         model_path=teacher.model,
         log_path=cfg.trainer.log_path,
         make_cli_args=make_cli_args,
-        start_port=_teacher_start_port(cfg),
+        start_port=start_port,
     )

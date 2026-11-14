@@ -3,10 +3,16 @@
 import array
 import zlib
 from dataclasses import dataclass, fields
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import numpy as np
 import torch
+
+from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
+
+if TYPE_CHECKING:
+    from skyrl.backends.skyrl_train.utils.sample_support import CompactSampleSupport
+    from skyrl.train.opd.teacher_client import CandidateScores
 
 REPETITION_TAIL_TOKENS = 2_500
 REPETITION_RATIO = 10.0
@@ -48,6 +54,39 @@ def informativeness(log_ratio: torch.Tensor, loss_mask: torch.Tensor, correct: t
     return (right.mean() - wrong.mean()).item() if len(right) and len(wrong) else None
 
 
+def term_metrics(
+    advantages: torch.Tensor,
+    opd_term: torch.Tensor,
+    reverse_kl: torch.Tensor,
+    divergence_clipped: torch.Tensor,
+    advantage_clipped: torch.Tensor,
+    mask: torch.Tensor,
+    correct: Optional[torch.Tensor],
+) -> Dict[str, float]:
+    """The OPD term's metrics over the rows given, one teacher's (see ``apply_opd_to_advantages``)."""
+    mask_f = mask.to(dtype=advantages.dtype)
+    metrics = {
+        "reverse_kl": masked_mean(reverse_kl, mask_f).item(),
+        "reverse_kl_abs_max": reverse_kl.abs().max().item() if reverse_kl.numel() else 0.0,
+        "adv_rl_abs_mean": masked_mean(advantages.abs(), mask_f).item(),
+        "adv_opd_abs_mean": masked_mean(opd_term.abs(), mask_f).item(),
+        "divergence_clip_fraction": masked_mean(divergence_clipped.to(mask_f.dtype), mask_f).item(),
+        "advantage_clip_fraction": masked_mean(advantage_clipped.to(mask_f.dtype), mask_f).item(),
+    }
+    log_ratio = -reverse_kl[mask]
+    if log_ratio.numel():
+        # Percentiles of the raw log-ratio, to pick the advantage bounds from a run. NumPy, because torch.quantile
+        # refuses inputs above 2**24 elements and a math step has about 25M tokens.
+        low, high = np.quantile(log_ratio.float().cpu().numpy(), [0.01, 0.99])
+        metrics["log_ratio_p01"], metrics["log_ratio_p99"] = float(low), float(high)
+    if correct is not None:
+        # -reverse_kl is log q - log p on trainable tokens and 0 elsewhere, which the mask leaves out anyway.
+        value = informativeness(-reverse_kl, mask, correct)
+        if value is not None:
+            metrics["informativeness"] = value
+    return metrics
+
+
 @dataclass
 class TopKStats:
     """Sums over response positions, so rows scored concurrently add up before the means are taken."""
@@ -60,16 +99,16 @@ class TopKStats:
     def __add__(self, other: "TopKStats") -> "TopKStats":
         return TopKStats(*(getattr(self, f.name) + getattr(other, f.name) for f in fields(self)))
 
-    def metrics(self) -> Dict[str, float]:
-        """The means, keyed for the tracker; none until a position was measured."""
+    def metrics(self, prefix: str = "opd/") -> Dict[str, float]:
+        """The means, keyed for the tracker under ``prefix``; none until a position was measured."""
         if not self.positions:
             return {}
         metrics = {
-            "opd/overlap_ratio": self.overlap / self.positions,
-            "opd/overlap_positions": self.positions,
+            f"{prefix}overlap_ratio": self.overlap / self.positions,
+            f"{prefix}overlap_positions": self.positions,
         }
         if self.advantage_positions:
-            metrics["opd/overlap_token_advantage"] = self.advantage / self.advantage_positions
+            metrics[f"{prefix}overlap_token_advantage"] = self.advantage / self.advantage_positions
         return metrics
 
 
@@ -117,3 +156,12 @@ def topk_stats(
         advantage=float((cells.sum(axis=1)[nonempty] / count[nonempty]).sum()),
         advantage_positions=int(nonempty.sum()),
     )
+
+
+def row_topk_stats(support: "CompactSampleSupport", scores: "CandidateScores", loss_mask: List[int]) -> TopKStats:
+    """One row's overlap sums. A token with no captured members (an appended EOS, an observation token) has no
+    student top-K and is left out."""
+    if len(support) != len(loss_mask):
+        raise ValueError(f"{len(support)} support rows for {len(loss_mask)} response tokens")
+    mask = np.asarray(loss_mask, dtype=bool) & (support.row_lengths > 0)
+    return topk_stats(support.candidate_grid(), support.logprob_grid(), scores.topk_ids, scores.topk_logprobs, mask)
