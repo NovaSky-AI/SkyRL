@@ -11,7 +11,7 @@ Requirements:
   * Ray with the sandbox fixes of October 2026 (master @ 78e4b1f713; expected in Ray 2.61), in
     the job's environment and on every node. SkyRL's pinned Ray (2.57.0) doesn't have them yet.
   * Nodes that host sandboxes need ``runsc``, ``mkfs.erofs`` >= 1.7, and
-    ``slirp4netns`` (network="public" only). docker/Dockerfile.ray-sandbox has all three.
+    ``slirp4netns`` (network="public" only); see https://docs.ray.io/en/master/core/sandboxes.html
     For network="public" they also need /dev/net/tun; the actor creates it with
     passwordless sudo if it's missing.
   * Tasks must name a prebuilt, publicly pullable image (``[environment].docker_image``

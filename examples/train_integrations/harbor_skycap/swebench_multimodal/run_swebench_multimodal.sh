@@ -17,7 +17,7 @@
 #                             Daytona org is shared: keep it well under what others leave free
 #   SANDBOX=daytona|ray       where each trial's sandbox runs (default daytona). ray runs it as a gVisor sandbox on this
 #                             run's own Ray cluster (skyrl.integration.ray_sandbox): no Daytona key, owner label or
-#                             snapshots. The node needs docker/Dockerfile.ray-sandbox's tools, and Ray with the sandbox
+#                             snapshots. The node needs Ray's sandbox tools, and Ray with the sandbox
 #                             fixes (RAY_WHEEL); each sandbox reserves RAY_SANDBOX_CPUS of the node's CPUs (default 0.25)
 #                             and SANDBOX_MEMORY_MB of its memory
 #   RAY_WHEEL=<url>           run on this Ray wheel instead of the locked Ray, layered on with `uv run --with`

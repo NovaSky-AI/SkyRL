@@ -26,12 +26,12 @@
 #   SANDBOX=daytona|modal|ray  where Harbor runs each trial's sandbox (default daytona). ray runs
 #                              each one as a gVisor sandbox on this run's own Ray cluster
 #                              (skyrl.integration.ray_sandbox), so the node needs the tools in
-#                              docker/Dockerfile.ray-sandbox; RAY_SANDBOX_IMAGE is the prebuilt image
+#                              Ray's sandbox docs; RAY_SANDBOX_IMAGE is the prebuilt image
 #                              every task runs in (default python:3.12-slim), and
 #                              RAY_SANDBOX_CPUS the CPUs each sandbox reserves (default 0.25)
 #   RAY_WHEEL=<url>            run on this Ray wheel instead of the locked Ray, layered on with
 #                              `uv run --with`; SANDBOX=ray needs one with the sandbox fixes until
-#                              SkyRL's pinned Ray has them (e.g. docker/Dockerfile.ray-sandbox's RAY_COMMIT)
+#                              SkyRL's pinned Ray has them (e.g. the wheel of Ray master 78e4b1f713)
 #   STRATEGY=fsdp|megatron     the training backend (default fsdp); megatron takes MEGATRON_TP,
 #                              MEGATRON_PP, MEGATRON_EP (default 1; e.g. 8 for an MoE such as
 #                              Qwen3-30B-A3B on 8 GPUs) and MEGATRON_ETP, and OPTIMIZER_OFFLOAD=1

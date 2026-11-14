@@ -101,7 +101,9 @@ skips the check, e.g. for an agent that never calls the model.
 `run_codecontests.sh` with `SANDBOX=ray` needs no provider account. It runs each
 trial in a gVisor sandbox on the run's own Ray cluster, through
 `skyrl.integration.ray_sandbox`. The node needs the tools in
-`docker/Dockerfile.ray-sandbox`. Every task runs in one prebuilt image
+[Ray's sandbox docs](https://docs.ray.io/en/master/core/sandboxes.html), and the job needs
+Ray with the sandbox fixes (`RAY_WHEEL`, a Ray master wheel, until SkyRL's Ray
+has them). Every task runs in one prebuilt image
 (`RAY_SANDBOX_IMAGE`), and each sandbox reserves `RAY_SANDBOX_CPUS` of the
 node's CPUs.
 
