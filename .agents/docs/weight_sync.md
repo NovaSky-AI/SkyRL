@@ -181,6 +181,47 @@ checkpoint-format vision-block exclusions remain BF16. The path does not silentl
 change that policy for a topology or add a VLM-specific merger fallback; a configuration
 that vLLM cannot instantiate fails at startup.
 
+### Serialized NVFP4 expert sync (`expert_nvfp4`)
+
+`trainer.policy.megatron_config.expert_nvfp4=true` runs the routed-expert GEMMs through Transformer Engine's
+NVFP4 recipe (`workers/megatron/quantization/expert_nvfp4.py`: a per-module quant recipe matches only
+`*.experts.linear_fc1/fc2`; `num_layers_at_{start,end}_in_bf16`, the same knobs as FP8, keep the first / last N
+layers BF16 on both sides) and syncs the same
+expert weights to vLLM. `SerializedNvfp4WeightSource` (`weight_sync/nvfp4.py`) quantizes each exported BF16
+expert with a TE `NVFP4Quantizer` built from the forward recipe -- gate and up together, so they share one
+global scale -- and ships ModelOpt NVFP4 checkpoint tensors (`weight` uint8, `weight_scale` e4m3,
+`weight_scale_2`, `input_scale`). vLLM boots as `modelopt_fp4` with dummy weights and a per-token MoE activation
+override on the FlashInfer TRT-LLM backend; its layerwise reload only re-lays the tensors out, so the sampler's
+expert weights equal the trainer's bitwise. The TE recipe knobs come from the `NVTE_NVFP4_*` environment and the
+matching FlashInfer settings are derived from them (`nvfp4_runtime_env`), so the activation quantizers agree on
+both sides. The 4/6 E4M3 bound 256 on activations (`NVTE_NVFP4_4OVER6_E4M3_USE_256=activations|all`) derives
+`FLASHINFER_NVFP4_4OVER6_E4M3_USE_256=1`; FlashInfer's fused-MoE GEMM2 quantization follows it by itself, and
+`patches/vllm/patch_nvfp4_per_token_e4m3_256.py` (applied in every vLLM worker, logs a `[skyrl nvfp4]` line) sets
+vLLM's GEMM1 per-token base scale `NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE` to 1/(256*6). Parity test:
+`gpu_ci/test_nvfp4_per_token_4over6_256_parity.py`. Run vLLM's experts expert-parallel: under expert TP the down_proj input's per-token scale covers
+only a rank's slice. Serialized NVFP4 is incompatible with `fp8_weight_sync_mode` and the delta / sharded-RDT
+backends, and works with vLLM sleep level 2.
+Cost controls (all byte-identical on the wire): `metadata()` is shape-only (the serializer runs over the wrapped
+source's metadata with `Nvfp4ExpertSpecSerializer`, so it quantizes nothing); on NCCL non-sender ranks
+`build_trainer_engine` calls `mark_replay_only`, after which iteration only drains the Megatron export (its
+gathers are collectives) and skips quantization, since vLLM's NCCL engine discards a non-sender's stream (IPC
+non-senders still serialize: each ships its own handles); and the TE `NVFP4Quantizer` is cached per
+(settings, device) instead of rebuilt per expert.
+
+`megatron_config.expert_nvfp4_stacked_sync` (default true; set false for the per-expert path) ships each NVFP4 MoE layer as 8 tensors stacked
+over all experts, already in vLLM's ModelOpt-NVFP4 `FusedMoE` parameter layout (`weight_sync/nvfp4_stacked.py`,
+names `__skyrl_nvfp4_stacked__:<layer>.<w13|w2>_<weight|weight_scale|weight_scale_2|input_scale>`), instead of
+8 tensors per expert (~74k for Qwen3-30B-A3B). Quantization is the same per-expert TE call written into a
+preallocated stack, so the bytes are the per-expert stream's bytes. On vLLM, `SkyrlCheckpointLoadMixin` routes
+them to `nvfp4_stacked_receive.Nvfp4StackedReceiver`, which collects a layer and then runs vLLM's
+`_layerwise_process` steps itself (`process_layer_with_direct_copy`) with one `copy_` per parameter (the local
+experts' rows under EP) in place of the per-expert loader replay, so the TRT-LLM re-layout runs once per layer
+through vLLM's own `process_weights_after_loading`. `fast_path_plan` checks every precondition (ModelOpt NVFP4,
+MoE TP 1, no padded shards / redundant / fused-shared experts, exact parameter shapes, no other loadable
+tensors); otherwise the layer is unstacked and loaded per expert as before. The source declares the largest
+stacked tensor as a packed-buffer floor (`skyrl_min_packed_buffer_bytes`). `SKYRL_NVFP4_SYNC_TIMING=1` logs
+sender produce time and receiver layer-load time (logging only).
+
 ### Control plane
 
 `control_plane.SkyrlWeightSyncClient` is a **blocking** HTTP client over vLLM's native

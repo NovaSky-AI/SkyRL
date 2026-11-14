@@ -652,7 +652,8 @@ class MegatronConfig(BaseConfig):
     rollout's FP8 modules are set separately by ``generator.inference_engine.fp8_weight_sync_exclude_modules``.
     Mutually exclusive with ``te_precision_config_file``."""
     num_layers_at_start_in_bf16: int = 0
-    """Number of leading transformer layers trained in BF16 instead of FP8. Layer numbers are global, so this
+    """Number of leading transformer layers trained in BF16 instead of FP8 (or, with ``expert_nvfp4``, whose
+    routed experts stay BF16 in the trainer and on the sampler). Layer numbers are global, so this
     works under pipeline parallelism. If this conflicts with a custom ``te_precision_config_file`` which indicates
     a layer to be FP8, this config wins and the layer is kept in BF16, unless that file's config for the layer sets
     ``override_nonquantized_autocast: true`` (Megatron defaults it to false), in which case the file wins and the
@@ -697,6 +698,26 @@ class MegatronConfig(BaseConfig):
     optimizer is fully offloaded to CPU (``optimizer_cpu_offload=True`` with
     ``optimizer_offload_fraction=1.0``), whose step allocates little GPU memory.
     ``True`` / ``False`` force both empties on / off."""
+    expert_nvfp4: bool = False
+    """Run routed-expert GEMMs (``*.experts.linear_fc1/fc2``) through Transformer Engine's NVFP4 recipe and
+    sync the same NVFP4 expert weights to vLLM (ModelOpt NVFP4, per-token activations, no re-quantization on
+    the sampler). Everything else stays BF16. The recipe itself (per-token activations, 4/6 block scaling,
+    dequantized backward, no RHT / stochastic rounding / 2D blocks) is read by TE from the ``NVTE_NVFP4_*``
+    and ``NVTE_BACKWARD_OVERRIDE`` environment, forwarded to all Ray actors together with the matching
+    ``FLASHINFER_*`` sampler settings. Requires ``moe_grouped_gemm`` and SM100.
+
+    ``num_layers_at_start_in_bf16`` / ``num_layers_at_end_in_bf16`` keep the routed experts of the first / last
+    N layers in BF16, in the trainer and on the sampler (the vLLM ignore list and the weight sync follow them)."""
+    expert_nvfp4_stacked_sync: bool = True
+    """With ``expert_nvfp4``: ship each NVFP4 MoE layer's experts to vLLM as 8 tensors stacked over all experts,
+    already in vLLM's ModelOpt-NVFP4 ``FusedMoE`` parameter layout (``weight_sync/nvfp4_stacked.py``), instead of
+    8 tensors per expert. vLLM then loads each layer with one copy per parameter and one
+    ``process_weights_after_loading`` instead of buffering and replaying ~1.5k per-expert loader calls through
+    its layerwise reload (~74k for a 48-layer, 128-expert model). Same quantization, same bytes; the receiver
+    falls back to the per-expert path for any layer it cannot load directly (MoE TP > 1, redundant experts,
+    unexpected shapes). NCCL or CUDA-IPC backend only. The BF16 layers are unaffected. On by default (parity with
+    the per-expert path is bitwise, see ``tests/backends/skyrl_train/gpu/gpu_ci/test_nvfp4_stacked_sync.py``); set
+    ``false`` to use the per-expert path. Ignored without ``expert_nvfp4``."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
     Used for bridge and RoPE resolution. Not a general HF-config override -- use
@@ -775,8 +796,17 @@ class MegatronConfig(BaseConfig):
         ):
             if value is not None:
                 self.transformer_config_kwargs.setdefault(key, value)
-        if not is_fp8_enabled(self.transformer_config_kwargs.get("fp8", False)) and (
-            self.fp8_exclude_modules or self.num_layers_at_start_in_bf16 > 0 or self.num_layers_at_end_in_bf16 > 0
+        if self.expert_nvfp4 and (self.fp8_exclude_modules or self.te_precision_config_file):
+            raise ValueError(
+                "expert_nvfp4 builds its own per-module quant recipe; fp8_exclude_modules and "
+                "te_precision_config_file are not supported with it."
+            )
+        # expert_nvfp4 honours num_layers_at_{start,end}_in_bf16 through the same Megatron first/last-layer
+        # mechanism, so the layer counts are valid with FP8 or with expert_nvfp4.
+        if (
+            not is_fp8_enabled(self.transformer_config_kwargs.get("fp8", False))
+            and not self.expert_nvfp4
+            and (self.fp8_exclude_modules or self.num_layers_at_start_in_bf16 > 0 or self.num_layers_at_end_in_bf16 > 0)
         ):
             raise ValueError(
                 "FP8 disabled but one or more of these quantization config is requested: exclude modules, num start/end layers to keep at BF16. "
