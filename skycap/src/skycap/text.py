@@ -25,6 +25,9 @@ _HOP_HEADERS = {"authorization", "host", "content-length", "transfer-encoding", 
 
 
 class TextBackend:
+    # Relays the upstream's stream as it arrives, so its first byte isn't late.
+    buffers_streams = False
+
     def __init__(self, upstream_url: str, *, api_key: str | None = None) -> None:
         self.upstream_url = upstream_url.rstrip("/")
         self.api_key = api_key

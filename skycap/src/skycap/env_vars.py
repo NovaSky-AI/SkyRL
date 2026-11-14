@@ -53,3 +53,18 @@ Seconds the one-time cloudflared download may take in all.
 
 Default: 600 seconds (10 minutes).
 """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Streaming
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYCAP_STREAM_KEEPALIVE_SECONDS = float(os.environ.get("SKYCAP_STREAM_KEEPALIVE_SECONDS", 15.0))
+"""
+Seconds between the SSE comments a streamed Responses call is sent while its turn is sampled.
+
+token mode samples a whole turn before it answers, so without them a long turn sends nothing for
+minutes: a Cloudflare quick tunnel fails a response that hasn't started within ~125 s (524), and a
+client's stream idle timeout can end the call.
+
+Default: 15 seconds.
+"""

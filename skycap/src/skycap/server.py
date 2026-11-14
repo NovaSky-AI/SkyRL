@@ -55,7 +55,14 @@ import orjson
 from aiohttp import web
 
 from skycap import record
-from skycap.dialects.base import CallRequest, DialectType, RequestError, error_body
+from skycap.dialects.base import (
+    CallRequest,
+    Dialect,
+    DialectType,
+    RequestError,
+    error_body,
+)
+from skycap.env_vars import SKYCAP_STREAM_KEEPALIVE_SECONDS
 from skycap.mirror import RecordMirror
 from skycap.paths import PATH_RULE_FAILED, PathRule, Row, rule_registry
 from skycap.samples import Sample, build_samples, samples_for
@@ -63,9 +70,21 @@ from skycap.trajectory import Status, Trajectory, new_api_key, new_trajectory_id
 
 logger = logging.getLogger(__name__)
 
+#: Seconds between the comments an early-answered stream is sent while its turn samples (``skycap.env_vars``).
+KEEPALIVE_SECONDS = SKYCAP_STREAM_KEEPALIVE_SECONDS
+#: An SSE comment: bytes on the wire that every SSE client skips.
+KEEPALIVE = b": keepalive\n\n"
+#: Seconds a streamed call may take before it is answered early. A refusal returns well within it, so it keeps
+#: its HTTP status; only a call that samples is answered before its outcome.
+EARLY_AFTER_SECONDS = 1.0
+
 
 class Backend(Protocol):
     """How a call reaches a model. One per server process: text or tokens."""
+
+    #: Whether a streamed reply is sent as one body once the turn is sampled (token mode), rather than
+    #: relayed as it arrives (text mode). Only such a backend's streams can be answered early.
+    buffers_streams: bool
 
     def describe(self) -> dict[str, Any]: ...
     async def start(self) -> None: ...
@@ -457,16 +476,59 @@ class CaptureServer:
         trajectory.touch()
         try:
             raw = await request.read()
+            api = dialect.get_dialect()
             try:
-                chat = dialect.get_dialect().parse_request(orjson.loads(raw))
+                chat = api.parse_request(orjson.loads(raw))
             except (orjson.JSONDecodeError, RequestError) as error:
                 return _openai_error(str(error), 400)
+            if chat.stream and api.streams_early and self.backend.buffers_streams:
+                return await self._stream_early(trajectory, request, chat, raw, api)
             return await trajectory.replay.call(
                 request.headers, raw, lambda: self._start(trajectory, request, chat, raw)
             )
         finally:
             trajectory.inflight.discard(task)
             trajectory.touch()
+
+    async def _stream_early(
+        self, trajectory: Trajectory, request: web.Request, chat: CallRequest, raw: bytes, api: Dialect
+    ) -> web.StreamResponse:
+        """A streamed call answered before its turn is sampled: the stream's headers and a comment at once, a
+        comment every ``KEEPALIVE_SECONDS`` while the turn samples, then the reply the buffered path would send.
+
+        A token-mode turn is sampled whole before it is answered, so a long one sent nothing for minutes, and
+        whatever sat between skycap and the client gave up first: a Cloudflare quick tunnel fails a response
+        that hasn't started within ~125 s, a client's stream idle timeout ends the call. The call itself runs
+        as before, through the trajectory's replay cache, so a retry still gets its reply. A call that ends
+        within ``EARLY_AFTER_SECONDS`` (a refusal) is answered as on the buffered path, with its own status; after
+        that the status is sent before the call has an outcome, so a failure arrives in the stream
+        (``Dialect.failed_stream``).
+        """
+        reply = asyncio.ensure_future(
+            trajectory.replay.call(request.headers, raw, lambda: self._start(trajectory, request, chat, raw))
+        )
+        response = web.StreamResponse(headers={"Cache-Control": "no-cache"})
+        response.content_type = "text/event-stream"
+        try:
+            await asyncio.wait({reply}, timeout=EARLY_AFTER_SECONDS)
+            if reply.done():
+                return reply.result()
+            await response.prepare(request)
+            # Headers alone can wait in the writer's buffer; a comment puts the first byte on the wire.
+            await response.write(KEEPALIVE)
+            while not reply.done():
+                await asyncio.wait({reply}, timeout=KEEPALIVE_SECONDS)
+                if not reply.done():
+                    await response.write(KEEPALIVE)
+            await response.write(_streamed(api, chat, reply))
+            await response.write_eof()
+        except ConnectionResetError:
+            # The client left. The call runs on in its own task and leaves its reply for a retry.
+            logger.info("trajectory %s: the client left a streamed call before its reply", trajectory.id)
+        finally:
+            # Only this request's wait on the call: the call is shielded from it, as on the buffered path.
+            reply.cancel()
+        return response
 
     def _authorized(self, trajectory: Trajectory, request: web.Request, dialect: DialectType) -> bool:
         """Whether the call carries this trajectory's key where ``dialect``'s clients send one, or no key
@@ -491,6 +553,24 @@ class CaptureServer:
         trajectory.inflight.add(work)
         work.add_done_callback(trajectory.inflight.discard)  # type: ignore[arg-type]
         return work
+
+
+def _streamed(api: Dialect, chat: CallRequest, reply: asyncio.Future[web.StreamResponse]) -> bytes:
+    """The rest of an early-answered stream: the reply's own events, or its failure as stream events."""
+    try:
+        out = reply.result()
+    except Exception as error:  # noqa: BLE001 - after a 200 the stream is the only place left to say so
+        logger.exception("a streamed call failed after its stream was answered")
+        return api.failed_stream(chat, f"skycap: {error}", code="server_error")
+    body = out.body if isinstance(out, web.Response) else None
+    if out.status == 200 and out.content_type == "text/event-stream" and isinstance(body, bytes):
+        return body
+    try:
+        error = orjson.loads(body or b"")["error"]
+        message, code = str(error["message"]), error.get("code") or error.get("type")
+    except (orjson.JSONDecodeError, KeyError, TypeError):
+        message, code = f"HTTP {out.status}", None
+    return api.failed_stream(chat, message, code=code)
 
 
 def _unauthorized() -> web.Response:
