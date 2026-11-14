@@ -981,8 +981,12 @@ def test_speculative_config_none_passes():
     validate_inference_engine_cfg(cfg)
 
 
-def test_speculative_config_mtp_passes():
+def test_speculative_config_mtp_passes(tmp_path):
+    from transformers import Qwen2Config
+
+    Qwen2Config().save_pretrained(tmp_path)
     cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.model.path = str(tmp_path)
     cfg.generator.inference_engine.speculative_config = {"method": "mtp", "num_speculative_tokens": 1}
     validate_inference_engine_cfg(cfg)
 
