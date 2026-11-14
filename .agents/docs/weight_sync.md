@@ -33,6 +33,8 @@ skyrl/backends/skyrl_train/weight_sync/
 │   └── payload.py              # zstd compress/decompress + uint8 tensor <-> bytes helpers
 └── sharded_rdt/            # the sharded_rdt (NIXL pull) backend; __init__ is import-free
     ├── rdt_send.py             # its WeightSources + build_rdt_trainer_init_info
+    ├── rdt_fp8.py              # SerializedMxfp8GroupedSource (the MXFP8 wire over sharded_rdt)
+    ├── rdt_nvfp4.py            # SerializedNvfp4GroupedSource (expert_nvfp4 over sharded_rdt)
     ├── sharded_rdt_base.py     # GroupedWeightSource + layerwise_groups (the two RDT-only channels)
     ├── rdt_libfabric_shim.py   # LIBFABRIC provider shim for NIXL
     ├── sharded_rdt_trainer.py  # vendored: trainer engine + the _RDTProducerServer sidecar
@@ -169,8 +171,13 @@ other. See `fp8/models/README.md`.
 
 The receiver reload proxy recognizes the compact batched
 MoE FP8 tensors before forwarding ordinary weights to `model.load_weights`; this keeps
-the compact expert representation intact for both NCCL and IPC reloads. FP8 serialization
-is incompatible with the delta and sharded-RDT transfer backends.
+the compact expert representation intact for both NCCL and IPC reloads.
+
+`fp8/vllm_format.FP8_WIRE_BACKENDS` lists the backends that carry each wire. Blockwise is
+NCCL/IPC only. MXFP8 also runs over `sharded_rdt`: `SerializedMxfp8GroupedSource`
+(`sharded_rdt/rdt_fp8.py`) wraps the RDT grouped source and emits the same tensors as the
+NCCL MXFP8 wire, keeping its ownership and groups. Stacked MoE expert tensors (Qwen3.5)
+are not supported there. `delta` carries no FP8 wire.
 
 For Qwen3.5-35B-A3B on Hopper, use rollout TP=4. vLLM block-FP8 requires compatible
 128-wide partition shapes; TP=8 is rejected by vLLM for this model's incompatible
@@ -180,6 +187,48 @@ checkpoint-format policy: shared-expert linears remain FP8, and only the existin
 checkpoint-format vision-block exclusions remain BF16. The path does not silently
 change that policy for a topology or add a VLM-specific merger fallback; a configuration
 that vLLM cannot instantiate fails at startup.
+
+### Serialized NVFP4 expert sync (`expert_nvfp4`)
+
+`trainer.policy.megatron_config.expert_nvfp4=true` trains the routed experts on vLLM's NVFP4 grid
+(`workers/megatron/quantization/expert_nvfp4.py`: a hook on TE's grouped GEMM rounds the registered routed-expert
+weights in fprop and dgrad; `expert_nvfp4_mode: w4a16`, the default, rounds only the weights, `w4a4` the per-token
+expert inputs too, with NVFP4 tensor-core fprops; `num_layers_at_{start,end}_in_bf16`, the same knobs as FP8, keep
+the first / last N layers' experts BF16 on both sides) and syncs the same expert weights to vLLM.
+`SerializedNvfp4WeightSource` (`weight_sync/nvfp4.py`) quantizes each exported BF16 expert with the trainer's own
+quantizer (`kernels/nvfp4_quant.quantize_experts`: FlashInfer `fp4_quantize` with vLLM's per-expert global scale and
+`expert_nvfp4_block_scale`, `absmax` or `four_over_six`) -- gate and up together, so they share one global scale --
+and ships ModelOpt NVFP4 checkpoint tensors (`weight` uint8, `weight_scale` e4m3, `weight_scale_2`, `input_scale`).
+vLLM boots as `modelopt_fp4` with dummy weights and a per-token MoE activation override on the FlashInfer TRT-LLM
+backend; its layerwise reload only re-lays the tensors out, so the sampler's expert weights are the bytes the
+trainer rounds to. The engines' activation quantizer reads FlashInfer's NVFP4 env, which
+`prepare_runtime_environment` derives from `expert_nvfp4_block_scale` with every key explicit
+(`kernels/nvfp4_quant.flashinfer_nvfp4_env`: 4/6 MSE on FlashInfer's fast error path, E4M3 bound 448). Run vLLM's
+experts expert-parallel: under expert TP the down_proj input's per-token scale covers only a rank's slice (`w4a4`
+rejects that layout). Serialized NVFP4 is incompatible with `fp8_weight_sync_mode` and the delta backend, and
+works with vLLM sleep level 2. Over `sharded_rdt`, `SerializedNvfp4GroupedSource` (`sharded_rdt/rdt_nvfp4.py`)
+wraps the RDT grouped source with the same serializer, so the bytes match; experts go out per expert there
+(the stacked layout is push-only), and an expert's gate and up must share a gather group and an owner. It requires SM100/SM103, full-parameter training, expert TP 1,
+and per-expert HF checkpoint names (Qwen3-MoE style); fused-expert checkpoints, LoRA and MTP are unsupported.
+Cost controls (all byte-identical on the wire): `metadata()` is shape-only (the serializer runs over the wrapped
+source's metadata with `Nvfp4ExpertSpecSerializer`, so it quantizes nothing); on NCCL non-sender ranks
+`build_trainer_engine` calls `mark_replay_only`, after which iteration only drains the Megatron export (its
+gathers are collectives) and skips quantization, since vLLM's NCCL engine discards a non-sender's stream (IPC
+non-senders still serialize: each ships its own handles).
+
+`megatron_config.expert_nvfp4_stacked_sync` (default true; set false for the per-expert path) ships each NVFP4 MoE layer as 8 tensors stacked
+over all experts, already in vLLM's ModelOpt-NVFP4 `FusedMoE` parameter layout (`weight_sync/nvfp4_stacked.py`,
+names `__skyrl_nvfp4_stacked__:<layer>.<w13|w2>_<weight|weight_scale|weight_scale_2|input_scale>`), instead of
+8 tensors per expert (~74k for Qwen3-30B-A3B). Quantization is the same per-expert call written into a
+preallocated stack, so the bytes are the per-expert stream's bytes. On vLLM, `SkyrlCheckpointLoadMixin` routes
+them to `nvfp4_stacked_receive.Nvfp4StackedReceiver`, which collects a layer and then runs vLLM's
+`_layerwise_process` steps itself (`process_layer_with_direct_copy`) with one `copy_` per parameter (the local
+experts' rows under EP) in place of the per-expert loader replay, so the TRT-LLM re-layout runs once per layer
+through vLLM's own `process_weights_after_loading`. `fast_path_plan` checks every precondition (ModelOpt NVFP4,
+MoE TP 1, no padded shards / redundant / fused-shared experts, exact parameter shapes, no other loadable
+tensors); otherwise the layer is unstacked and loaded per expert as before. The source declares the largest
+stacked tensor as a packed-buffer floor (`skyrl_min_packed_buffer_bytes`). `SKYRL_NVFP4_SYNC_TIMING=1` logs
+sender produce time and receiver layer-load time (logging only).
 
 ### Control plane
 
@@ -460,7 +509,9 @@ Knobs are `SKYRL_RDT_*` env vars, forwarded to every Ray worker by
 `prepare_runtime_environment`: `SKYRL_RDT_LOOKAHEAD` (gather credit depth, default 1),
 `SKYRL_RDT_NUM_BUFFERS` (ring depth K, default 2), `SKYRL_RDT_STACKED_EXPERTS`,
 `SKYRL_RDT_EXPORT_RING`, `SKYRL_RDT_GC_FREEZE`, `SKYRL_RDT_SHARE_SLOTS`,
-`SKYRL_RDT_STALL_TIMEOUT_S`, `SKYRL_RDT_BUFFER_PRESIZE_GB`, and
+`SKYRL_RDT_STALL_TIMEOUT_S`, `SKYRL_RDT_BUFFER_PRESIZE_GB`,
+`SKYRL_RDT_MAX_PULL_GB` (largest packed pull, default 1, must be below 2: NIXL reads of
+2-4 GiB hang), and
 `SKYRL_RDT_VERIFY_STACKED=1` (a one-off numeric check of the stacked source's
 expert tensors against the bridge's per-expert export, on the first iteration).
 The

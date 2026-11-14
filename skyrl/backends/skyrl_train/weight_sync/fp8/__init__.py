@@ -22,10 +22,12 @@ from skyrl.backends.skyrl_train.weight_sync.fp8.quantize import (
 from skyrl.backends.skyrl_train.weight_sync.fp8.vllm_format import (
     AUTO_FP8,
     BLOCKWISE_FP8,
+    FP8_WIRE_BACKENDS,
     MXFP8,
     SKYRL_BATCHED_MOE_FP8_PREFIX,
     WIRE_FORMATS,
     SerializedFp8Config,
+    check_fp8_wire_backend,
     get_serialized_fp8_quantization_config,
     iter_batched_moe_expert_fp8_tensors,
     iter_serialized_fp8_tensors,
@@ -36,6 +38,7 @@ from skyrl.backends.skyrl_train.weight_sync.fp8.vllm_format import (
 __all__ = [
     "AUTO_FP8",
     "BLOCKWISE_FP8",
+    "FP8_WIRE_BACKENDS",
     "MXFP8",
     "MXFP8_GROUP_SIZE",
     "WIRE_FORMATS",
@@ -47,6 +50,7 @@ __all__ = [
     "batched_moe_wire_targets",
     "batched_mx_cast_to_fp8",
     "blockwise_cast_to_fp8",
+    "check_fp8_wire_backend",
     "engine_exclude_list",
     "mx_cast_to_fp8",
     "get_serialized_fp8_quantization_config",

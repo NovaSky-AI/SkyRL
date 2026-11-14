@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.weight_sync.control_plane import (  # noqa: E402
 from skyrl.backends.skyrl_train.weight_sync.weight_senders import (  # noqa: E402
     _build_sender_init_info,
     _packed_buffer_size_bytes,
+    mark_replay_only,
     maybe_set_reset_prefix_cache,
     teardown_engine,
 )
@@ -351,12 +352,18 @@ class TestBuildTrainerEngineResolvesTheBackend:
         seen = self._build(monkeypatch, "nccl", False)
         assert seen["source"] is not None
 
-    @pytest.mark.parametrize("backend", ["delta", "sharded_rdt"])
-    def test_serialized_fp8_rejects_backends_without_native_push_support(self, monkeypatch, backend):
-        """FP8 wire tensors and scales require vLLM's NCCL or IPC trainer engine."""
+    @pytest.mark.parametrize(
+        "backend, wire", [("delta", "blockwise"), ("sharded_rdt", "blockwise"), ("delta", "mxfp8")]
+    )
+    def test_serialized_fp8_rejects_backends_that_cannot_carry_the_wire(self, monkeypatch, backend, wire):
+        """delta has no scale tensors; sharded_rdt carries only the MXFP8 wire."""
 
-        with pytest.raises(ValueError, match="Serialized FP8 weight sync requires"):
-            self._build(monkeypatch, backend, False, fp8_weight_sync_mode="blockwise")
+        with pytest.raises(ValueError, match="is not supported with weight sync backend"):
+            self._build(monkeypatch, backend, False, fp8_weight_sync_mode=wire)
+
+    def test_sharded_rdt_builds_with_the_mxfp8_wire(self, monkeypatch):
+        seen = self._build(monkeypatch, "sharded_rdt", False, fp8_weight_sync_mode="mxfp8")
+        assert seen["factory_args"][1] == "sharded_rdt"
 
 
 class _Bare:
@@ -446,6 +453,41 @@ class TestTeardown:
 
     def test_none_is_a_no_op(self):
         teardown_engine(None)
+
+
+class _ReplayableSource:
+    def __init__(self):
+        self.replay_only = False
+
+    def set_replay_only(self):
+        self.replay_only = True
+
+
+@pytest.mark.parametrize(
+    "backend, is_sender, expected",
+    [
+        ("nccl", False, True),  # vLLM's NCCL engine drains a non-sender's stream and discards it
+        ("nccl", True, False),  # the sender's stream is what goes on the wire
+        ("ipc", False, False),  # every IPC rank ships its own handles
+        ("delta", False, False),
+        ("sharded_rdt", False, False),
+    ],
+)
+def test_mark_replay_only_only_on_nccl_non_senders(backend, is_sender, expected):
+    source = _ReplayableSource()
+    assert mark_replay_only(source, backend=backend, is_sender=is_sender) is expected
+    assert source.replay_only is expected
+
+
+def test_mark_replay_only_ignores_sources_without_the_hook():
+    assert mark_replay_only(object(), backend="nccl", is_sender=False) is False
+
+
+def test_packed_buffer_floor_honours_the_source_minimum():
+    torch_dtype = torch.bfloat16
+    base = _packed_buffer_size_bytes(None, 1.0, torch_dtype)
+    assert _packed_buffer_size_bytes(None, 1.0, torch_dtype, min_bytes=base + 7) == base + 7
+    assert _packed_buffer_size_bytes(None, 1.0, torch_dtype, min_bytes=1) == base
 
 
 @pytest.mark.parametrize("backend", ["nccl", "ipc"])

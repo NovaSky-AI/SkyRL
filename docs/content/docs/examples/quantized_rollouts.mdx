@@ -31,6 +31,26 @@ generator.inference_engine.engine_init_kwargs.quantization=fp8
 
 This uses vLLM's [online dynamic FP8 quantization](https://docs.vllm.ai/en/latest/features/quantization/fp8.html), so no calibration data or pre-quantized checkpoint is required.
 
+### Expert NVFP4: training on the rollouts' grid
+
+On Blackwell, the Megatron trainer can compute its routed MoE experts on the same NVFP4 grid vLLM serves, and sync the NVFP4 expert weights to vLLM as-is:
+
+```bash
+trainer.policy.megatron_config.expert_nvfp4=true
+# what the trainer rounds: w4a16 (default, weights only) or w4a4
+trainer.policy.megatron_config.expert_nvfp4_mode=w4a16
+# block scales of weights and activations: four_over_six (default) or absmax
+trainer.policy.megatron_config.expert_nvfp4_block_scale=four_over_six
+```
+
+vLLM boots as a ModelOpt NVFP4 expert-only engine with per-token NVFP4 activations on the FlashInfer TRT-LLM MoE backend (W4A4) and loads the trainer-quantized expert weights over NCCL or CUDA IPC without re-quantizing them. `num_layers_at_{start,end}_in_bf16` keep the first / last layers' experts in BF16 on both sides.
+
+With `w4a16`, each routed-expert fprop and dgrad GEMM uses the weight rounded to NVFP4 and decoded back to BF16 with the rollouts' own quantizer: FlashInfer's `fp4_quantize` with vLLM's per-expert global scale and `expert_nvfp4_block_scale`. `four_over_six` picks amax/6 or amax/4 for each 16-element block, whichever has the lower squared error; `absmax` is vLLM's own quantizer. One FlashInfer call quantizes all experts of a grouped GEMM. The rollouts stay W4A4: `w4a16` names what the trainer rounds, and it gave the best rollout-trainer logprob match in our runs. Training stays in BF16: wgrad is straight-through and the optimizer updates the unrounded weights. Shared experts and dense layers are not rounded, as in vLLM.
+
+`w4a4` also rounds the inputs of both expert GEMMs as the W4A4 rollouts quantize them, with one scale per token and FlashInfer's own per-token quantizer; dgrad passes through the rounding unchanged and wgrad reads the rounded input. The expert fprops run on NVFP4 tensor cores (FlashInfer's CuTe DSL grouped GEMM). It works on any token dispatcher, and needs expert parallelism on the engines (`generator.inference_engine.expert_parallel_size`) so that vLLM quantizes whole fc2-input rows as the trainer does.
+
+The trainer needs whole experts per rank (`expert_tensor_parallel_size: 1`), `moe_grouped_gemm` and the NCCL or CUDA-IPC weight sync. LoRA, MTP and `fake_int4_qat` are not supported. See `examples/train/megatron/run_megatron_dapo_qwen3_30b_a3b_nvfp4.sh`.
+
 ## Enabling off-policy correction (TIS)
 
 To apply TIS, we need the inference engine to return the rollout logprobs for the generated tokens, and we configure the correction on the policy loss:

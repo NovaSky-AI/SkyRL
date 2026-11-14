@@ -652,7 +652,8 @@ class MegatronConfig(BaseConfig):
     rollout's FP8 modules are set separately by ``generator.inference_engine.fp8_weight_sync_exclude_modules``.
     Mutually exclusive with ``te_precision_config_file``."""
     num_layers_at_start_in_bf16: int = 0
-    """Number of leading transformer layers trained in BF16 instead of FP8. Layer numbers are global, so this
+    """Number of leading transformer layers trained in BF16 instead of FP8 (or, with ``expert_nvfp4``, whose
+    routed experts stay BF16 in the trainer and on the sampler). Layer numbers are global, so this
     works under pipeline parallelism. If this conflicts with a custom ``te_precision_config_file`` which indicates
     a layer to be FP8, this config wins and the layer is kept in BF16, unless that file's config for the layer sets
     ``override_nonquantized_autocast: true`` (Megatron defaults it to false), in which case the file wins and the
@@ -697,6 +698,48 @@ class MegatronConfig(BaseConfig):
     optimizer is fully offloaded to CPU (``optimizer_cpu_offload=True`` with
     ``optimizer_offload_fraction=1.0``), whose step allocates little GPU memory.
     ``True`` / ``False`` force both empties on / off."""
+    expert_nvfp4: bool = False
+    """Routed-expert NVFP4 training: the trainer's routed experts (``*.experts.linear_fc1/fc2``) compute on the
+    NVFP4 grid vLLM serves, and the same NVFP4 expert weights are synced to vLLM (ModelOpt NVFP4, per-token
+    activations on FlashInfer TRT-LLM, no re-quantization on the sampler), so the trainer's logprobs follow the
+    rollouts'. Everything else stays BF16, and so do the optimizer's master weights (straight-through).
+    ``expert_nvfp4_mode`` picks what the trainer rounds; ``expert_nvfp4_block_scale`` the block scales of both
+    sides. Requires ``moe_grouped_gemm``, expert TP 1 (``expert_tensor_parallel_size: 1``; set it explicitly with
+    ``tensor_model_parallel_size > 1``, Megatron defaults it to the TP size), the nccl, ipc or sharded_rdt weight
+    sync and SM100. The ref model mirrors the policy's setting.
+
+    ``num_layers_at_start_in_bf16`` / ``num_layers_at_end_in_bf16`` keep the routed experts of the first / last
+    N layers in BF16, in the trainer and on the sampler (the vLLM ignore list and the weight sync follow them)."""
+    expert_nvfp4_mode: Literal["w4a16", "w4a4"] = "w4a16"
+    """What the trainer rounds with ``expert_nvfp4`` (the rollouts are W4A4 either way).
+
+    ``w4a16`` (the default): only the routed-expert weights, in fprop and dgrad. It gave the best rollout-trainer
+    logprob match in GLM-5.3 and Qwen3-30B-A3B RL: trainer and rollout hidden states differ at depth (attention /
+    KV-cache numerics), so the two sides' 4-bit activation codes decorrelate while the identical weight rounding
+    cancels. Runs at about bf16 speed and memory, on any dispatcher.
+
+    ``w4a4``: also the per-token NVFP4 inputs of both expert GEMMs, as vLLM's W4A4 MoE quantizes them (wgrad reads
+    the rounded inputs), with the fprops on NVFP4 tensor cores (FlashInfer's CuTe DSL grouped GEMM). Needs whole
+    fc2-input rows on the engines (expert parallelism, or a single unsharded engine), and rejects ``moe_act``
+    recompute and ``expert_fc1`` / ``moe_act`` activation offloading.
+
+    Either way dgrad and wgrad run in BF16 on the rounded operands and the optimizer updates the unrounded weights."""
+    expert_nvfp4_block_scale: Literal["absmax", "four_over_six"] = "four_over_six"
+    """With ``expert_nvfp4``: the E4M3 block scales of the routed experts' NVFP4 weights and per-token activations.
+    ``four_over_six`` (humans&' recipe) picks amax/6 or amax/4 per 16-block, whichever has the lower squared error
+    (FlashInfer's 4over6 with its fast MSE error path, E4M3 bound 448); ``absmax`` (amax/6) is vLLM's own
+    quantizer. The weight sync quantizes the experts with it (FlashInfer ``fp4_quantize`` with vLLM's per-expert
+    global scale), and the vLLM engines' FlashInfer activation quantizer is configured from it."""
+    expert_nvfp4_stacked_sync: bool = True
+    """With ``expert_nvfp4``: ship each NVFP4 MoE layer's experts to vLLM as 8 tensors stacked over all experts,
+    already in vLLM's ModelOpt-NVFP4 ``FusedMoE`` parameter layout (``weight_sync/nvfp4_stacked.py``), instead of
+    8 tensors per expert. vLLM then loads each layer with one copy per parameter and one
+    ``process_weights_after_loading`` instead of buffering and replaying ~1.5k per-expert loader calls through
+    its layerwise reload (~74k for a 48-layer, 128-expert model). Same quantization, same bytes; the receiver
+    falls back to the per-expert path for any layer it cannot load directly (MoE TP > 1, redundant experts,
+    unexpected shapes). NCCL or CUDA-IPC backend only; ``sharded_rdt`` always sends per-expert tensors. The BF16 layers are unaffected. On by default (parity with
+    the per-expert path is bitwise, see ``tests/backends/skyrl_train/gpu/gpu_ci/test_nvfp4_stacked_sync.py``); set
+    ``false`` to use the per-expert path. Ignored without ``expert_nvfp4``."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
     Used for bridge and RoPE resolution. Not a general HF-config override -- use
@@ -775,8 +818,17 @@ class MegatronConfig(BaseConfig):
         ):
             if value is not None:
                 self.transformer_config_kwargs.setdefault(key, value)
-        if not is_fp8_enabled(self.transformer_config_kwargs.get("fp8", False)) and (
-            self.fp8_exclude_modules or self.num_layers_at_start_in_bf16 > 0 or self.num_layers_at_end_in_bf16 > 0
+        if self.expert_nvfp4 and (self.fp8_exclude_modules or self.te_precision_config_file):
+            raise ValueError(
+                "expert_nvfp4 needs BF16 routed-expert compute; fp8_exclude_modules and "
+                "te_precision_config_file are not supported with it."
+            )
+        # expert_nvfp4 reads num_layers_at_{start,end}_in_bf16 from the same Megatron first/last-layer kwargs, so the
+        # layer counts are valid with FP8 or with expert_nvfp4.
+        if (
+            not is_fp8_enabled(self.transformer_config_kwargs.get("fp8", False))
+            and not self.expert_nvfp4
+            and (self.fp8_exclude_modules or self.num_layers_at_start_in_bf16 > 0 or self.num_layers_at_end_in_bf16 > 0)
         ):
             raise ValueError(
                 "FP8 disabled but one or more of these quantization config is requested: exclude modules, num start/end layers to keep at BF16. "
@@ -1411,6 +1463,8 @@ class InferenceEngineConfig(BaseConfig):
     ``"auto"`` selects the format matching the policy's resolved ``fp8_recipe`` -- so trainer and
     rollout quantize identically. It follows the *recipe*, not the architecture: an explicit
     ``fp8_recipe="blockwise"`` on Blackwell keeps a blockwise wire.
+
+    ``"blockwise"`` runs over the ``nccl``/``ipc`` backends; ``"mxfp8"`` also over ``sharded_rdt``.
 
     Requires ``trainer.strategy="megatron"`` and a model with a registered FP8 spec (see
     ``skyrl/backends/skyrl_train/weight_sync/fp8/models/README.md``). The vLLM engine settings
@@ -2241,7 +2295,9 @@ class SkyRLTrainConfig(BaseConfig):
             from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
             from skyrl.backends.skyrl_train.weight_sync.fp8 import (
                 AUTO_FP8,
+                FP8_WIRE_BACKENDS,
                 WIRE_FORMATS,
+                check_fp8_wire_backend,
             )
 
             # "auto" is still unresolved here -- validate_megatron_cfg turns it
@@ -2257,10 +2313,11 @@ class SkyRLTrainConfig(BaseConfig):
             if self.trainer.strategy != "megatron":
                 raise ValueError("Serialized FP8 weight sync currently requires trainer.strategy='megatron'.")
             backend = get_transfer_strategy(ie_cfg.weight_sync_backend, self.trainer.placement.colocate_all)
-            if backend not in {"nccl", "ipc"}:
-                raise ValueError(
-                    "Serialized FP8 weight sync requires the NCCL or CUDA-IPC push backend, " f"got {backend!r}."
-                )
+            if ie_cfg.fp8_weight_sync_mode != AUTO_FP8:
+                check_fp8_wire_backend(ie_cfg.fp8_weight_sync_mode, backend)
+            elif not any(backend in backends for backends in FP8_WIRE_BACKENDS.values()):
+                # The resolved wire is checked again once "auto" is resolved.
+                raise ValueError(f"FP8 weight sync is not supported with weight sync backend {backend!r}.")
         if _uses_lora_weight_sync(self) and ie_cfg.enforce_eager and ie_cfg.backend == "vllm":
             import warnings
 

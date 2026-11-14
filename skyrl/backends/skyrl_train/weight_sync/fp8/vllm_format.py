@@ -143,6 +143,26 @@ def resolve_serialized_fp8_config(
     )
 
 
+# Transfer backends that can carry each wire. sharded_rdt carries MXFP8 via
+# ``sharded_rdt/rdt_fp8.py``; delta's checkpoint format has no scale tensors.
+FP8_WIRE_BACKENDS = {
+    BLOCKWISE_FP8: frozenset({"nccl", "ipc"}),
+    MXFP8: frozenset({"nccl", "ipc", "sharded_rdt"}),
+}
+
+
+def check_fp8_wire_backend(wire_format: str, backend: str) -> None:
+    """Raise unless ``backend`` can carry the ``wire_format`` wire."""
+    allowed = FP8_WIRE_BACKENDS.get(wire_format)
+    if allowed is None:
+        raise ValueError(f"Unsupported fp8_weight_sync_mode={wire_format!r}. Supported values: {WIRE_FORMATS!r}.")
+    if backend not in allowed:
+        raise ValueError(
+            f"fp8_weight_sync_mode={wire_format!r} is not supported with weight sync backend {backend!r}; "
+            f"supported backends: {sorted(allowed)}."
+        )
+
+
 def _mxfp8_group_args(dynamic: bool) -> dict:
     """One compressed-tensors group descriptor for MXFP8.
 

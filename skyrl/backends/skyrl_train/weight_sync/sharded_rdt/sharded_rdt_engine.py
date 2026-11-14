@@ -668,18 +668,27 @@ class SkyRLShardedRDTWeightTransferEngine(
             initialize_layerwise_reload,
         )
 
+        from skyrl.backends.skyrl_train.weight_sync.weight_receivers import (
+            skyrl_before_weight_update,
+        )
+
+        skyrl_before_weight_update()
         with torch.device(self.device):
             initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
         """Drain the deferred pull/process pipeline (so every layer is fully
-        loaded) before finalizing the layerwise reload."""
+        loaded) before finalizing the layerwise reload. Runs the same
+        serialized-FP8 hooks as the NCCL/IPC engines."""
         from vllm.model_executor.model_loader.reload import (
             finalize_layerwise_reload,
         )
 
         from skyrl.backends.skyrl_train.patches.vllm.patch_moe_kernel_constants import (
             restore_moe_kernel_constants,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.weight_receivers import (
+            skyrl_after_weight_update,
         )
 
         self.drain_pending()
@@ -688,6 +697,7 @@ class SkyRLShardedRDTWeightTransferEngine(
             # A sleep for the sync (offload_kv_for_weight_sync) zeroes MoE kernel
             # constants that no reload rebuilds.
             restore_moe_kernel_constants(self.model)
+        skyrl_after_weight_update()
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """Receive one update. Unlike the base, does NOT issue a per-update
@@ -1183,7 +1193,7 @@ class SkyRLShardedRDTWeightTransferEngine(
                 pre_free.append(gi)
                 continue
             for _ci, scatters in self._chunk_module_scatters(modules):
-                raw_chunks.append(scatters)
+                raw_chunks.extend(split_scatters_by_bytes(scatters, _max_pull_bytes()))
             free_at.setdefault(len(raw_chunks) - 1, []).append(gi)
         if unbaked:
             # A live name with no baked plan cannot be loaded: there is no
@@ -1554,6 +1564,48 @@ def _plan_digest(keys_per_chunk: list) -> str:
         h.update(repr(keys).encode())
         h.update(b"\n")
     return h.hexdigest()[:32]
+
+
+# Largest packed pull (one NIXL read). Ray RDT reads over NIXL LIBFABRIC whose length mod 4 GiB is
+# >= 2 GiB never complete, so chunks are cut below 2 GiB. A module may already span chunks.
+DEFAULT_MAX_PULL_GB = 1.0
+
+
+def _max_pull_bytes() -> int:
+    """``SKYRL_RDT_MAX_PULL_GB`` in bytes; must stay below 2 GiB."""
+    import os
+
+    raw = os.environ.get("SKYRL_RDT_MAX_PULL_GB")
+    gb = DEFAULT_MAX_PULL_GB if not raw else float(raw)
+    nbytes = int(gb * (1 << 30))
+    if not 0 < nbytes < (1 << 31):
+        raise ValueError(f"SKYRL_RDT_MAX_PULL_GB={raw!r} must be in (0, 2): larger NIXL reads can hang")
+    return nbytes
+
+
+def split_scatters_by_bytes(scatters: "list[_Scatter]", max_bytes: int) -> "list[list[_Scatter]]":
+    """Cut one chunk's scatters, in order, into runs of at most ``max_bytes`` packed bytes
+    (16-byte alignment included). A scatter larger than the cap gets a run of its own; one whose
+    size falls in a hanging range (length mod 4 GiB >= 2 GiB) raises."""
+    runs: "list[list[_Scatter]]" = []
+    cur: "list[_Scatter]" = []
+    size = 0
+    for sc in scatters:
+        if sc.nbytes % (4 << 30) >= (2 << 30):
+            raise ValueError(
+                f"a single sharded_rdt scatter of {sc.nbytes} bytes would be one NIXL read in the 2-4 GiB range, "
+                "which hangs; use a larger tensor-parallel size for the inference engines"
+            )
+        need = ((size + 15) & ~15) + sc.nbytes
+        if cur and need > max_bytes:
+            runs.append(cur)
+            cur = []
+            need = sc.nbytes
+        cur.append(sc)
+        size = need
+    if cur:
+        runs.append(cur)
+    return runs
 
 
 def _dtype_from_name(name: str) -> torch.dtype:

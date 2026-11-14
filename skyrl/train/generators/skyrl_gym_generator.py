@@ -973,6 +973,11 @@ class SkyRLGymGenerator(GeneratorInterface):
             assert trajectory_ids is not None, "`trajectory_ids` is a required field for step wise training"
         sampling_params: Optional[dict] = input_batch.get("sampling_params", None)
         max_tokens = self.generator_cfg.sampling_params.max_generate_length
+        # Per-request sampling params (e.g. eval's `eval_sampling_params`) carry their own generation budget; without
+        # this, eval responses longer than the TRAIN max_generate_length are cut in the stored ids/length metrics
+        # (the reward is still computed on the full engine output).
+        if sampling_params is not None and sampling_params.get("max_tokens") is not None:
+            max_tokens = sampling_params["max_tokens"]
         max_input_length = self.generator_cfg.max_input_length
 
         # Prefix-cache salt derived from the engine weight version. Captured once per `generate` call so
