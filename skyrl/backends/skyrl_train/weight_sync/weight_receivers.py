@@ -325,6 +325,31 @@ def _build_skyrl_ipc_engine() -> type:
     class SkyrlIPCWeightTransferEngine(SkyrlReceiveLifecycleMixin, IPCWeightTransferEngine):
         """vLLM's CUDA IPC receive engine plus SkyRL receive targets."""
 
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            from skyrl.backends.skyrl_train.weight_sync.colocated.slot_ring import (
+                MultiSlotImporter,
+            )
+
+            super().__init__(*args, **kwargs)
+            # One mapping per IPC slot of a transfer, released together at finish:
+            # the colocated send may ring over several packed buffers, and vLLM's
+            # one-slot importer would rebuild/release on every chunk (see
+            # MultiSlotImporter). Identical to vLLM's with a single slot.
+            self._packed_importer = MultiSlotImporter()
+            self.skyrl_receive_stats = {"chunks": 0, "bytes": 0, "tensors": 0}
+
+        def receive_weights(self, update_info: Any) -> None:
+            sizes = getattr(update_info, "tensor_sizes", None) or []
+            stats = self.skyrl_receive_stats
+            stats["chunks"] += 1
+            stats["bytes"] += int(sum(sizes))
+            stats["tensors"] += len(getattr(update_info, "names", None) or [])
+            super().receive_weights(update_info)
+
+        def start_weight_update(self) -> None:
+            self.skyrl_receive_stats = {"chunks": 0, "bytes": 0, "tensors": 0}
+            super().start_weight_update()
+
         def skyrl_release_receive_buffers(self) -> None:
             # The importer holds this worker's mapping of the trainer's packed
             # IPC buffer. Closing it once per export releases the producer-side
