@@ -7,6 +7,7 @@ set -ex
 # export DAYTONA_API_KEY=YOUR_KEY_HERE
 # export MODAL_TOKEN_ID=YOUR_KEY_HERE
 # export MODAL_TOKEN_SECRET=YOUR_KEY_HERE
+# export RUNTA_TOKEN=YOUR_KEY_HERE
 
 #-----------------------
 # Dataset setup

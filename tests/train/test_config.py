@@ -186,6 +186,30 @@ def test_runtime_env_forwards_te_block_scale_mode(monkeypatch):
     assert env_vars["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] == "1"
 
 
+SANDBOX_CREDENTIAL_VARS = ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "RUNTA_TOKEN", "RUNTA_ENDPOINT"]
+
+
+@pytest.mark.parametrize("var_name", SANDBOX_CREDENTIAL_VARS)
+def test_runtime_env_forwards_sandbox_credentials(monkeypatch, var_name):
+    # Harbor trials run on Ray workers, which only see what the runtime env carries.
+    monkeypatch.setenv(var_name, "from-launch-shell")
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+
+    env_vars = prepare_runtime_environment(example_dummy_config())
+
+    assert env_vars[var_name] == "from-launch-shell"
+
+
+def test_runtime_env_skips_unset_sandbox_credentials(monkeypatch):
+    for var_name in SANDBOX_CREDENTIAL_VARS:
+        monkeypatch.delenv(var_name, raising=False)
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+
+    env_vars = prepare_runtime_environment(example_dummy_config())
+
+    assert not set(SANDBOX_CREDENTIAL_VARS) & set(env_vars)
+
+
 def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
     monkeypatch.delenv("NVTE_FP8_BLOCK_AMAX_EPSILON", raising=False)

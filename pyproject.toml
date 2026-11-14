@@ -246,7 +246,7 @@ miniswe = [
     "litellm",
 ]
 harbor = [
-    "harbor[daytona,modal]==0.14.0",
+    "harbor[daytona,modal,runta]==0.24.0",
 ]
 # skycap, capturing each rollout's exact tokens in token mode (examples/train_integrations/harbor_skycap).
 skycap = [

@@ -2,7 +2,7 @@
 title: "Harbor Integration"
 ---
 
-[Harbor](https://github.com/laude-institute/harbor) is an agent evaluation framework that runs AI agents against tasks in containerized sandbox environments. Each task provides an instruction, a sandbox (Docker/Daytona/Modal), and a verification script that produces a reward. Harbor handles the full lifecycle: spinning up the sandbox, running the agent, verifying the result, and tearing everything down.
+[Harbor](https://github.com/laude-institute/harbor) is an agent evaluation framework that runs AI agents against tasks in containerized sandbox environments. Each task provides an instruction, a sandbox (Docker/Daytona/Modal/Runta), and a verification script that produces a reward. Harbor handles the full lifecycle: spinning up the sandbox, running the agent, verifying the result, and tearing everything down.
 
 The SkyRL + Harbor integration uses Harbor as the **environment and reward source** for RL training. SkyRL generates model outputs via vLLM, Harbor executes the agent in a sandbox and verifies correctness, and the resulting reward drives policy optimization.
 
@@ -17,6 +17,7 @@ export WANDB_API_KEY=your_wandb_api_key
 export DAYTONA_API_KEY=your_daytona_api_key
 # export MODAL_TOKEN_ID=your_modal_token_id
 # export MODAL_TOKEN_SECRET=your_modal_token_secret
+# export RUNTA_TOKEN=your_runta_token
 
 # 2. Prepare datasets (downloads from HuggingFace, extracts tasks to ~/data/harbor/)
 uv run examples/train_integrations/harbor/prepare_harbor_dataset.py \
@@ -141,7 +142,7 @@ For each trajectory, the loop:
 
 From SkyRL's perspective, Harbor is a black box. SkyRL calls `trial.run()` and gets back a reward and chat history. Internally, a Harbor **Trial** runs the following steps:
 
-1. **Start environment**: Spins up a sandbox (Daytona, Docker, Modal, etc.) from the task's Dockerfile.
+1. **Start environment**: Spins up a sandbox (Daytona, Docker, Modal, Runta, etc.) from the task's Dockerfile.
 2. **Run agent**: The agent (typically **terminus-2**, a tool-use coding agent) reads the task's `instruction.md`, then iterates: calling the LLM via the vLLM HTTP endpoint, executing commands in the sandbox, and observing results. This continues for up to `max_turns` iterations.
 3. **Run verifier**: Executes `tests/test.sh` inside the sandbox and reads the reward from `/logs/verifier/reward.txt`.
 4. **Cleanup**: Tears down the sandbox and returns results.
@@ -261,7 +262,7 @@ agent:
 | `generator.apply_overlong_filtering` | SkyRL config | When `true`, zero out loss mask for context-length-exceeded trajectories (default: `false`) |
 | `trainer.algorithm.advantage_estimator` | SkyRL config | Advantage method: `grpo`, `rloo`, `reinforce_pp`, etc. |
 | `trainer.train_batch_size` | SkyRL config | Number of unique prompts per training batch |
-| `environment.type` | Harbor config | Sandbox provider: `daytona`, `docker`, `modal`, `e2b`, `gke` |
+| `environment.type` | Harbor config | Sandbox provider: `daytona`, `docker`, `modal`, `e2b`, `gke`, `runta` |
 | `generator.rate_limit.max_concurrency` | Launch script | Parallel trial cap; tune based on sandbox provider capacity |
 | `generator.rate_limit.trajectories_per_second` | Launch script | Submission rate; prevents overloading the sandbox provider |
 | `timeout_multiplier` | Harbor config | Scales all default timeouts; increase for harder tasks |
@@ -276,10 +277,13 @@ environment:
   kwargs:
     auto_stop_interval_mins: 30       # Daytona-specific: minutes of inactivity before sandbox auto-stops
     # sandbox_timeout_secs: 1800      # Modal-specific: sandbox timeout
+    # mode: docker                    # Runta-specific: auto (default), direct, docker or compose
 
 verifier:
   disable: false                      # Set to true to skip verification (debugging)
 ```
+
+With `type: runta`, also set `override_storage_mb: 32768` or higher: Runta requires 32-256 GiB of disk per runtime. With a smaller value Harbor requests less than that, and Runta rejects the request.
 
 ### LLM Request Settings
 
@@ -360,7 +364,7 @@ You must run `prepare_harbor_dataset.py` before launching training. The launch s
 
 ### Prerequisites
 
-- **Sandbox access**: Daytona API key (`DAYTONA_API_KEY`) or Modal credentials (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`), or other sandbox providers that Harbor supports.
+- **Sandbox access**: Daytona API key (`DAYTONA_API_KEY`), Modal credentials (`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`) or a Runta token (`RUNTA_TOKEN`), or other sandbox providers that Harbor supports.
 - **Dataset**: Harbor task directories, each with `instruction.md` and `tests/test.sh`
 - **GPUs**: Typically 4-8 for combined training and inference
 - **SkyRL inference server**: SkyRL launches the vLLM HTTP endpoint and router from `generator.inference_engine.*`.
