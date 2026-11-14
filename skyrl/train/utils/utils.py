@@ -320,6 +320,15 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             f"found {worker_type}.sequence_parallel_size={config.sequence_parallel_size}, ulysses style sequence "
             f"parallel is not supported for megatron"
         )
+        # Megatron-Bridge builds the model from the checkpoint config, so a RoPE override here would be ignored.
+        model_config_overrides = config.megatron_config.model_config_kwargs.get("model_config") or {}
+        rope_keys = sorted({"rope_parameters", "rope_scaling", "rope_theta"} & set(model_config_overrides))
+        if rope_keys:
+            raise ValueError(
+                f"trainer.{worker_type}.megatron_config.model_config_kwargs.model_config sets {rope_keys}, which the "
+                "Megatron backend does not apply: Megatron-Bridge builds the model from the checkpoint's own config. "
+                "Remove the override."
+            )
 
 
 # TODO (sumanthrh): Most of this should be moved to  __post_init__ for the dataclasses

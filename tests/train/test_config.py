@@ -550,6 +550,31 @@ def test_megatron_empty_cuda_cache_from_cli_override():
     assert cfg.trainer.policy.megatron_config.empty_cuda_cache_after_backward() is False
 
 
+@pytest.mark.parametrize(
+    ("worker", "key", "value"),
+    [
+        ("policy", "rope_parameters", {"rope_type": "default", "rope_theta": 500000.0}),
+        ("policy", "rope_scaling", {"rope_type": "linear", "factor": 2.0}),
+        ("ref", "rope_theta", 500000.0),
+    ],
+)
+def test_megatron_validation_rejects_rope_overrides_in_model_config(worker, key, value):
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    getattr(cfg.trainer, worker).megatron_config.model_config_kwargs = {"model_config": {key: value}}
+
+    with pytest.raises(ValueError, match=f"trainer.{worker}.megatron_config.model_config_kwargs.model_config"):
+        train_utils.validate_megatron_cfg(cfg)
+
+
+def test_megatron_validation_allows_other_model_config_overrides():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.policy.megatron_config.model_config_kwargs = {"model_config": {"vocab_size": 151936}}
+
+    train_utils.validate_megatron_cfg(cfg)
+
+
 def test_megatron_validation_allows_inference_only_fp8_param_without_gather():
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
