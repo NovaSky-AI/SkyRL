@@ -86,6 +86,51 @@ async def test_a_tool_loop_over_responses_bridges_every_call_after_the_first(str
     assert len(finished["samples"]) == 1
 
 
+CUSTOM_TOOLS = [
+    {
+        "type": "custom",
+        "name": "apply_patch",
+        "description": "Edit files.",
+        "format": {"type": "grammar", "syntax": "lark", "definition": "start: patch"},
+    }
+]
+
+
+def patching(arguments: str) -> Any:
+    """A completion that calls `apply_patch` with ``arguments`` when asked to PATCH, else answers."""
+
+    def completion(prompt: list[int], sampling: dict) -> list[int]:
+        if "PATCH" in decode(prompt[-40:]):
+            return [*encode(f"CALL:apply_patch:{arguments}"), END]
+        return [*encode(f"re{len(prompt)}"), END]
+
+    return completion
+
+
+@pytest.mark.parametrize(
+    "arguments, patch",
+    [
+        ('{"input":"*** Begin Patch\\n*** End Patch"}', "*** Begin Patch\n*** End Patch"),
+        ("*** Begin Patch", "*** Begin Patch"),
+        ('{"patch":"x"}', '{"patch":"x"}'),
+    ],
+    ids=["an input string", "bare text", "another object"],
+)
+async def test_a_custom_tool_call_goes_back_as_one_and_its_replay_bridges(arguments: str, patch: str) -> None:
+    async with token_stack(completion=patching(arguments)) as stack:
+        created = await stack.create()
+        llm = client(created["base_url"])
+        history: list[dict] = [user("use a PATCH")]
+        first = await llm.responses.create(model="policy", input=history, tools=CUSTOM_TOOLS)
+        history += items_of(first)
+        history.append({"type": "custom_tool_call_output", "call_id": first.output[0].call_id, "output": "Success."})
+        await llm.responses.create(model="policy", input=history, tools=CUSTOM_TOOLS)
+        finished = await stack.finish(created["id"])
+
+    assert [(item.type, item.name, item.input) for item in first.output] == [("custom_tool_call", "apply_patch", patch)]
+    assert finished["unbridged_calls"] == 0 and len(finished["samples"]) == 1
+
+
 async def test_reasoning_and_a_call_with_empty_content_are_matched_on_replay() -> None:
     """The case ``replayed`` exists for: the parsed ``content: ""`` has no item, so the replay has no
     ``content``. The node is stored as the replay, under its hash, and the next call bridges from it."""
@@ -131,18 +176,28 @@ async def test_the_same_conversation_over_chat_and_responses_sends_the_same_prom
 
 
 # -- the stream ------------------------------------------------------------------------------------------
-async def test_the_sdks_stream_helper_rebuilds_the_same_response_as_the_json_reply() -> None:
-    async with token_stack(completion=thinking_then_tool) as stack:
+@pytest.mark.parametrize(
+    "completion, ask, tools, items",
+    [
+        (thinking_then_tool, "use a TOOL", TOOLS, 2),
+        (patching('{"input":"*** Begin Patch"}'), "use a PATCH", CUSTOM_TOOLS, 1),
+    ],
+    ids=["function call", "custom call"],
+)
+async def test_the_sdks_stream_helper_rebuilds_the_same_response_as_the_json_reply(
+    completion: Any, ask: str, tools: list, items: int
+) -> None:
+    async with token_stack(completion=completion) as stack:
         created = await stack.create()
         llm = client(created["base_url"])
-        whole = await llm.responses.create(model="policy", input=[user("use a TOOL")], tools=TOOLS)
-        async with llm.responses.stream(model="policy", input=[user("use a TOOL")], tools=TOOLS) as stream:
+        whole = await llm.responses.create(model="policy", input=[user(ask)], tools=tools)
+        async with llm.responses.stream(model="policy", input=[user(ask)], tools=tools) as stream:
             kinds = [event.type async for event in stream]
             streamed = await stream.get_final_response()
 
     assert items_of(streamed) == items_of(whole)
     assert streamed.status == whole.status == "completed"
-    assert kinds.count("response.output_item.done") == 2 and kinds[-1] == "response.completed"
+    assert kinds.count("response.output_item.done") == items and kinds[-1] == "response.completed"
 
 
 # -- a length cut-off -----------------------------------------------------------------------------------------
@@ -179,7 +234,7 @@ async def test_an_overflow_is_a_failed_response_when_streamed_and_a_400_otherwis
         ({"truncation": "auto"}, "truncation"),
         ({"context_management": [{"type": "compaction"}]}, "context_management"),
         ({"previous_response_id": "resp_1"}, "previous_response_id"),
-        ({"tools": [{"type": "custom", "name": "apply_patch"}]}, "tool type 'custom'"),
+        ({"tools": [{"type": "web_search"}]}, "tool type 'web_search'"),
         ({"input": [{"type": "item_reference", "id": "x"}]}, "Unsupported input item type"),
     ],
 )

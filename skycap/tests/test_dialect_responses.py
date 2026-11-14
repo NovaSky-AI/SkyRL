@@ -64,6 +64,14 @@ def result(call_id: str, output: Any = "ok") -> dict:
     return {"type": "function_call_output", "call_id": call_id, "output": output}
 
 
+def patched(call_id: str, patch: str = "*** Begin Patch\n*** End Patch", **fields: Any) -> dict:
+    return {"type": "custom_tool_call", "call_id": call_id, "name": "apply_patch", "input": patch, **fields}
+
+
+def patch_result(call_id: str, output: Any = "ok") -> dict:
+    return {"type": "custom_tool_call_output", "call_id": call_id, "output": output, "id": "ctco_1"}
+
+
 def tool_call(call_id: str, name: str = "search", arguments: str = "{}") -> dict:
     return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
 
@@ -177,11 +185,51 @@ def test_no_tools_is_none() -> None:
     assert parse("hi", tools=None).tools is None
 
 
-@pytest.mark.parametrize("kind", ["custom", "web_search", "namespace", "local_shell", "file_search", "mcp", None])
-def test_a_non_function_tool_is_refused_by_type_and_position(kind: str | None) -> None:
+@pytest.mark.parametrize("kind", ["web_search", "namespace", "local_shell", "file_search", "mcp", None])
+def test_a_tool_neither_function_nor_custom_is_refused_by_type_and_position(kind: str | None) -> None:
     tools = [{"type": "function", "name": "ok"}, {"type": kind, "name": "apply_patch"}]
 
     refused(rf"tool type {kind!r} \(`tools\[1\]`\) is not supported", "hi", tools=tools)
+
+
+@pytest.mark.parametrize(
+    "fields, description",
+    [
+        ({"description": "Edit files."}, "Edit files."),
+        ({"description": "Edit files.", "format": {"type": "text"}}, "Edit files."),
+        (
+            {"description": "Edit files.", "format": {"type": "grammar", "syntax": "lark", "definition": "start: x"}},
+            "Edit files.\n\nThe input follows this lark grammar:\nstart: x",
+        ),
+        (
+            {"format": {"type": "grammar", "syntax": "regex", "definition": "x+"}},
+            "The input follows this regex grammar:\nx+",
+        ),
+    ],
+    ids=["no format", "text", "grammar", "grammar, no description"],
+)
+def test_a_custom_tool_is_a_function_of_one_string_with_its_grammar_in_the_description(
+    fields: dict, description: str
+) -> None:
+    tools = [{"type": "custom", "name": "apply_patch", **fields}]
+
+    assert parse("hi", tools=tools).tools == [
+        {
+            "type": "function",
+            "function": {
+                "name": "apply_patch",
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "input": {"type": "string", "description": "The freeform text payload for this tool."}
+                    },
+                    "required": ["input"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -189,7 +237,19 @@ def test_a_non_function_tool_is_refused_by_type_and_position(kind: str | None) -
     [
         ({"type": "function"}, "`tools` must be a list"),
         ([{"type": "function"}], r"`tools\[0\].name` must be a string"),
+        ([{"type": "custom"}], r"`tools\[0\].name` must be a string"),
         (["search"], "tool type None"),
+        ([{"type": "custom", "name": "p", "format": {"type": "regexp"}}], r"`tools\[0\].format` of type 'regexp'"),
+        ([{"type": "custom", "name": "p", "format": "text"}], r"`tools\[0\].format` must be an object"),
+        (
+            [{"type": "custom", "name": "p", "description": ["Edit files."]}],
+            r"`tools\[0\].description` must be a string",
+        ),
+        ([{"type": "custom", "name": "p", "format": {"type": "grammar", "syntax": "lark"}}], "`definition` as strings"),
+        (
+            [{"type": "function", "name": "p"}, {"type": "custom", "name": "p"}],
+            "two tools are named 'p': a custom tool's name must be unique",
+        ),
     ],
 )
 def test_malformed_tools_are_refused(tools: Any, match: str) -> None:
@@ -378,16 +438,39 @@ def test_a_refusal_part_is_refused() -> None:
 
 
 # -- function calls and their outputs --------------------------------------------------------
-@pytest.mark.parametrize("field", ["call_id", "name", "arguments"])
-def test_a_function_call_needs_string_fields(field: str) -> None:
-    item = called("c1")
-    item[field] = {"q": 1} if field == "arguments" else None
+@pytest.mark.parametrize(
+    "item, field",
+    [
+        *[(called("c1"), field) for field in ("call_id", "name", "arguments")],
+        *[(patched("c1"), field) for field in ("call_id", "name", "input")],
+    ],
+)
+def test_a_tool_call_needs_string_fields(item: dict, field: str) -> None:
+    item = {**item, field: {"q": 1} if field in ("arguments", "input") else None}
 
     refused(rf"`input\[1\].{field}` must be a string", [user("q"), item])
 
 
-def test_a_namespaced_call_is_refused() -> None:
-    refused("namespaced tool calls are not supported", [user("q"), called("c1", namespace="mcp__fs")])
+@pytest.mark.parametrize("item", [called("c1"), patched("c1")], ids=["function", "custom"])
+def test_a_namespaced_call_is_refused(item: dict) -> None:
+    refused("namespaced tool calls are not supported", [user("q"), {**item, "namespace": "mcp__fs"}])
+
+
+def test_a_custom_tool_call_is_a_call_of_its_function_and_its_output_a_tool_turn() -> None:
+    patch = '*** Begin Patch\n+print("é")\n*** End Patch'
+    items = [user("q"), said("patching"), patched("c1", patch, id="ctc_1"), patch_result("c1", "Success.")]
+
+    assert turns(items) == [
+        user("q"),
+        {
+            "role": "assistant",
+            "content": "patching",
+            "tool_calls": [
+                tool_call("c1", "apply_patch", '{"input":"*** Begin Patch\\n+print(\\"é\\")\\n*** End Patch"}')
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "Success."},
+    ]
 
 
 def test_tool_output_parts_are_joined_and_an_image_is_refused() -> None:
@@ -414,8 +497,6 @@ def test_a_tool_output_without_a_call_id_is_refused() -> None:
     "kind",
     [
         "item_reference",
-        "custom_tool_call",
-        "custom_tool_call_output",
         "local_shell_call",
         "web_search_call",
         "compaction",
@@ -529,6 +610,36 @@ def test_empty_fields_get_no_item_but_an_empty_turn_gets_one_empty_message(messa
         assert items[0]["content"][0]["text"] == ""
 
 
+@pytest.mark.parametrize(
+    "arguments, patch, replays_as_parsed",
+    [
+        ('{"input":"*** Begin Patch\\n*** End Patch"}', "*** Begin Patch\n*** End Patch", True),
+        ("*** Begin Patch", "*** Begin Patch", False),
+        ('{"patch":"x"}', '{"patch":"x"}', False),
+        ('{"input":3}', '{"input":3}', False),
+    ],
+    ids=["an input string", "bare text", "another object", "a non-string input"],
+)
+def test_a_call_to_a_custom_tool_is_a_custom_item_of_its_input(
+    arguments: str, patch: str, replays_as_parsed: bool
+) -> None:
+    call = parse("q", tools=[{"type": "function", "name": "search"}, {"type": "custom", "name": "apply_patch"}])
+    message = {"role": "assistant", "tool_calls": [tool_call("c1", "apply_patch", arguments), tool_call("c2")]}
+
+    assert RESPONSES.reply(call, sampled(message))["output"] == [
+        {"type": "custom_tool_call", "id": "ctc_k1_0", "call_id": "c1", "name": "apply_patch", "input": patch},
+        {
+            "type": "function_call",
+            "id": "fc_k1_1",
+            "call_id": "c2",
+            "name": "search",
+            "arguments": "{}",
+            "status": "completed",
+        },
+    ]
+    assert (RESPONSES.replayed(call, sampled(message)) == message) is replays_as_parsed
+
+
 def test_a_call_with_empty_arguments_still_has_an_arguments_string() -> None:
     call = {"id": "c", "type": "function", "function": {"name": "f", "arguments": None}}
 
@@ -624,7 +735,7 @@ def _codex_replay(item: dict) -> dict:
 @pytest.mark.parametrize("strip", [False, True], ids=["verbatim", "ids and statuses dropped"])
 def test_a_replayed_reply_regroups_into_the_stored_turn(message: dict, strip: bool) -> None:
     turn = sampled(message)
-    stored = RESPONSES.replayed(turn)
+    stored = RESPONSES.replayed(parse("q"), turn)
     items = RESPONSES.reply(parse("q"), turn)["output"]
     if strip:
         items = [_codex_replay(item) for item in items]
@@ -638,7 +749,7 @@ def test_a_replayed_reply_regroups_into_the_stored_turn(message: dict, strip: bo
 def test_replayed_differs_from_the_parsed_turn_exactly_where_the_wire_cant_say_it() -> None:
     """``content: ""`` beside calls has no message item, so the replay has no ``content`` and hashes apart."""
     message = SHAPES["reasoning and two calls, empty content"]
-    stored = RESPONSES.replayed(sampled(message))
+    stored = RESPONSES.replayed(parse("q"), sampled(message))
 
     assert "content" not in stored
     assert KEY(stored) != KEY(message)
@@ -647,7 +758,7 @@ def test_replayed_differs_from_the_parsed_turn_exactly_where_the_wire_cant_say_i
 
 def test_replayed_does_not_change_the_sampled_turn() -> None:
     message = copy.deepcopy(SHAPES["reasoning and two calls, empty content"])
-    RESPONSES.replayed(sampled(message))
+    RESPONSES.replayed(parse("q"), sampled(message))
 
     assert message == SHAPES["reasoning and two calls, empty content"]
 
@@ -657,13 +768,13 @@ def test_a_client_that_drops_the_reasoning_item_sends_a_different_turn() -> None
     turn = sampled(SHAPES["reasoning and text"])
     items = [item for item in RESPONSES.reply(parse("q"), turn)["output"] if item["type"] != "reasoning"]
 
-    assert KEY(turns([user("q"), *items])[1]) != KEY(RESPONSES.replayed(turn))
+    assert KEY(turns([user("q"), *items])[1]) != KEY(RESPONSES.replayed(parse("q"), turn))
 
 
 def test_chat_replays_the_parsed_turn_itself() -> None:
     message = SHAPES["reasoning and two calls, empty content"]
 
-    assert ChatDialect().replayed(sampled(message)) is message
+    assert ChatDialect().replayed(parse("q"), sampled(message)) is message
 
 
 # -- the stream -----------------------------------------------------------------------------------------
@@ -737,6 +848,22 @@ def test_empty_text_and_arguments_send_no_delta() -> None:
     assert "response.output_text.done" in kinds and "response.function_call_arguments.done" in kinds
 
 
+@pytest.mark.parametrize("patch, kinds", [("p", ["delta", "done"]), ("", ["done"])], ids=["input", "empty input"])
+def test_a_custom_call_is_announced_empty_and_streams_its_input(patch: str, kinds: list) -> None:
+    call = parse("q", stream=True, tools=[{"type": "custom", "name": "apply_patch"}])
+    message = {"role": "assistant", "tool_calls": [tool_call("c1", "apply_patch", f'{{"input":"{patch}"}}')]}
+    reply = RESPONSES.reply(call, sampled(message))
+    events = frames(b"".join(RESPONSES.stream(reply)))[2:-1]
+
+    assert [kind for kind, _ in events] == [
+        "response.output_item.added",
+        *[f"response.custom_tool_call_input.{kind}" for kind in kinds],
+        "response.output_item.done",
+    ]
+    assert events[0][1]["item"] == {**reply["output"][0], "input": ""}
+    assert events[-2][1]["input"] == patch and events[-1][1]["item"] == reply["output"][0]
+
+
 def test_a_cut_off_stream_ends_incomplete() -> None:
     events = stream_of(user_reply(), reason="length")
 
@@ -796,8 +923,15 @@ def test_a_completed_reply_is_one_turn_with_chat_usage() -> None:
     assert reply.usage == {"prompt_tokens": 11, "completion_tokens": 4}
 
 
-def test_a_reply_with_calls_finishes_with_tool_calls() -> None:
-    assert RESPONSES.parse_reply(response_object([called("c1")])).finish_reason == "tool_calls"
+@pytest.mark.parametrize(
+    "item, call",
+    [(called("c1"), tool_call("c1")), (patched("c1", "p"), tool_call("c1", "apply_patch", '{"input":"p"}'))],
+    ids=["function", "custom"],
+)
+def test_a_reply_with_calls_is_recorded_with_them_and_finishes_with_tool_calls(item: dict, call: dict) -> None:
+    reply = RESPONSES.parse_reply(response_object([item]))
+
+    assert reply.message["tool_calls"] == [call] and reply.finish_reason == "tool_calls"
 
 
 def test_a_max_output_tokens_cut_off_is_length() -> None:
