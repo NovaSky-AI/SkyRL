@@ -29,6 +29,9 @@
 #                              docker/Dockerfile.ray-sandbox; RAY_SANDBOX_IMAGE is the prebuilt image
 #                              every task runs in (default python:3.12-slim), and
 #                              RAY_SANDBOX_CPUS the CPUs each sandbox reserves (default 0.25)
+#   RAY_WHEEL=<url>            run on this Ray wheel instead of the locked Ray, layered on with
+#                              `uv run --with`; SANDBOX=ray needs one with the sandbox fixes until
+#                              SkyRL's pinned Ray has them (e.g. docker/Dockerfile.ray-sandbox's RAY_COMMIT)
 #   STRATEGY=fsdp|megatron     the training backend (default fsdp); megatron takes MEGATRON_TP,
 #                              MEGATRON_PP, MEGATRON_EP (default 1; e.g. 8 for an MoE such as
 #                              Qwen3-30B-A3B on 8 GPUs) and MEGATRON_ETP, and OPTIMIZER_OFFLOAD=1
@@ -265,7 +268,11 @@ echo "==> experiment $EXPERIMENT in $RUN_DIR"
 # Run: the sibling recipe's settings, apart from the knobs above. The arm's own settings come
 # last so they win (DETERMINISTIC's concurrency of 1 over the recipe's 512).
 #-----------------------
-uv run --isolated --extra "$STRATEGY" "${EXTRAS[@]}" -m "$ENTRYPOINT" \
+UV_WITH=()
+if [[ -n "${RAY_WHEEL:-}" ]]; then
+  UV_WITH=(--with "ray[default] @ $RAY_WHEEL")
+fi
+uv run --isolated --extra "$STRATEGY" "${EXTRAS[@]}" "${UV_WITH[@]}" -m "$ENTRYPOINT" \
   data.train_data="['$SUBSET_DIR']" \
   trainer.policy.model.path="$MODEL" \
   generator.inference_engine.served_model_name="$SERVED_MODEL_NAME" \
