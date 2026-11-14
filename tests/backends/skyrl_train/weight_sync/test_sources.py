@@ -210,6 +210,144 @@ class TestMegatronWeightSource:
         assert bridge.export_calls == 1
 
 
+class TestSerializedNvfp4WeightSource:
+    """``metadata`` is shape-only and replay-only iteration skips quantization; the sender stream is unchanged."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_quantizer(self, monkeypatch):
+        from skyrl.backends.skyrl_train.weight_sync import nvfp4
+
+        self.calls = []
+
+        def quantize(weight, settings):
+            self.calls.append(weight.shape)
+            rows, cols = weight.shape
+            packed = (weight.float().abs() * 3).to(torch.uint8)[:, : cols // 2].contiguous()
+            scale = torch.ones(rows, cols // 16, dtype=torch.uint8).view(torch.float8_e4m3fn)
+            return packed, scale, weight.float().abs().amax().reshape(())
+
+        monkeypatch.setattr(nvfp4, "quantize_nvfp4_matrix", quantize)
+        from skyrl.backends.skyrl_train.weight_sync import nvfp4_stacked
+
+        monkeypatch.setattr(nvfp4_stacked, "quantize_nvfp4_matrix", quantize)
+        self.settings = nvfp4.Nvfp4WeightQuantSettings(
+            use_4over6=True, e4m3_max=448, err_mode="MSE", row_scaled_activation=True, backward_override=None
+        )
+
+    @staticmethod
+    def _tensors():
+        def expert(layer, e, proj, rows=4, cols=32):
+            name = f"model.layers.{layer}.mlp.experts.{e}.{proj}.weight"
+            return name, torch.randn(rows, cols).to(torch.bfloat16)
+
+        return [
+            ("model.embed_tokens.weight", torch.ones(4, 16, dtype=torch.bfloat16)),
+            expert(0, 0, "up_proj"),
+            expert(0, 0, "down_proj", rows=32, cols=16),
+            expert(0, 0, "gate_proj"),
+            ("model.layers.0.mlp.gate.weight", torch.ones(2, 32, dtype=torch.bfloat16)),
+            expert(1, 0, "gate_proj"),  # BF16 layer (bf16_layers=[1])
+            expert(1, 0, "up_proj"),
+            ("model.layers.0.mlp.router.e_score_correction_bias", torch.zeros(2, dtype=torch.float32)),
+        ]
+
+    def _source(self, tensors):
+        from skyrl.backends.skyrl_train.weight_sync.sources import (
+            SerializedNvfp4WeightSource,
+        )
+
+        bridge = _FakeBridge(tensors)
+        inner = MegatronWeightSource(bridge, object(), torch.bfloat16)
+        return SerializedNvfp4WeightSource(inner, self.settings, bf16_layers=[1]), bridge
+
+    def test_channels_agree_without_quantizing_for_metadata(self):
+        source, _ = self._source(self._tensors())
+        meta = source.metadata
+        assert self.calls == []  # metadata quantizes nothing
+        _, pairs = _assert_channels_agree(source)
+        assert len(self.calls) == 2  # fused [gate; up] + down_proj of the one NVFP4 expert
+        names = [n for n, _ in pairs]
+        assert names[1:5] == [f"model.layers.0.mlp.experts.0.down_proj.{s}" for s in _NVFP4_SUFFIXES]
+        assert [m.dtype for m in meta[1:5]] == [torch.uint8, torch.float8_e4m3fn, torch.float32, torch.float32]
+        assert "model.layers.1.mlp.experts.0.gate_proj.weight" in names  # tail passes through
+        # fp32 bias keeps fp32 on the wire; the rest go out in bf16.
+        dtypes = dict((m.name, m.dtype) for m in meta)
+        assert dtypes["model.layers.0.mlp.router.e_score_correction_bias"] == torch.float32
+        assert dtypes["model.embed_tokens.weight"] == torch.bfloat16
+
+    def test_replay_only_drains_the_export_and_skips_quantization(self):
+        tensors = self._tensors()
+        sender, _ = self._source(tensors)
+        sender_stream = [(n, t.clone()) for n, t in sender.iter_full()]
+        calls_after_sender = len(self.calls)
+
+        replay, bridge = self._source(tensors)
+        replay.set_replay_only()
+        assert replay.metadata == sender.metadata  # same declaration on every rank
+        exports_before = bridge.export_calls
+        drained = [n for n, _ in replay.iter_full()]
+        assert bridge.export_calls == exports_before + 1 and bridge.yielded > 0  # joined the export collective
+        assert drained == [n for n, _ in tensors]
+        assert len(self.calls) == calls_after_sender  # nothing quantized on the non-sender
+
+        # The sender's stream is unaffected by another rank being replay-only.
+        again = [(n, t) for n, t in sender.iter_full()]
+        assert [n for n, _ in again] == [n for n, _ in sender_stream]
+        for (_, a), (_, b) in zip(again, sender_stream):
+            assert a.dtype == b.dtype and a.shape == b.shape
+            if a.dtype == torch.float8_e4m3fn:
+                a, b = a.view(torch.uint8), b.view(torch.uint8)
+            assert torch.equal(a, b)
+
+    def test_stacked_channels_agree_and_declare_the_buffer_floor(self):
+        from skyrl.backends.skyrl_train.weight_sync.nvfp4_stacked import (
+            NVFP4_STACKED_PREFIX,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.sources import (
+            SerializedNvfp4WeightSource,
+        )
+
+        tensors = self._tensors()
+        inner = MegatronWeightSource(_FakeBridge(tensors), object(), torch.bfloat16)
+        source = SerializedNvfp4WeightSource(
+            inner,
+            self.settings,
+            bf16_layers=[1],
+            stacked_num_experts=1,
+            min_packed_buffer_bytes=1234,
+        )
+        assert source.skyrl_min_packed_buffer_bytes == 1234
+        source.metadata
+        assert self.calls == []
+        _, pairs = _assert_channels_agree(source)
+        names = [n for n, _ in pairs]
+        prefix = f"{NVFP4_STACKED_PREFIX}model.layers.0.mlp.experts."
+        assert [n[len(prefix) :] for n in names if n.startswith(prefix)] == [
+            "w13_weight",
+            "w13_weight_scale",
+            "w13_weight_scale_2",
+            "w13_input_scale",
+            "w2_weight",
+            "w2_weight_scale",
+            "w2_weight_scale_2",
+            "w2_input_scale",
+        ]
+        assert "model.layers.1.mlp.experts.0.gate_proj.weight" in names  # BF16 layer stays per-expert
+
+        replay = SerializedNvfp4WeightSource(
+            MegatronWeightSource(_FakeBridge(tensors), object(), torch.bfloat16),
+            self.settings,
+            bf16_layers=[1],
+            stacked_num_experts=1,
+        )
+        replay.set_replay_only()
+        calls = len(self.calls)
+        assert [n for n, _ in replay.iter_full()] == [n for n, _ in tensors] and len(self.calls) == calls
+
+
+_NVFP4_SUFFIXES = ("weight", "weight_scale", "weight_scale_2", "input_scale")
+
+
 def _expert_key(expert: int, which: str) -> str:
     return f"base_model.model.model.layers.0.mlp.experts.{expert}.down_proj.lora_{which}.weight"
 

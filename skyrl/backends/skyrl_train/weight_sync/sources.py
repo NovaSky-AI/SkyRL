@@ -20,9 +20,21 @@ Imports vLLM at module scope, so import this lazily from anything that must work
 without the wheel.
 """
 
+import os
 import re
+import time
 from functools import cached_property
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import torch
 from loguru import logger
@@ -223,6 +235,96 @@ class SerializedFp8WeightSource(WeightSource):
         return [ParamMeta(name, tensor.dtype, tuple(tensor.shape)) for name, tensor in self._serialized()]
 
     def iter_full(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        yield from self._serialized()
+
+
+class SerializedNvfp4WeightSource(WeightSource):
+    """Serialize routed-expert weights into ModelOpt NVFP4 checkpoint tensors (see ``weight_sync/nvfp4.py``).
+
+    ``metadata`` runs ``Nvfp4ExpertSpecSerializer`` over the wrapped source's *metadata*: the same
+    pairing/emission code as iteration, so names, order, dtypes and shapes match, but nothing is
+    quantized or materialized beyond the wrapped source's own metadata. Each pass uses a fresh
+    serializer, so gate/up pairing state never leaks between passes.
+
+    On an NCCL non-sender rank (``set_replay_only``) iteration only replays the wrapped source -- the
+    Megatron export's TP/EP gathers are collectives every rank must join -- and skips quantization: vLLM's
+    NCCL trainer engine discards everything a non-sender yields (``for _ in source.iter_full(): pass``). The sender's
+    stream, i.e. the bytes on the wire, is unchanged.
+    """
+
+    def __init__(
+        self,
+        source: WeightSource,
+        settings: Any,
+        bf16_layers: Sequence[int] = (),
+        stacked_num_experts: Optional[int] = None,
+        min_packed_buffer_bytes: int = 0,
+    ) -> None:
+        self._source = source
+        self._settings = settings
+        # Layers whose routed experts stay BF16 (``num_layers_at_{start,end}_in_bf16``).
+        self._bf16_layers = tuple(bf16_layers)
+        # Set -> ``expert_nvfp4_stacked_sync``: each NVFP4 MoE layer goes out as 8 stacked tensors over this
+        # many experts (``weight_sync/nvfp4_stacked.py``).
+        self._stacked_num_experts = stacked_num_experts
+        # Read by ``build_trainer_engine``: the packed buffer must hold the largest stacked tensor.
+        self.skyrl_min_packed_buffer_bytes = int(min_packed_buffer_bytes)
+        self._replay_only = False
+
+    def set_replay_only(self) -> None:
+        """Mark this rank as one whose iteration output is discarded (NCCL non-sender)."""
+        self._replay_only = True
+
+    def _serializer(self, spec: bool):
+        from skyrl.backends.skyrl_train.weight_sync import nvfp4, nvfp4_stacked
+
+        args = (self._settings, self._bf16_layers)
+        if self._stacked_num_experts is None:
+            return (nvfp4.Nvfp4ExpertSpecSerializer if spec else nvfp4.Nvfp4ExpertSerializer)(*args)
+        cls = nvfp4_stacked.Nvfp4StackedExpertSpecSerializer if spec else nvfp4_stacked.Nvfp4StackedExpertSerializer
+        return cls(*args, num_experts=self._stacked_num_experts)
+
+    def _serialized(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        timing = os.environ.get("SKYRL_NVFP4_SYNC_TIMING", "0") == "1"
+        produce_s, t_last, start = 0.0, time.perf_counter(), time.perf_counter()
+        serializer = self._serializer(spec=False)
+        for name, tensor in self._source.iter_full():
+            for serialized_name, serialized_tensor in serializer(name, tensor):
+                out = serialized_tensor.detach().contiguous()
+                if timing:
+                    produce_s += time.perf_counter() - t_last
+                yield serialized_name, out
+                if timing:
+                    t_last = time.perf_counter()
+        serializer.finish()
+        if timing:
+            produce_s += time.perf_counter() - t_last
+            # Logging only: time spent producing the stream (Megatron export + quantize + stacking) vs. the
+            # wall time of the whole iteration (the rest is the consumer: packing + broadcast + waiting on vLLM).
+            logger.warning(
+                "NVFP4 sync sender: produce %.3fs of %.3fs iteration wall (stacked=%s)",
+                produce_s,
+                time.perf_counter() - start,
+                self._stacked_num_experts is not None,
+            )
+
+    @cached_property
+    def metadata(self) -> List[ParamMeta]:
+        from skyrl.backends.skyrl_train.weight_sync.nvfp4 import TensorSpec
+
+        serializer = self._serializer(spec=True)
+        meta: List[ParamMeta] = []
+        for m in self._source.metadata:
+            for name, spec in serializer(m.name, TensorSpec(m.dtype, tuple(m.shape))):
+                meta.append(ParamMeta(name, spec.dtype, tuple(spec.shape)))
+        serializer.finish()
+        return meta
+
+    def iter_full(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        if self._replay_only:
+            # Not the serialized stream: the caller only drains it to stay in the export collectives.
+            yield from self._source.iter_full()
+            return
         yield from self._serialized()
 
 

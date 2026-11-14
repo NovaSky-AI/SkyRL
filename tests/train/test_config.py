@@ -470,6 +470,19 @@ def test_megatron_rejects_fp8_only_settings_without_fp8(kwargs):
     MegatronConfig(transformer_config_kwargs={"fp8": "e4m3"}, **kwargs)
 
 
+def test_expert_nvfp4_uses_the_bf16_layer_counts_and_rejects_fp8_module_exclusions():
+    from skyrl.train.config.config import MegatronConfig
+
+    cfg = MegatronConfig(expert_nvfp4=True, num_layers_at_start_in_bf16=1, num_layers_at_end_in_bf16=7)
+    assert cfg.transformer_config_kwargs["first_last_layers_bf16"] is True
+    assert cfg.transformer_config_kwargs["num_layers_at_start_in_bf16"] == 1
+    assert cfg.transformer_config_kwargs["num_layers_at_end_in_bf16"] == 7
+    with pytest.raises(ValueError, match="expert_nvfp4"):
+        MegatronConfig(expert_nvfp4=True, fp8_exclude_modules=["*.shared_experts.*"])
+    with pytest.raises(ValueError, match="expert_nvfp4"):
+        MegatronConfig(expert_nvfp4=True, te_precision_config_file="/tmp/recipe.yaml")
+
+
 def test_fp8_weight_sync_exclusions_require_fp8_weight_sync():
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
@@ -1913,3 +1926,11 @@ def test_optimizer_offload_to_disk_rejects_settings_it_cannot_honor(overrides, m
 
     with pytest.raises(ValueError, match=match):
         validate_optimizer_offload_to_disk_cfg(cfg)
+
+
+def test_expert_nvfp4_stacked_sync_default_on_and_ignored_without_expert_nvfp4():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    assert cfg.trainer.policy.megatron_config.expert_nvfp4_stacked_sync is True
+    assert cfg.trainer.policy.megatron_config.expert_nvfp4 is False
+    validate_megatron_cfg(cfg)  # a no-op without expert_nvfp4: must not raise

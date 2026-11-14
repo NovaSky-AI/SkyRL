@@ -326,3 +326,54 @@ def test_fp8_hooks_bracket_only_full_weight_updates(monkeypatch, lora_armed):
     else:
         assert engine.calls == ["before", "start", "receive", "finish", "after", "empty_cache"]
         assert len(engine.loaded) == 1
+
+
+class _ChunkedEngine(_Engine):
+    """vLLM 0.33's packed IPC: one update round arrives as several ``receive_weights`` calls."""
+
+    def __init__(self, chunks):
+        super().__init__(chunks[0], lora_enabled=False)
+        self._chunks = list(chunks)
+
+    def receive_weights(self, update_info):
+        self._weights = self._chunks.pop(0)
+        super().receive_weights(update_info)
+
+
+def test_a_stacked_nvfp4_layer_may_span_receive_calls(monkeypatch):
+    """A stacked NVFP4 layer split across packed IPC chunks is loaded once, after its last tensor arrives,
+    and an update that ends with a layer still incomplete fails at ``finish_weight_update``."""
+    from skyrl.backends.skyrl_train.weight_sync.nvfp4_stacked import (
+        STACKED_LEAVES,
+        stacked_wire_name,
+    )
+    from skyrl.backends.skyrl_train.weight_sync.nvfp4_stacked_receive import (
+        Nvfp4StackedReceiver,
+    )
+
+    loaded_layers = []
+    monkeypatch.setattr(Nvfp4StackedReceiver, "_load_layer", lambda self, prefix, stacks: loaded_layers.append(prefix))
+    prefix = "model.layers.3.mlp.experts"
+    wire = [(stacked_wire_name(prefix, leaf), torch.ones(1)) for leaf in STACKED_LEAVES]
+    half = len(wire) // 2
+
+    engine = _ChunkedEngine([wire[:half], wire[half:]])
+    engine.start_weight_update()
+    engine.receive_weights(None)
+    engine.receive_weights(None)
+    engine.finish_weight_update()
+    assert loaded_layers == [prefix]
+
+    engine = _ChunkedEngine([wire[:half]])
+    engine.start_weight_update()
+    engine.receive_weights(None)
+    with pytest.raises(RuntimeError, match="incomplete layers"):
+        engine.finish_weight_update()
+
+    # A failed round leaves nothing behind for the next one.
+    engine = _ChunkedEngine([wire])
+    engine._skyrl_nvfp4_stacked = Nvfp4StackedReceiver(engine.model, fallback_load=None)
+    engine._skyrl_nvfp4_stacked.pending[prefix] = {}
+    loaded_layers.clear()
+    _run_round(engine)
+    assert loaded_layers == [prefix]

@@ -54,6 +54,7 @@ from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     SKYRL_BATCHED_MOE_FP8_PREFIX,
     batched_moe_wire_targets,
 )
+from skyrl.backends.skyrl_train.weight_sync.nvfp4_stacked import NVFP4_STACKED_PREFIX
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_libfabric_shim import (
     ensure_ray_rdt_libfabric,
 )
@@ -197,6 +198,15 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import
 
 apply_pp_kv_cache_projection_patch()
 
+# Expert NVFP4 with the 4/6 E4M3 bound 256 on activations: vLLM's GEMM1 per-token base scale is a module constant
+# (1/(448*6)); FlashInfer's GEMM2 side follows the env on its own. No-op unless FLASHINFER_NVFP4_4OVER6=1 and
+# FLASHINFER_NVFP4_4OVER6_E4M3_USE_256=1 (derived by weight_sync/nvfp4.py:nvfp4_runtime_env).
+from skyrl.backends.skyrl_train.patches.vllm.patch_nvfp4_per_token_e4m3_256 import (  # noqa: E402
+    apply_nvfp4_per_token_e4m3_256_patch,
+)
+
+apply_nvfp4_per_token_e4m3_256_patch()
+
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 
@@ -292,9 +302,14 @@ def _load_batched_moe_fp8_tensor(
 def _load_checkpoint_weights(
     model: torch.nn.Module,
     weights: Iterable[tuple[str, torch.Tensor]],
+    nvfp4_stacked_receiver: Any = None,
     **kwargs: Any,
 ) -> Any:
-    """Load ordinary checkpoint tensors and compact batched-MoE FP8 tensors."""
+    """Load ordinary checkpoint tensors, compact batched-MoE FP8 tensors and stacked NVFP4 expert layers.
+
+    Stacked NVFP4 tensors (``weight_sync/nvfp4_stacked.py``) go to ``nvfp4_stacked_receiver``, which holds a
+    layer's tensors until all 8 have arrived (possibly across calls) and then loads the layer in one pass.
+    """
     params_dict: dict[str, torch.nn.Parameter] | None = None
     ordinary_weights: list[tuple[str, torch.Tensor]] = []
     for name, weight in weights:
@@ -302,8 +317,14 @@ def _load_checkpoint_weights(
             if params_dict is None:
                 params_dict = dict(model.named_parameters())
             _load_batched_moe_fp8_tensor(model, params_dict, name, weight)
+        elif name.startswith(NVFP4_STACKED_PREFIX):
+            if nvfp4_stacked_receiver is None:
+                raise RuntimeError(f"Received stacked NVFP4 tensor {name!r} without a stacked receiver")
+            nvfp4_stacked_receiver.accept(name, weight)
         else:
             ordinary_weights.append((name, weight))
+    if nvfp4_stacked_receiver is not None:
+        nvfp4_stacked_receiver.end_of_batch()
     if ordinary_weights:
         return model.load_weights(weights=ordinary_weights, **kwargs)
     return set()
@@ -347,6 +368,24 @@ class NewInferenceWorkerWrap:
                 "lora.sync_mode='memory' requires the skyrl_nccl or skyrl_ipc backend."
             )
         arm(receive_target)
+
+    def skyrl_param_digest(self) -> dict:
+        """Diagnostic: ``{name: "shape|dtype|blake2b"}`` over every parameter and buffer of the live model.
+
+        Used to check that two weight-sync paths leave bitwise the same model on the sampler. Copies each tensor to host to hash it; seconds per GB, not for training loops.
+        """
+        import hashlib
+        import itertools
+
+        model = self.model_runner.model
+        out = {}
+        for name, tensor in itertools.chain(model.named_parameters(), model.named_buffers()):
+            data = tensor.detach().contiguous().reshape(-1)
+            digest = hashlib.blake2b(digest_size=16)
+            if data.numel():
+                digest.update(memoryview(data.view(torch.uint8).cpu().numpy()))
+            out[name] = f"{tuple(tensor.shape)}|{tensor.dtype}|{digest.hexdigest()}"
+        return out
 
     def skyrl_discard_in_memory_lora(self, lora_name: str) -> bool:
         """Free the staged tensors of an unloaded in-memory adapter.
