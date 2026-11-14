@@ -335,17 +335,27 @@ def test_serialized_fp8_pow2_scales_set_e8m0_without_a_driver_gpu(monkeypatch):
     assert env_vars["VLLM_USE_DEEP_GEMM_E8M0"] == "1"
 
 
-@pytest.mark.parametrize("backend", ["sharded_rdt", "delta"])
-def test_serialized_fp8_weight_sync_rejects_backends_without_a_chunk_channel(backend):
-    """Neither backend carries payload + scale pairs, and both would otherwise
-    fail only at the first sync -- after vLLM has loaded as FP8."""
+@pytest.mark.parametrize("wire, backend", [("blockwise", "sharded_rdt"), ("blockwise", "delta"), ("mxfp8", "delta")])
+def test_serialized_fp8_weight_sync_rejects_backends_that_cannot_carry_the_wire(wire, backend):
+    """delta carries no scale tensors and sharded_rdt only the MXFP8 wire; both would
+    otherwise fail only at the first sync -- after vLLM has loaded as FP8."""
     cfg = _make_validated_test_config()
     cfg.trainer.strategy = "megatron"
-    cfg.generator.inference_engine.fp8_weight_sync_mode = "blockwise"
+    cfg.generator.inference_engine.fp8_weight_sync_mode = wire
     cfg.generator.inference_engine.weight_sync_backend = backend
 
     with pytest.raises(ValueError, match=backend):
         validate_inference_engine_cfg(cfg)
+
+
+def test_sharded_rdt_accepts_the_mxfp8_wire():
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.placement.colocate_all = False
+    cfg.generator.inference_engine.weight_sync_backend = "sharded_rdt"
+    cfg.generator.inference_engine.fp8_weight_sync_mode = "mxfp8"
+
+    validate_inference_engine_cfg(cfg)
 
 
 def test_serialized_fp8_weight_sync_requires_megatron():

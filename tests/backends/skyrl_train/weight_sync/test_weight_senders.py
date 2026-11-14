@@ -351,12 +351,18 @@ class TestBuildTrainerEngineResolvesTheBackend:
         seen = self._build(monkeypatch, "nccl", False)
         assert seen["source"] is not None
 
-    @pytest.mark.parametrize("backend", ["delta", "sharded_rdt"])
-    def test_serialized_fp8_rejects_backends_without_native_push_support(self, monkeypatch, backend):
-        """FP8 wire tensors and scales require vLLM's NCCL or IPC trainer engine."""
+    @pytest.mark.parametrize(
+        "backend, wire", [("delta", "blockwise"), ("sharded_rdt", "blockwise"), ("delta", "mxfp8")]
+    )
+    def test_serialized_fp8_rejects_backends_that_cannot_carry_the_wire(self, monkeypatch, backend, wire):
+        """delta has no scale tensors; sharded_rdt carries only the MXFP8 wire."""
 
-        with pytest.raises(ValueError, match="Serialized FP8 weight sync requires"):
-            self._build(monkeypatch, backend, False, fp8_weight_sync_mode="blockwise")
+        with pytest.raises(ValueError, match="is not supported with weight sync backend"):
+            self._build(monkeypatch, backend, False, fp8_weight_sync_mode=wire)
+
+    def test_sharded_rdt_builds_with_the_mxfp8_wire(self, monkeypatch):
+        seen = self._build(monkeypatch, "sharded_rdt", False, fp8_weight_sync_mode="mxfp8")
+        assert seen["factory_args"][1] == "sharded_rdt"
 
 
 class _Bare:
