@@ -26,7 +26,8 @@
 #   SANDBOX=daytona|modal|ray  where Harbor runs each trial's sandbox (default daytona). ray runs
 #                              each one as a gVisor sandbox on this run's own Ray cluster
 #                              (skyrl.integration.ray_sandbox), so the node needs the tools in
-#                              Ray's sandbox docs; RAY_SANDBOX_IMAGE is the prebuilt image
+#                              Ray's sandbox docs (docker/Dockerfile.ray-sandbox builds such a node
+#                              image); RAY_SANDBOX_IMAGE is the prebuilt image
 #                              every task runs in (default python:3.12-slim), and
 #                              RAY_SANDBOX_CPUS the CPUs each sandbox reserves (default 0.25)
 #   RAY_WHEEL=<url>            run on this Ray wheel instead of the locked Ray, layered on with

@@ -2,6 +2,7 @@ set -ex
 
 # CodeContests training with Harbor trials in Ray sandboxes instead of Daytona.
 # No DAYTONA_API_KEY needed. Nodes need the sandbox tools in https://docs.ray.io/en/master/core/sandboxes.html
+# and Ray master @ 78e4b1f713; docker/Dockerfile.ray-sandbox builds such a node image.
 #
 # Sandbox nodes advertise a custom resource so sandboxes stay off GPU nodes:
 #   ray start --address=<head> --resources='{"sandbox": 1000}'

@@ -103,7 +103,9 @@ trial in a gVisor sandbox on the run's own Ray cluster, through
 `skyrl.integration.ray_sandbox`. The node needs the tools in
 [Ray's sandbox docs](https://docs.ray.io/en/master/core/sandboxes.html), and the job needs
 Ray with the sandbox fixes. Until SkyRL's Ray has them, the script layers on the
-wheel of Ray master 78e4b1f713 (`RAY_WHEEL`), so the node must run that commit. Every task runs in one prebuilt image
+wheel of Ray master 78e4b1f713 (`RAY_WHEEL`), so the node must run that commit.
+`docker/Dockerfile.ray-sandbox` builds such a node image (experiments only, until
+Ray 2.61). Every task runs in one prebuilt image
 (`RAY_SANDBOX_IMAGE`), and each sandbox reserves `RAY_SANDBOX_CPUS` of the
 node's CPUs.
 
