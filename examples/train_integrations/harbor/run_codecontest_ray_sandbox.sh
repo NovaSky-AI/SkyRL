@@ -15,9 +15,9 @@ set -ex
 IMAGE=${IMAGE:-python:3.12-slim}
 
 # The job needs Ray with the sandbox fixes, which SkyRL's pinned Ray lacks until 2.61: by default it
-# layers on the wheel of Ray master 78e4b1f713. The node must run the same Ray commit.
-# RAY_WHEEL= (empty) turns it off.
-export RAY_WHEEL="${RAY_WHEEL-https://s3-us-west-2.amazonaws.com/ray-wheels/master/78e4b1f71314fa46ca9bd2907d6aab4ec536909c/ray-3.0.0.dev0-cp312-cp312-manylinux2014_x86_64.whl}"
+# layers on the Ray master wheel that has them (ray_sandbox_wheel.sh). RAY_WHEEL= (empty) turns it off.
+source "$(dirname "$0")/ray_sandbox_wheel.sh"
+export RAY_WHEEL
 
 bash "$(dirname "$0")/run_codecontest.sh" \
   harbor_trial_config.environment.import_path=skyrl.integration.ray_sandbox.harbor_env:RaySandboxEnvironment \

@@ -18,6 +18,7 @@ Requirements:
     or the ``image`` kwarg below). Ray sandboxes cannot build Dockerfiles.
 """
 
+import asyncio
 import io
 import shlex
 import tarfile
@@ -221,17 +222,17 @@ class RaySandboxEnvironment(BaseEnvironment):
         return ExecResult(stdout=result.stdout, stderr=result.stderr, return_code=result.exit_code)
 
     # File transfer: bytes are shipped through Ray, since the actor runs on
-    # another node.
+    # another node. Local file I/O and tar run in a thread, since many trials
+    # share the event loop.
 
     async def upload_file(self, source_path: Path | str, target_path: str):
-        await self._require_sandbox().write_file.remote(target_path, Path(source_path).read_bytes())
+        data = await asyncio.to_thread(Path(source_path).read_bytes)
+        await self._require_sandbox().write_file.remote(target_path, data)
 
     async def upload_dir(self, source_dir: Path | str, target_dir: str):
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-            tar.add(str(source_dir), arcname=".")
+        data = await asyncio.to_thread(_tar_gz, source_dir)
         remote_tar = f"/tmp/.hb-upload-{uuid.uuid4().hex}.tar.gz"
-        await self._require_sandbox().write_file.remote(remote_tar, buf.getvalue())
+        await self._require_sandbox().write_file.remote(remote_tar, data)
         q = shlex.quote
         result = await self.exec(
             f"mkdir -p {q(target_dir)} && tar -xzf {remote_tar} -C {q(target_dir)} && rm -f {remote_tar}",
@@ -242,8 +243,7 @@ class RaySandboxEnvironment(BaseEnvironment):
 
     async def download_file(self, source_path: str, target_path: Path | str):
         data = await self._require_sandbox().read_file.remote(source_path)
-        Path(target_path).parent.mkdir(parents=True, exist_ok=True)
-        Path(target_path).write_bytes(data)
+        await asyncio.to_thread(_write_bytes, target_path, data)
 
     async def download_dir(self, source_dir: str, target_dir: Path | str):
         remote_tar = f"/tmp/.hb-download-{uuid.uuid4().hex}.tar.gz"
@@ -252,7 +252,24 @@ class RaySandboxEnvironment(BaseEnvironment):
             raise RuntimeError(f"download_dir of {source_dir} failed: {result.stderr}")
         sb = self._require_sandbox()
         data = await sb.read_file.remote(remote_tar)
-        await sb.exec.remote(f"rm -f {remote_tar}")
-        Path(target_dir).mkdir(parents=True, exist_ok=True)
-        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-            tar.extractall(target_dir, filter="data")
+        # root made the archive, and /tmp is sticky: a non-root default user can't remove it.
+        await sb.exec.remote(f"rm -f {remote_tar}", user="root")
+        await asyncio.to_thread(_untar_gz, data, target_dir)
+
+
+def _tar_gz(source_dir: Path | str) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        tar.add(str(source_dir), arcname=".")
+    return buf.getvalue()
+
+
+def _untar_gz(data: bytes, target_dir: Path | str) -> None:
+    Path(target_dir).mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        tar.extractall(target_dir, filter="data")
+
+
+def _write_bytes(target_path: Path | str, data: bytes) -> None:
+    Path(target_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(target_path).write_bytes(data)

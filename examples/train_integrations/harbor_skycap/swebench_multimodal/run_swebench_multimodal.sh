@@ -68,12 +68,9 @@ case "$SANDBOX" in
   *) echo "SANDBOX must be daytona or ray, got $SANDBOX" >&2; exit 1 ;;
 esac
 RAY_SANDBOX_CPUS="${RAY_SANDBOX_CPUS:-0.25}"
-# SANDBOX=ray needs Ray with the sandbox fixes, which SkyRL's pinned Ray lacks until 2.61: by default
-# the job layers on the wheel of Ray master 78e4b1f713. The node must run the same Ray commit.
-# RAY_WHEEL= (empty) turns it off.
-RAY_SANDBOX_WHEEL="https://s3-us-west-2.amazonaws.com/ray-wheels/master/78e4b1f71314fa46ca9bd2907d6aab4ec536909c/ray-3.0.0.dev0-cp312-cp312-manylinux2014_x86_64.whl"
+# SANDBOX=ray: by default the job layers on the Ray master wheel with the sandbox fixes (until Ray 2.61).
 if [[ "$SANDBOX" == ray ]]; then
-  RAY_WHEEL="${RAY_WHEEL-$RAY_SANDBOX_WHEEL}"
+  source "$REPO/examples/train_integrations/harbor/ray_sandbox_wheel.sh"
 fi
 DAYTONA_KEY_FILE="${DAYTONA_KEY_FILE:-$HOME/.config/skyrl/daytona.env}"
 WANDB_KEY_FILE="${WANDB_KEY_FILE:-$HOME/default/wandb_key.key}"
