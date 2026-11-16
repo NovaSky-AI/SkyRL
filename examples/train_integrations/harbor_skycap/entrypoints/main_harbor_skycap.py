@@ -33,6 +33,7 @@ from ...harbor.entrypoints.main_harbor import (
     HarborSkyRLConfig,
     _deep_merge,
 )
+from ..failures import load_failure_classifier
 from ..harbor_generator import HarborSkycapGenerator
 from ..record_index import RecordLog, SkycapRecordIndex
 from ..servers import SkycapServers, exposure_for, start_servers
@@ -105,6 +106,11 @@ class SkycapConfig:
     conversation the harness ended with: one row per rollout, and nothing off it trains. Or a custom rule, ``"pkg.module:function"``:
     a function of skycap's ``MessageGraph`` to ``skycap.paths.Row``s (a path and the model nodes on it to
     train), importable on every node; the skycap servers are started with it."""
+    failure_classifier: Optional[str] = None
+    """A synchronous ``pkg.module:function`` from Harbor's TrialResult to TrialFailure or None.
+    Unset (null) uses the default context-limit/agent-timeout detector. A custom hook replaces it;
+    returning None from that hook uses the verifier-result path, not the default detector.
+    The module must be importable in the generator process."""
     exposure: ExposureConfig = field(default_factory=ExposureConfig)
     include_images: bool = False
     """The model takes images (a vision-language model on a task whose prompts carry them). skycap renders them
@@ -138,6 +144,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     train_paths = cfg.skycap.train_paths
     # Here first, so a rule that won't import fails on the driver rather than in every server actor.
     load_rule(train_paths)
+    load_failure_classifier(cfg.skycap.failure_classifier)
     settings = {
         "upstream_url": engine_url,
         "tokenizer": cfg.trainer.policy.model.path,
@@ -214,6 +221,7 @@ class HarborSkycapExp(HarborExp):
             records=self.records,
             include_images=cfg.skycap.include_images,
             check_first_batch=cfg.skycap.check_first_batch,
+            failure_classifier=cfg.skycap.failure_classifier,
         )
         return self.generator
 

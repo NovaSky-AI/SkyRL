@@ -22,13 +22,9 @@ sandbox environment that LiteLLM- and OpenAI-based agents read.
 import asyncio
 import importlib
 import os
-import re
 import time
 from copy import deepcopy
-from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
-from urllib.request import url2pathname
 
 import litellm
 from harbor.agents.factory import AgentFactory
@@ -53,43 +49,13 @@ from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 from ..harbor.trial_metrics import TrialAttempts, trial_metrics
 from .compose import TrialOutcome, compose, split
+from .failures import FailureClassifierError, classify_failure, load_failure_classifier
 from .record_index import RecordLog
 
 litellm.suppress_debug_info = True
 
 # Attempts per trial. A Harbor failure is often environmental (a sandbox that didn't come up).
 MAX_NUM_RETRIES_PER_TRIAL = 2
-
-#: How a failed trial's exception shows it ran out of context. Harbor raises its own two types for agents it
-#: classifies; an installed agent that exits on skycap's 400 (code ``context_length_exceeded``, which LiteLLM
-#: may raise as a plain ``BadRequestError``) is only a ``NonZeroAgentExitCodeError``. Its message keeps just the
-#: first 1000 characters of the agent's output, which end before the error, so the end of the agent's own log in
-#: the trial directory is searched too. Rich wraps that log, possibly inside the code.
-CONTEXT_LENGTH_EXCEPTIONS = {"ContextLengthExceededError", "ContextWindowExceededError"}
-CONTEXT_LENGTH_OUTPUT = re.compile(r"context\s*_length\s*_exceeded|ContextWindowExceededError")
-#: How much of the end of each agent log is searched.
-AGENT_LOG_TAIL_BYTES = 64 * 1024
-
-
-def _ran_out_of_context(results: Any) -> bool:
-    """Whether a trial's agent stopped on a context-length error: by Harbor's exception, its message or the agent's log."""
-    exception = results.exception_info.exception_type if results.exception_info else None
-    if exception in CONTEXT_LENGTH_EXCEPTIONS:
-        return True
-    if exception != "NonZeroAgentExitCodeError":
-        return False
-    if CONTEXT_LENGTH_OUTPUT.search(results.exception_info.exception_message or ""):
-        return True
-    uri = urlparse(getattr(results, "trial_uri", None) or "")
-    if uri.scheme != "file":
-        return False
-    for log in sorted(Path(url2pathname(uri.path), "agent").glob("*.txt")):
-        with open(log, "rb") as f:
-            f.seek(max(0, log.stat().st_size - AGENT_LOG_TAIL_BYTES))
-            if CONTEXT_LENGTH_OUTPUT.search(f.read().decode(errors="replace")):
-                return True
-    return False
-
 
 #: skycap authenticates nothing, but LiteLLM won't build a client without a key.
 PLACEHOLDER_API_KEY = "skycap"
@@ -106,6 +72,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         records: Optional[RecordLog] = None,
         include_images: bool = False,
         check_first_batch: bool = True,
+        failure_classifier: Optional[str] = None,
     ) -> None:
         """
         Args:
@@ -119,9 +86,12 @@ class HarborSkycapGenerator(GeneratorInterface):
             include_images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
             check_first_batch: raise when not one trajectory of the first ``generate`` call has anything to train
                 (``skycap.check_first_batch``).
+            failure_classifier: a synchronous ``pkg.module:function`` classifying Harbor's TrialResult.
+                ``None`` preserves the default timeout and context-limit detection.
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
+        self._failure_classifier = load_failure_classifier(failure_classifier)
         self.train_paths = train_paths
         if not getattr(generator_cfg, "step_wise_trajectories", False):
             raise ValueError(
@@ -251,6 +221,10 @@ class HarborSkycapGenerator(GeneratorInterface):
                 logger.error(f"{prefix}: path rule {self.train_paths!r} failed, not retrying: {error}")
                 attempts.fail(error)
                 break
+            except FailureClassifierError as error:
+                logger.error(f"{prefix}: {error}, not retrying")
+                attempts.fail(error)
+                break
             except Exception as error:  # noqa: BLE001 - retried, then masked
                 logger.warning(f"{prefix} failed: {type(error).__name__}: {error}")
                 attempts.fail(error)
@@ -294,13 +268,9 @@ class HarborSkycapGenerator(GeneratorInterface):
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
                 attempts.record(results)
-                exception = results.exception_info.exception_type if results.exception_info else None
-                if exception == "AgentTimeoutError":
-                    # Masked, not retried, as the sibling does.
-                    reward, stop_reason = 0.0, "agent_timeout"
-                elif await asyncio.to_thread(_ran_out_of_context, results):
-                    # Trains with reward 0, as the sibling does.
-                    reward, stop_reason = 0.0, "context_length"
+                failure = await asyncio.to_thread(classify_failure, self._failure_classifier, results)
+                if failure is not None:
+                    reward, stop_reason = 0.0, failure.value
                 elif not results.verifier_result:
                     reward, stop_reason = 0.0, "error"
                     logger.warning(f"Trajectory {trajectory_id} has no verifier result: {results.exception_info}")

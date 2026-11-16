@@ -67,6 +67,61 @@ def final_and_short_discards(graph: MessageGraph) -> list[Row]:
 Every row of a trial carries its reward. See [skycap's README](../../../skycap/README.md#which-paths-train)
 for what a rule may return.
 
+## Classifying trial failures
+
+`skycap.failure_classifier=null` keeps the existing detection: Harbor's structured
+context-limit and agent-timeout exceptions, followed by a context-limit search in
+the message and local agent logs for `NonZeroAgentExitCodeError`. Missing or
+unreadable logs are not evidence of a context limit.
+
+For a harness with its own error format, set
+`skycap.failure_classifier=my_harness:classify_failure`. The synchronous function
+takes Harbor's `TrialResult` and returns a `TrialFailure` member or `None`:
+
+| Return | Existing training behavior |
+| --- | --- |
+| `TrialFailure.CONTEXT_LENGTH` | Reward zero, no retry; trains unless `generator.apply_overlong_filtering=true`. |
+| `TrialFailure.AGENT_TIMEOUT` | No retry; masks every rollout of that task instance. |
+| `TrialFailure.ERROR` | Retries on a fresh trajectory, then masks the task instance if retries are exhausted. |
+| `None` | Uses the existing verifier-result path: a present result supplies the reward; a missing result retries, then masks. |
+
+The custom function **replaces** the entire default detector, including Harbor's
+`AgentTimeoutError`, context-limit exceptions, and the log search. Returning
+`None` does not invoke the default. Delegate cases you do not recognize to
+`default_failure_classifier` to keep those built-in checks:
+
+```python
+from harbor.models.trial.result import TrialResult
+from examples.train_integrations.harbor_skycap.failures import (
+    TrialFailure,
+    default_failure_classifier,
+)
+
+def classify_failure(result: TrialResult) -> TrialFailure | None:
+    info = result.exception_info
+    # Example exception names from your harness, not Harbor's standard types.
+    if info and info.exception_type == "MyHarnessContextLimit":
+        return TrialFailure.CONTEXT_LENGTH
+    if info and info.exception_type == "MyHarnessDeadlineExceeded":
+        return TrialFailure.AGENT_TIMEOUT
+    if info and info.exception_type == "MySandboxUnavailable":
+        return TrialFailure.ERROR
+    return default_failure_classifier(result)
+```
+
+This distinguishes an agent reaching its limit from an infrastructure failure
+that should be retried, even when both appear as a generic agent exit in Harbor.
+The function can inspect harness-specific artifacts via `result.trial_uri`; it
+runs in a worker thread so local file reads do not block other trials. Calls can
+run concurrently, so shared state must be thread-safe. Its module must be
+importable in the generator process. Bad import paths fail at startup.
+A function that raises or returns something other than `TrialFailure` or `None`
+masks that rollout's task instance without rerunning the trial; the error is
+logged. Attempt metrics retain any exception Harbor already reported.
+
+This hook detects failures; it does not add configurable reward or retry policies
+or implement the reward-validity handling proposed in #2594.
+
 ## Agents inside remote sandboxes
 
 Terminus-2 calls the model from the trainer's process, so it reaches skycap at

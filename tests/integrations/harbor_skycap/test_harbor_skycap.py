@@ -26,6 +26,10 @@ from examples.train_integrations.harbor_skycap.compose import (  # noqa: E402
     compose,
 )
 from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa: E402
+from examples.train_integrations.harbor_skycap.failures import (  # noqa: E402
+    TrialFailure,
+    default_failure_classifier,
+)
 from examples.train_integrations.harbor_skycap.harbor_generator import (
     HarborSkycapGenerator,  # noqa: E402
 )
@@ -167,7 +171,9 @@ async def generator(skycap):
     """Makes generators against the test's skycap, and closes each one's pool when the test ends."""
     made = []
 
-    def make(train_paths: str = "all", check_first_batch: bool = True, **cfg) -> HarborSkycapGenerator:
+    def make(
+        train_paths: str = "all", check_first_batch: bool = True, failure_classifier: str | None = None, **cfg
+    ) -> HarborSkycapGenerator:
         made.append(
             HarborSkycapGenerator(
                 generator_cfg(**cfg),
@@ -176,6 +182,7 @@ async def generator(skycap):
                 SimpleNamespace(weight_version=7),
                 train_paths=train_paths,
                 check_first_batch=check_first_batch,
+                failure_classifier=failure_classifier,
             )
         )
         return made[-1]
@@ -428,6 +435,87 @@ async def test_an_agent_that_exits_on_skycaps_context_length_error_is_a_context_
     assert not any(out["loss_masks"][overflow])
 
 
+def harness_failure(result):
+    if result.exception_info and result.exception_info.exception_type == "HarnessStopped":
+        return TrialFailure(result.exception_info.exception_message)
+    return default_failure_classifier(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure,overlong,attempt_count,trained",
+    [
+        (TrialFailure.CONTEXT_LENGTH, False, 1, True),
+        (TrialFailure.CONTEXT_LENGTH, True, 1, False),
+        (TrialFailure.AGENT_TIMEOUT, False, 1, False),
+        (TrialFailure.ERROR, False, 2, False),
+    ],
+)
+async def test_custom_classifier_uses_existing_training_policy(
+    skycap, trials, generator, monkeypatch, failure, overlong, attempt_count, trained
+):
+    run = trials.run
+
+    async def harness_run(trial):
+        result = await run(trial)
+        if str(trial.config["task"]["path"]) == "linear":
+            # A harness-specific structured error with a verifier reward still present.
+            result.exception_info = SimpleNamespace(exception_type="HarnessStopped", exception_message=failure.value)
+        return result
+
+    monkeypatch.setattr(trials, "run", harness_run)
+    out = await generator(failure_classifier=f"{__name__}:harness_failure", apply_overlong_filtering=overlong).generate(
+        batch("linear", "summarize"), disable_tqdm=True
+    )
+
+    index = out["trajectory_ids"].index(TrajectoryID("linear", 0))
+    # compose emits a placeholder with stop_reason=error for masked instances.
+    expected_stop = "context_length" if failure is TrialFailure.CONTEXT_LENGTH else "error"
+    assert out["stop_reasons"][index] == expected_stop
+    assert out["rewards"][index] == 0.0
+    assert any(out["loss_masks"][index]) == trained
+    assert sum(str(c["task"]["path"]) == "linear" for c in trials.configs) == attempt_count
+    assert out["rollout_metrics"]["generate/skycap/num_timeout_trajectories"] == int(
+        failure is TrialFailure.AGENT_TIMEOUT
+    )
+    # Classification does not discard the unrelated successful instance.
+    good = out["trajectory_ids"].index(TrajectoryID("summarize", 0))
+    assert out["rewards"][good] == 1.0 and any(out["loss_masks"][good])
+
+
+def no_failure(result):
+    return None
+
+
+@pytest.mark.asyncio
+async def test_custom_classifier_can_replace_the_log_heuristic(skycap, trials, generator):
+    out = await generator(failure_classifier=f"{__name__}:no_failure").generate(batch("overflow"), disable_tqdm=True)
+    assert out["stop_reasons"] == ["complete"] and out["rewards"] == [1.0]
+    assert any(out["loss_masks"][0])
+
+
+def broken_classifier(result):
+    if result.exception_info:
+        raise ValueError("cannot parse harness result")
+    return None
+
+
+def invalid_classifier(result):
+    return "context_length" if result.exception_info else None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("classifier", ["broken_classifier", "invalid_classifier"])
+async def test_classifier_bugs_mask_without_rerunning_the_trial(skycap, trials, generator, classifier):
+    out = await generator(failure_classifier=f"{__name__}:{classifier}").generate(
+        batch("overflow", "linear"), disable_tqdm=True
+    )
+    assert out["stop_reasons"] == ["error", "complete"]
+    assert out["loss_masks"][0] == [0] and any(out["loss_masks"][1])
+    assert len(trials.configs) == 2
+    assert not any(t.is_open for t in skycap.server.trajectories.values())
+
+
 @pytest.mark.asyncio
 async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(skycap, trials, generator) -> None:
     out = await generator(check_first_batch=False).generate(batch("crash"), disable_tqdm=True)
@@ -571,6 +659,8 @@ def test_the_generator_refuses_configs_it_cannot_serve() -> None:
         HarborSkycapGenerator(generator_cfg(), {}, ["http://x"], train_paths="longest")
     with pytest.raises(ModuleNotFoundError):
         HarborSkycapGenerator(generator_cfg(), {}, ["http://x"], train_paths="nowhere_skycap_test:rule")
+    with pytest.raises(ModuleNotFoundError):
+        HarborSkycapGenerator(generator_cfg(), {}, ["http://x"], failure_classifier="nowhere_skycap_test:classify")
 
 
 def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(monkeypatch) -> None:
@@ -590,6 +680,25 @@ def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(m
         with pytest.raises(error):
             main_harbor_skycap.start_skycap(cfg, "http://router")
     assert len(started) == 2
+    cfg.skycap.train_paths = "all"
+    cfg.skycap.failure_classifier = "nowhere_skycap_test:classify"
+    with pytest.raises(ModuleNotFoundError):
+        main_harbor_skycap.start_skycap(cfg, "http://router")
+    assert len(started) == 2
+
+
+def test_entrypoint_passes_the_classifier_to_the_generator(monkeypatch) -> None:
+    from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
+
+    cfg = main_harbor_skycap.HarborSkycapConfig()
+    cfg.skycap.failure_classifier = f"{__name__}:harness_failure"
+    cfg.skycap.wandb.enabled = False
+    exp = object.__new__(main_harbor_skycap.HarborSkycapExp)
+    exp.skycap = SimpleNamespace(urls=["http://skycap"])
+    monkeypatch.setattr(main_harbor_skycap, "HarborSkycapGenerator", lambda **kwargs: kwargs)
+
+    generator = exp.get_generator(cfg, None, None)
+    assert generator["failure_classifier"] == cfg.skycap.failure_classifier
 
 
 def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None:
