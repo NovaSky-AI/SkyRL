@@ -18,6 +18,7 @@ from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import
 from skyrl.backends.skyrl_train.training_batch import (
     TrainingInputBatch,
 )
+from skyrl.backends.skyrl_train.utils import device
 from skyrl.backends.skyrl_train.utils.profiler import build_profiler_from_policy_cfg
 from skyrl.backends.skyrl_train.weight_sync import LoraLoadRequest
 from skyrl.backends.skyrl_train.workers.model_wrapper import (
@@ -189,7 +190,13 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
                 RemoteInferenceClient,
             )
 
-            if isinstance(inference_engine_client, RemoteInferenceClient):
+            if inference_engine_client is None:
+                # Native neuron backend: the engine lives on the driver and reloads
+                # this exported path after ``broadcast_to_inference_engines`` returns
+                # (see ``WorkerDispatch._neuron_save_weights_for_sampler``). Export-only.
+                # A missing client is only valid on neuron; on CUDA it is a hard failure.
+                assert device.is_neuron(), "inference_engine_client is None on a non-neuron backend"
+            elif isinstance(inference_engine_client, RemoteInferenceClient):
                 await inference_engine_client.load_lora_adapter(lora_name, lora_sync_path)
             else:
                 lora_request = LoraLoadRequest(lora_path=lora_sync_path, lora_name=lora_name)
@@ -204,7 +211,11 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
         model_id: Optional[str] = None,
     ):
         if inference_engine_client is None:
-            inference_engine_client = self._weight_sync_inference_client
+            # CUDA workers cache the client at init_weight_sync_state; the native
+            # neuron backend never does (the engine lives on the driver), so fall
+            # back to None and let _save_lora_adapters_and_sync export without
+            # reloading.
+            inference_engine_client = getattr(self, "_weight_sync_inference_client", None)
 
         # Check if this is a LoRA model
         peft_model = getattr(self.model.model, "_fsdp_wrapped_module", self.model.model)
@@ -218,7 +229,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             # PolicyWorkerBase) basename-guards against a malformed model_id
             # escaping lora_sync_path even though api.py already validates IDs.
             cache_reset_task = self._reset_prefix_cache_task(inference_engine_client, inference_engine_cfg)
-            torch.cuda.empty_cache()
+            device.empty_cache()
             lora_name, lora_sync_path = self._resolve_lora_sync_target(model_id)
             await self._save_lora_adapters_and_sync(
                 peft_model, lora_sync_path, inference_engine_client, lora_name=lora_name
@@ -226,7 +237,7 @@ class FSDPPolicyWorkerBase(PolicyWorkerBase):
             if cache_reset_task is not None:
                 await cache_reset_task
             if self.cfg.placement.colocate_all:
-                torch.cuda.empty_cache()
+                device.empty_cache()
             torch.distributed.barrier()
             return
 

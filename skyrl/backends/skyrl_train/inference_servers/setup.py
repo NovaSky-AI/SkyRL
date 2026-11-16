@@ -18,6 +18,7 @@ from skyrl.train.utils.utils import (
     get_ray_pg_ready_with_timeout,
 )
 
+from .base import InferenceEngineInterface
 from .common import SERVER_PORT_STRIDE, VLLM_START_PORT
 from .remote_inference_client import RemoteInferenceClient
 from .server_group import ServerGroup
@@ -268,11 +269,15 @@ def build_new_inference_client(
     cfg: SkyRLTrainConfig,
     tokenizer,
     placement_group: Optional[ResolvedPlacementGroup] = None,
-) -> Tuple[RemoteInferenceClient, InferenceServerSetup]:
+) -> Tuple[InferenceEngineInterface, InferenceServerSetup]:
     """Build the new HTTP-based inference client and supporting state for the policy.
 
-    :func:`build_new_inference_client_impl` with the policy's engine block, model path and vLLM args,
-    plus the policy-only client fields (tokenizer, capture, score centering, LoRA sync).
+    The native neuron backend short-circuits here: it returns an in-process
+    ``NeuronInferenceEngine`` with no server groups, router, or proxy (there is no
+    vLLM on Trainium). Otherwise this forwards to
+    :func:`build_new_inference_client_impl` with the policy's engine block, model
+    path and vLLM args, plus the policy-only client fields (tokenizer, capture,
+    score centering, LoRA sync).
 
     Args:
         cfg: SkyRL train config.
@@ -283,6 +288,24 @@ def build_new_inference_client(
         Tuple of (client, server_setup); see :func:`build_new_inference_client_impl`.
     """
     ie_cfg = cfg.generator.inference_engine
+
+    if ie_cfg.backend == "neuron":
+        # Native transformers engine: no vLLM servers, router, or HTTP proxy. The
+        # engine runs in-process on the ``neuron`` device and is returned directly.
+        from .neuron_engine import NeuronInferenceEngine
+
+        engine = NeuronInferenceEngine(
+            # ``served_model_name`` is an HTTP-endpoint alias, not a load path: the
+            # in-process engine calls ``from_pretrained`` directly, so it must receive
+            # the real checkpoint path (same value the vLLM path below passes as
+            # ``model_path``), never the alias.
+            model_path=cfg.trainer.policy.model.path,
+            tokenizer=tokenizer,
+        )
+        server_setup = InferenceServerSetup(proxy_url="", server_urls=[])
+        logger.info("Native TorchNeuron inference engine created (no vLLM servers).")
+        return engine, server_setup
+
     return build_new_inference_client_impl(
         ie_cfg,
         model_path=cfg.trainer.policy.model.path,

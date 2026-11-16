@@ -1,7 +1,8 @@
 import os
+from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional, Union
 
-from omegaconf import DictConfig, ListConfig
+from omegaconf import DictConfig, ListConfig, OmegaConf
 
 from skyrl.train.config import SamplingParams
 
@@ -82,8 +83,104 @@ def get_vllm_sampling_params(sampling_params: Union[SamplingParams, DictConfig])
     return vllm_sampling_params
 
 
+# Keys that are consumed by the mapping below (or dropped on purpose) and must not be
+# re-emitted verbatim as ``generate`` kwargs by the passthrough loop.
+_NEURON_CONSUMED_KEYS = {
+    "max_generate_length",
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "repetition_penalty",
+    "stop",
+    "logprobs",
+    "additional_kwargs",
+}
+
+
+def _sampling_params_to_dict(sampling_params: Union[SamplingParams, DictConfig, Dict[str, Any]]) -> Dict[str, Any]:
+    """Normalize the three accepted sampling-params shapes to a plain ``dict``.
+
+    Generators pass sampling params as a plain ``dict`` (``dataclasses.asdict`` of
+    ``SamplingParams``); config-driven paths pass a ``DictConfig``; and callers may
+    pass the typed ``SamplingParams`` directly. Reading keys through a single dict
+    view keeps the mapping logic free of shape-specific attribute access.
+    """
+    if isinstance(sampling_params, dict) and not isinstance(sampling_params, DictConfig):
+        return sampling_params
+    if isinstance(sampling_params, DictConfig):
+        return OmegaConf.to_container(sampling_params, resolve=True)
+    if is_dataclass(sampling_params):
+        return asdict(sampling_params)
+    raise TypeError(f"Unsupported sampling_params type: {type(sampling_params)!r}")
+
+
+def get_neuron_sampling_params(sampling_params: Union[SamplingParams, DictConfig, Dict[str, Any]]) -> Dict[str, Any]:
+    """Map SkyRL ``SamplingParams`` to transformers ``generate`` kwargs.
+
+    The native (TorchNeuron) engine calls ``model.generate(**kwargs)`` directly, so
+    the keys are transformers ``generate`` arguments rather than vLLM fields.
+
+    ``logprobs`` is deliberately dropped here: the native engine always computes
+    prompt/response logprobs via ``output_scores=True``, so the vLLM ``logprobs`` key has
+    no ``generate`` equivalent.
+
+    ``do_sample`` is derived from ``temperature`` to match vLLM semantics: transformers
+    falls back to greedy decoding at ``temperature == 1.0`` (the common RL default),
+    which would silently disable the sampling RL exploration depends on.
+    """
+    params = _sampling_params_to_dict(sampling_params)
+
+    generate_kwargs: Dict[str, Any] = {
+        "max_new_tokens": params.get("max_generate_length"),
+        "temperature": params.get("temperature"),
+        "top_p": params.get("top_p"),
+    }
+
+    stop_val = params.get("stop")
+    if stop_val is not None:
+        # ``generate`` requires ``tokenizer`` for ``stop_strings``; the engine passes
+        # its tokenizer, so a non-empty stop list works (and ``None`` is left unset
+        # rather than emitted as a dead key).
+        generate_kwargs["stop_strings"] = list(stop_val)
+
+    temperature = params.get("temperature")
+    if temperature is not None:
+        generate_kwargs["do_sample"] = temperature > 0
+
+    # ``top_k`` / ``min_p`` use SkyRL's disabled sentinels (``-1`` / ``0.0``). Emit an
+    # explicit transformers disabled value (``0``) rather than omitting the key: when the
+    # key is absent, ``generate`` falls back to the checkpoint's ``generation_config.top_k``
+    # (e.g. 20-50 for Qwen/Llama) and silently narrows the requested distribution.
+    top_k = params.get("top_k")
+    generate_kwargs["top_k"] = top_k if top_k is not None and top_k > 0 else 0
+    min_p = params.get("min_p")
+    generate_kwargs["min_p"] = min_p if min_p is not None and min_p > 0 else 0.0
+
+    additional_kwargs = params.get("additional_kwargs")
+    if additional_kwargs:
+        for key, value in additional_kwargs.items():
+            generate_kwargs.setdefault(key, value)
+
+    for key, value in params.items():
+        if key not in _NEURON_CONSUMED_KEYS and key not in generate_kwargs:
+            if isinstance(value, ListConfig):
+                value = list(value)
+            generate_kwargs[key] = value
+
+    return generate_kwargs
+
+
 def get_sampling_params_for_backend(backend: str, sampling_params: Union[SamplingParams, DictConfig]) -> Dict[str, Any]:
     if backend == "vllm":
         return get_vllm_sampling_params(sampling_params)
+    elif backend == "neuron":
+        # The native neuron engine maps SkyRL sampling params to transformers
+        # ``generate`` kwargs internally (``NeuronInferenceEngine.generate``), so the
+        # trainer/eval paths must hand it the *raw* SkyRL params here. Re-mapping to
+        # ``generate`` kwargs at this layer would be double-mapped in the engine, and it
+        # would also drop/rename the ``logprobs`` and ``stop`` keys the generators read
+        # (``agent_loop``) before they call the engine.
+        return _sampling_params_to_dict(sampling_params)
     else:
         raise ValueError(f"Unsupported generation backend: {backend}")
