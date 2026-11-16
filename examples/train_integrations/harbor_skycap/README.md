@@ -195,8 +195,9 @@ Masking is the sibling's, from the same function (`skyrl/integration/harbor/mask
   trials are, and the instance's other trials train. `1` masks the instance on any timeout.
 - **Context-length stop:** trains with reward 0, unless overlong filtering is on.
 
-A masked trial still counts as reward 0 in its group's GRPO baseline. `trainer.algorithm.zero_variance_filter`
-ignores masked trials, so it drops a group whose other trials all have the same reward.
+Advantage estimators that compare an instance's trials (`grpo`, `rloo`, `maxrl`) still count a masked trial as
+reward 0. `trainer.algorithm.zero_variance_filter` ignores masked trials, so it drops a group whose other trials
+all have the same reward.
 
 R3 (rollout routing replay) needs
 `generator.inference_engine.enable_return_routed_experts=true` and

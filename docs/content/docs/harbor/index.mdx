@@ -211,7 +211,7 @@ After all trajectories in a batch complete, the generator decides per prompt whi
 - If at least `generator.timeout_mask_instance_threshold` (default 2) trajectories for a prompt hit `AgentTimeoutError`, all of them are zeroed out too: several timeouts in one group usually point at the task or the infrastructure.
 - Below that, only the timed-out trajectories are zeroed out, and the prompt's other trajectories train. Set the threshold to `1` to zero out the whole prompt on any timeout.
 
-A zeroed-out trajectory still counts as reward 0 in its group's GRPO baseline. `trainer.algorithm.zero_variance_filter` ignores zeroed-out trajectories, so it drops a group whose other trajectories all have the same reward.
+Advantage estimators that compare a prompt's trajectories with each other (`grpo`, `rloo`, `maxrl`) still count a zeroed-out trajectory as reward 0. `trainer.algorithm.zero_variance_filter` ignores zeroed-out trajectories, so it drops a group whose other trajectories all have the same reward.
 
 ### Rate Limiting
 

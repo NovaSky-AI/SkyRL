@@ -17,11 +17,12 @@ def mask_failed_trials(
 ) -> Tuple[List[bool], Dict[str, int]]:
     """Which trials to mask, from each trial's ``(instance_id, stop_reason)``, and the counts for metrics.
 
-    An instance with an ``error`` trial is masked whole: that trial was never measured, and GRPO would count it as
-    reward 0 in its group's baseline. So is an instance with at least ``timeout_mask_instance_threshold``
-    ``agent_timeout`` trials, since several timeouts in one group point at the task or the infrastructure rather
-    than at one rollout. Fewer timeouts mask only the timed-out trials, and the rest of the instance trains; a trial
-    masked alone still counts as reward 0 in its group's baseline.
+    An instance with an ``error`` trial is masked whole: that trial was never measured, and an advantage estimator
+    that compares an instance's trials with each other (``grpo``, ``rloo``, ``maxrl``) would count it as reward 0.
+    So is an instance with at least ``timeout_mask_instance_threshold`` ``agent_timeout`` trials, since several
+    timeouts in one group point at the task or the infrastructure rather than at one rollout. Fewer timeouts mask
+    only the timed-out trials, and the rest of the instance trains; those estimators still count a trial masked
+    alone as reward 0.
     """
     trials_of: Dict[str, List[int]] = defaultdict(list)
     for index, (instance_id, _) in enumerate(trials):
