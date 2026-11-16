@@ -37,8 +37,8 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-from skycap import Sample
 
+from skycap import Sample
 from skyrl.backends.skyrl_train.utils.routed_experts import (
     RoutedExpertIndices,
     compact_routed_expert_indices,

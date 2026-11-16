@@ -15,7 +15,7 @@ from loguru import logger
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from examples.train_integrations.harbor.harbor_generator import (
+from skyrl.integration.harbor.harbor_generator import (
     MAX_NUM_RETRIES_PER_TRIAL,
     HarborAgentOutput,
     HarborGenerator,
