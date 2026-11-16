@@ -45,6 +45,7 @@ from skyrl.train.generators.base import (
     RolloutMetadataView,
     RolloutSummary,
     StoredRolloutGroup,
+    TrajectoryID,
     scalar_reward,
 )
 from skyrl.train.generators.utils import (
@@ -162,6 +163,18 @@ def _row_prompts(groups: List[GeneratedOutputGroup]) -> List[Any]:
         index = {trajectory: i for i, trajectory in enumerate(dict.fromkeys(trajectories))}
         prompts.extend(group.prompts[index[trajectory]] for trajectory in trajectories)
     return prompts
+
+
+def _merged_row_prompts(groups: List[GeneratedOutputGroup], trajectory_ids: List[TrajectoryID]) -> List[Any]:
+    """Each row's trajectory's prompt, for rows given by their ``trajectory_ids`` (the rows
+    ``merge_stepwise_output`` leaves); empty if a group kept none."""
+    prompt_of: Dict[str, Any] = {}
+    for group in groups:
+        if group.prompts is None:
+            return []
+        trajectories = dict.fromkeys(t.to_string() for t in group.metadata_view()["trajectory_ids"])
+        prompt_of.update(zip(trajectories, group.prompts))
+    return [prompt_of[t.to_string()] for t in trajectory_ids]
 
 
 def streaming_bypassed_overrides(trainer_cls: type) -> List[str]:
@@ -1456,7 +1469,12 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
             metrics_uids=metrics_uids,
         )
 
-        prompts = _row_prompts(groups)
+        # Merging step-wise rows leaves fewer rows than the groups hold.
+        prompts = (
+            _merged_row_prompts(groups, generator_output["trajectory_ids"])
+            if self.cfg.generator.merge_stepwise_output
+            else _row_prompts(groups)
+        )
         logged = self._logged_rows(generator_output["rewards"], len(prompts))
         self._log_train_examples(
             generator_output["response_ids"][0],

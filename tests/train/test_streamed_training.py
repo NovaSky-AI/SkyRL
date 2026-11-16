@@ -46,6 +46,7 @@ from skyrl.train.streamed_training import unsupported_streaming_settings
 from skyrl.train.trainer import RayPPOTrainer, advantage_metrics
 from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.async_utils import BackgroundFailure
+from skyrl.train.utils.trajectory_logging import TrajectoryLogger
 
 REDUCTIONS = [
     LossReduction.TOKEN_MEAN,
@@ -448,6 +449,72 @@ def test_rows_without_trajectory_ids_are_logged_with_their_prompts():
     output = {"rewards": [1.0, 0.0], "trajectory_ids": None}
     group = GeneratedOutputGroup(generator_output=output, uid="a", global_step_when_scheduled=0, prompts=["p0", "p1"])
     assert _row_prompts([group]) == ["p0", "p1"]
+
+
+def _merging_output(instance, rewards, turns_per_trajectory):
+    """One group whose step-wise turns of a trajectory each extend the previous one, so they merge."""
+    out = {key: [] for key in ("prompt_token_ids", "response_ids", "loss_masks", "rewards", "is_last_step")}
+    out["trajectory_ids"] = []
+    for j, (reward, turns) in enumerate(zip(rewards, turns_per_trajectory)):
+        prompt = [1000 * ord(instance) + j]
+        for turn in range(turns):
+            response = [10 + turn, 20 + turn]
+            out["prompt_token_ids"].append(prompt)
+            out["response_ids"].append(response)
+            out["loss_masks"].append([1, 1])
+            out["rewards"].append(reward)
+            out["is_last_step"].append(turn == turns - 1)
+            out["trajectory_ids"].append(TrajectoryID(instance, j))
+            prompt = prompt + response + [99]  # the next turn's observation
+    out["stop_reasons"] = ["complete"] * len(out["response_ids"])
+    out["rollout_metrics"] = {}
+    return out
+
+
+def test_merged_step_wise_rows_are_logged_with_their_trajectorys_prompt():
+    outputs = [_merging_output("a", [0.25, 1.0], [2, 1]), _merging_output("b", [0.0, 0.5], [1, 1])]
+    groups = [
+        GeneratedOutputGroup(
+            generator_output=o,
+            uid=o["trajectory_ids"][0].instance_id,
+            global_step_when_scheduled=0,
+            prompts=[f"prompt {o['trajectory_ids'][0].instance_id}{j}" for j in range(2)],
+        )
+        for o in outputs
+    ]
+    cfg = _cfg()
+    cfg.generator.merge_stepwise_output = True
+    cfg.trainer.num_logger_train_samples = 4
+    logged = {}
+
+    class Logger(TrajectoryLogger):
+        def log(self, **kwargs):
+            logged.update(kwargs)
+
+    trainer = SimpleNamespace(
+        cfg=cfg,
+        all_metrics={},
+        trajectory_logger=Logger(),
+        tracker=None,
+        global_step=1,
+        tokenizer=SimpleNamespace(decode=str),
+        _log_group_metrics=lambda *args: None,
+        log_rollout_metrics=lambda *args: None,
+        convert_to_training_input=lambda generator_output, uids: (generator_output, uids),
+    )
+    trainer.postprocess_generator_output = lambda *args, **kwargs: RayPPOTrainer.postprocess_generator_output(
+        trainer, *args, **kwargs
+    )
+    trainer._logged_rows = lambda rewards, n: FullyAsyncRayPPOTrainer._logged_rows(trainer, rewards, n)
+    trainer._log_train_examples = lambda *args: FullyAsyncRayPPOTrainer._log_train_examples(trainer, *args)
+
+    merged, uids = FullyAsyncRayPPOTrainer.convert_generation_group_mini_batch_to_training_input(trainer, groups)
+
+    # a0's two turns merge: 5 step-wise rows -> 4, each logged with its own trajectory's prompt.
+    assert uids == ["a", "a", "b", "b"]
+    assert logged["prompts"] == ["prompt a0", "prompt a1", "prompt b0", "prompt b1"]
+    assert logged["generator_output"]["response_ids"] == merged["response_ids"]
+    assert logged["generator_output"]["response_ids"][0] == [10, 20, 99, 11, 21]
 
 
 def test_a_streamed_steps_metrics_come_from_the_metadata():
