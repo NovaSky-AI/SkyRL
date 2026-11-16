@@ -7,6 +7,10 @@ and a per-expert constant. The dispatched layout (rows per expert), the MoE outp
 gradients of the hidden states and probabilities must match the stock dispatcher (FP32
 activations, so only summation order can differ).
 
+The fused mode (``SKYRL_MOE_NODE_DEDUP=fused``) runs the same check on EP4 x ETP1 (two local
+experts per rank, two GPUs per pseudo-node): with the Triton kernels, with the plain-tensor
+reference kernels, with ``moe_permute_fusion`` on, and with BF16 activations.
+
 Run with:
 uv run --isolated --extra dev --extra megatron pytest -s \
     tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/test_moe_node_dedup_dispatch.py
@@ -37,10 +41,13 @@ class _Worker:
             sock.bind(("", 0))
             return get_node_ip_address(), sock.getsockname()[1]
 
-    def run(self, rank, master_addr, master_port):
+    def run(self, rank, master_addr, master_port, mode, etp, kernels, permute_fusion, dtype):
         import os
 
         os.environ["SKYRL_MOE_NODE_SIZE"] = "2"
+        os.environ["SKYRL_MOE_NODE_DEDUP_KERNELS"] = kernels
+        ep = _WORLD // etp
+        dtype = getattr(torch, dtype)
         import torch.distributed as dist
         from megatron.core import parallel_state as mpu
         from megatron.core.process_groups_config import ProcessGroupCollection
@@ -56,7 +63,7 @@ class _Worker:
         torch.cuda.set_device(0)
         dist.init_process_group("nccl", init_method=f"tcp://{master_addr}:{master_port}", rank=rank, world_size=_WORLD)
         try:
-            mpu.initialize_model_parallel(expert_model_parallel_size=2, expert_tensor_parallel_size=2)
+            mpu.initialize_model_parallel(expert_model_parallel_size=ep, expert_tensor_parallel_size=etp)
             cfg = TransformerConfig(
                 num_layers=1,
                 hidden_size=HIDDEN,
@@ -64,28 +71,26 @@ class _Worker:
                 num_moe_experts=NUM_EXPERTS,
                 moe_router_topk=TOPK,
                 moe_token_dispatcher_type="alltoall",
-                expert_model_parallel_size=2,
-                expert_tensor_parallel_size=2,
+                expert_model_parallel_size=ep,
+                expert_tensor_parallel_size=etp,
+                moe_permute_fusion=permute_fusion,
                 add_bias_linear=False,
             )
             pgs = ProcessGroupCollection.use_mpu_process_groups()
             ep_rank = mpu.get_expert_model_parallel_rank()
-            num_local = NUM_EXPERTS // 2
+            num_local = NUM_EXPERTS // ep
             local_ids = list(range(ep_rank * num_local, (ep_rank + 1) * num_local))
             scale = torch.arange(1, NUM_EXPERTS + 1, device="cuda", dtype=torch.float32)
 
             gen = torch.Generator(device="cuda").manual_seed(100 + rank)  # different tokens per rank
-            x0 = torch.randn(TOKENS, HIDDEN, device="cuda", generator=gen)
+            x0 = torch.randn(TOKENS, HIDDEN, device="cuda", generator=gen).to(dtype)
             logits = torch.randn(TOKENS, NUM_EXPERTS, device="cuda", generator=gen)
             top = logits.topk(TOPK, dim=-1).indices
             routing_map = torch.zeros(TOKENS, NUM_EXPERTS, dtype=torch.bool, device="cuda")
             routing_map.scatter_(1, top, True)
             p0 = torch.rand(TOKENS, NUM_EXPERTS, device="cuda", generator=gen) * routing_map
 
-            stock = {
-                k: getattr(MoEAlltoAllTokenDispatcher, k)
-                for k in ("dispatch_preprocess", "token_dispatch", "token_combine", "combine_postprocess")
-            }
+            stock = {k: getattr(MoEAlltoAllTokenDispatcher, k) for k in mod._STEPS}
 
             def run_once():
                 d = MoEAlltoAllTokenDispatcher(num_local, local_ids, config=cfg, pg_collection=pgs)
@@ -95,16 +100,16 @@ class _Worker:
                 h, pr = d.token_dispatch(h, pr)
                 h, tokens_per_expert, pr = d.dispatch_postprocess(h, pr)
                 expert_scale = torch.repeat_interleave(scale[local_ids], tokens_per_expert.to(h.device))
-                y = h * (pr * expert_scale).unsqueeze(-1)
+                y = (h.float() * (pr * expert_scale).unsqueeze(-1)).to(dtype)
                 y = d.combine_preprocess(y)
                 y = d.token_combine(y)
                 out = d.combine_postprocess(y)
-                (out * torch.linspace(-1, 1, HIDDEN, device="cuda")).sum().backward()
-                return out.detach(), x.grad, p.grad, tokens_per_expert.tolist()
+                (out.float() * torch.linspace(-1, 1, HIDDEN, device="cuda")).sum().backward()
+                return out.detach().float(), x.grad.float(), p.grad, tokens_per_expert.tolist()
 
             ref = run_once()
             mod._APPLIED = False
-            os.environ[mod._ENV] = "1"
+            os.environ[mod._ENV] = mode
             assert mod.patch_moe_node_dedup_dispatch()
             try:
                 new = run_once()
@@ -112,6 +117,7 @@ class _Worker:
                 for k, v in stock.items():
                     setattr(MoEAlltoAllTokenDispatcher, k, v)
                 mod._APPLIED = False
+                os.environ[mod._ENV] = "0"
 
             def rel(a, b):
                 return ((a - b).norm() / b.norm().clamp_min(1e-12)).item()
@@ -126,15 +132,32 @@ class _Worker:
             dist.destroy_process_group()
 
 
-def test_node_dedup_matches_stock_dispatcher(ray_init_fixture):
+@pytest.mark.parametrize(
+    "mode,etp,kernels,permute_fusion,dtype,tol",
+    [
+        ("1", 2, "triton", False, "float32", 1e-5),
+        ("fused", 1, "triton", False, "float32", 1e-5),
+        ("fused", 1, "torch", False, "float32", 1e-5),
+        ("fused", 1, "triton", True, "float32", 1e-5),
+        ("fused", 1, "triton", False, "bfloat16", 3e-2),
+    ],
+)
+def test_node_dedup_matches_stock_dispatcher(ray_init_fixture, mode, etp, kernels, permute_fusion, dtype, tol):
     pg = placement_group([{"GPU": _WORLD, "CPU": _WORLD}], strategy="PACK")
     get_ray_pg_ready_with_timeout(pg, timeout=30)
     strategy = PlacementGroupSchedulingStrategy(placement_group=pg, placement_group_bundle_index=0)
     workers = [_Worker.options(scheduling_strategy=strategy).remote() for _ in range(_WORLD)]
-    master_addr, master_port = ray.get(workers[0].endpoint.remote())
-    results = ray.get([w.run.remote(r, master_addr, master_port) for r, w in enumerate(workers)])
+    try:
+        master_addr, master_port = ray.get(workers[0].endpoint.remote())
+        args = (mode, etp, kernels, permute_fusion, dtype)
+        results = ray.get([w.run.remote(r, master_addr, master_port, *args) for r, w in enumerate(workers)])
+    finally:
+        # The next parameter set needs the same four GPUs.
+        for w in workers:
+            ray.kill(w)
+        ray.util.remove_placement_group(pg)
     for rank, res in enumerate(results):
         print(f"rank {rank}: {res}")
         assert res["tokens_per_expert_equal"], (rank, res)
         for k in ("out", "dx", "dprobs"):
-            assert res[k] < 1e-5, (rank, k, res)
+            assert res[k] < tol, (rank, k, res)

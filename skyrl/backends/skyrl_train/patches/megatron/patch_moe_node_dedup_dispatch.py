@@ -25,6 +25,12 @@ Requirements (checked): dropless routing, unfused permutation, no quantization p
 batch-invariant mode, no shared-expert overlap, expert-data-parallel size 1 (EP * ETP == world),
 ETP ranks contiguous, and nodes of equal size divisible by ETP. Node membership comes from the
 hostname; ``SKYRL_MOE_NODE_SIZE`` overrides it (for single-node tests with pseudo-nodes).
+
+``SKYRL_MOE_NODE_DEDUP=fused`` selects the fused form of the same two hops
+(``_moe_twohop_fused``): 2 all-to-alls per dispatch and 2 per combine instead of 7 and 2, no count
+exchange after the first all-gather, row kernels that write packed messages in one pass, and a
+hand-written backward. It replaces megatron-core's permutation, so it runs with
+``moe_permute_fusion`` on or off. It needs ETP 1 in addition to the requirements above.
 """
 
 import contextlib
@@ -97,7 +103,7 @@ def _profile_report() -> None:
     logger.info(f"MoE dispatch profile, rank {rank}, {_PROFILE_COMBINES} combines (cumulative):{lines}")
 
 
-def _install_profile(dedup: bool) -> None:
+def _install_profile(mode: str) -> None:
     """Turn the timers on: the dispatcher steps of the active path, the MoE layer forward, and the
     backward of every all-to-all (named by its group size: EP group, node group, or rail group).
     With activation recompute the forward phases also count the recomputed forward."""
@@ -112,13 +118,14 @@ def _install_profile(dedup: bool) -> None:
 
     _PROFILE_ON = True
     cls = MoEAlltoAllTokenDispatcher
-    prefix = "twohop" if dedup else "stock"
-    # Two-hop path: token_dispatch and token_combine carry their own finer phases.
-    steps = ["dispatch_preprocess", "dispatch_postprocess", "combine_preprocess"]
+    dedup = mode != "stock"
+    # Two-hop path: token_dispatch and token_combine carry their own finer phases. The fused path
+    # times every phase itself (forward and backward) and has no work in the other steps.
+    steps = [] if mode == "fused" else ["dispatch_preprocess", "dispatch_postprocess", "combine_preprocess"]
     if not dedup:
         steps += ["token_dispatch", "token_combine"]
     for step in steps:
-        setattr(cls, step, _timed(f"{prefix}/fwd/{step}", getattr(cls, step)))
+        setattr(cls, step, _timed(f"{mode}/fwd/{step}", getattr(cls, step)))
     if not dedup:
         stock_post = _timed("stock/fwd/combine_postprocess", cls.combine_postprocess)
 
@@ -139,7 +146,7 @@ def _install_profile(dedup: bool) -> None:
             return stock_backward(ctx, *grad_output)
 
     a2a.backward = staticmethod(backward)
-    logger.info(f"{_PROFILE_ENV}=1: MoE dispatch phase timers on ({'two-hop' if dedup else 'stock'} path)")
+    logger.info(f"{_PROFILE_ENV}=1: MoE dispatch phase timers on ({mode} path)")
 
 
 _TOPOLOGY: Dict[tuple, "_Topology"] = {}
@@ -218,18 +225,22 @@ def _a2a(group, x: torch.Tensor, send: List[int], recv: List[int]) -> torch.Tens
 
 
 def _a2a_nograd(group, x: torch.Tensor, send: List[int], recv: List[int]) -> torch.Tensor:
+    if len(send) == 1:
+        return x
     out = x.new_empty((sum(recv),) + tuple(x.shape[1:]))
     dist.all_to_all_single(out, x.contiguous(), recv, send, group=group)
     return out
 
 
-def _check_supported(d) -> None:
+def _check_supported(d, fused: bool = False) -> None:
     cfg = d.config
     problems = []
     if d.drop_and_pad or cfg.moe_expert_capacity_factor is not None:
         problems.append("token dropping")
-    if cfg.moe_permute_fusion:
-        problems.append("moe_permute_fusion")
+    if cfg.moe_permute_fusion and not fused:
+        problems.append("moe_permute_fusion (the fused mode supports it)")
+    if fused and d.tp_size != 1:
+        problems.append("expert tensor parallel size > 1 in fused mode")
     if cfg.moe_router_padding_for_quantization:
         problems.append("moe_router_padding_for_quantization")
     if getattr(cfg, "batch_invariant_mode", False):
@@ -237,7 +248,7 @@ def _check_supported(d) -> None:
     if d.shared_experts is not None:
         problems.append("moe_shared_expert_overlap")
     if problems:
-        raise NotImplementedError(f"{_ENV}=1 does not support: {', '.join(problems)}")
+        raise NotImplementedError(f"{_ENV} does not support: {', '.join(problems)}")
 
 
 def _dispatch_preprocess(self, hidden_states, routing_map, probs):
@@ -387,11 +398,95 @@ def _combine_postprocess(self, output):
     return output.view(self.hidden_shape)
 
 
+# ---------------------------------------------------------------- fused mode
+_COMMS: Dict[tuple, object] = {}
+
+
+def _dist_comm(dispatcher):
+    """The fused path's transport for this dispatcher's expert-parallel group (cached)."""
+    from skyrl.backends.skyrl_train.patches.megatron import _moe_twohop_fused as fused
+
+    topo = _topology(dispatcher)
+    key = (tuple(topo.ep_ranks), dispatcher.tp_size)
+    if key in _COMMS:
+        return _COMMS[key]
+    world = dist.get_world_size()
+    world_group = dispatcher.tp_ep_group
+    if dist.get_process_group_ranks(world_group) != list(range(world)):
+        raise RuntimeError(f"{_ENV}=fused: the expert-parallel group must hold every rank in order")
+
+    class _DistComm(fused.Comm):
+        world_size, rank = world, dist.get_rank()
+        num_nodes, node_size = topo.num_nodes, topo.node_size
+
+        def all_gather(self, vec):
+            out = vec.new_empty(world, vec.numel())
+            dist.all_gather_into_tensor(out, vec, group=world_group)
+            return out
+
+        def rail_a2a(self, x, send, recv):
+            return _a2a_nograd(topo.rail_group, x, send, recv)
+
+        def node_a2a(self, x, send, recv):
+            return _a2a_nograd(topo.node_group, x, send, recv)
+
+        def phase(self, name):
+            return _phase(f"fused/{name}")
+
+    _COMMS[key] = _DistComm()
+    return _COMMS[key]
+
+
+def _fused_dispatch_preprocess(self, hidden_states, routing_map, probs):
+    _check_supported(self, fused=True)
+    self.hidden_shape = hidden_states.shape
+    self.probs = probs
+    self.routing_map = routing_map
+    return hidden_states.view(-1, self.hidden_shape[-1]), probs
+
+
+def _fused_token_dispatch(self, hidden_states, probs):
+    from skyrl.backends.skyrl_train.patches.megatron import _moe_twohop_fused as fused
+
+    self._twohop_state = fused.TwoHopState(_dist_comm(self), self.num_local_experts, self.config.moe_router_topk)
+    return fused.dispatch(self._twohop_state, hidden_states, probs, self.routing_map)
+
+
+def _fused_dispatch_postprocess(self, hidden_states, probs):
+    # Rows already arrive ordered by local expert.
+    return hidden_states, self._twohop_state.tokens_per_expert, probs
+
+
+def _fused_combine_preprocess(self, hidden_states):
+    return hidden_states
+
+
+def _fused_token_combine(self, hidden_states, async_finish: bool = True, allocate_on_comm_stream: bool = True):
+    from skyrl.backends.skyrl_train.patches.megatron import _moe_twohop_fused as fused
+
+    state, self._twohop_state = self._twohop_state, None
+    out = fused.combine(state, hidden_states)
+    _profile_report()
+    return out
+
+
+_STEPS = (
+    "dispatch_preprocess",
+    "token_dispatch",
+    "dispatch_postprocess",
+    "combine_preprocess",
+    "token_combine",
+    "combine_postprocess",
+)
+
+
 def patch_moe_node_dedup_dispatch() -> bool:
-    """Install the node-deduplicated all-to-all when ``SKYRL_MOE_NODE_DEDUP=1``. Idempotent."""
+    """Install the node-deduplicated all-to-all when ``SKYRL_MOE_NODE_DEDUP`` is ``1`` (tensor ops)
+    or ``fused`` (row kernels, 2 all-to-alls per direction). Idempotent."""
     global _APPLIED
-    if os.environ.get(_ENV, "0").lower() not in ("1", "true"):
-        _install_profile(dedup=False)
+    mode = os.environ.get(_ENV, "0").lower()
+    if mode not in ("1", "true", "fused"):
+        _install_profile("stock")
         return False
     if _APPLIED:
         return True
@@ -400,11 +495,28 @@ def patch_moe_node_dedup_dispatch() -> bool:
     )
 
     cls = MoEAlltoAllTokenDispatcher
-    cls.dispatch_preprocess = functools.wraps(cls.dispatch_preprocess)(_dispatch_preprocess)
-    cls.token_dispatch = functools.wraps(cls.token_dispatch)(_token_dispatch)
-    cls.token_combine = functools.wraps(cls.token_combine)(_token_combine)
-    cls.combine_postprocess = functools.wraps(cls.combine_postprocess)(_combine_postprocess)
+    if mode == "fused":
+        new = dict(
+            dispatch_preprocess=_fused_dispatch_preprocess,
+            token_dispatch=_fused_token_dispatch,
+            dispatch_postprocess=_fused_dispatch_postprocess,
+            combine_preprocess=_fused_combine_preprocess,
+            token_combine=_fused_token_combine,
+            combine_postprocess=_combine_postprocess,
+        )
+    else:
+        new = dict(
+            dispatch_preprocess=_dispatch_preprocess,
+            token_dispatch=_token_dispatch,
+            token_combine=_token_combine,
+            combine_postprocess=_combine_postprocess,
+        )
+    for step, fn in new.items():
+        setattr(cls, step, functools.wraps(getattr(cls, step))(fn))
     _APPLIED = True
-    _install_profile(dedup=True)
-    logger.info(f"{_ENV}=1: MoE all-to-all sends each token once per destination node")
+    _install_profile("fused" if mode == "fused" else "twohop")
+    logger.info(
+        f"{_ENV}={mode}: MoE all-to-all sends each token once per destination node"
+        + (" (fused kernels)" if mode == "fused" else "")
+    )
     return True
