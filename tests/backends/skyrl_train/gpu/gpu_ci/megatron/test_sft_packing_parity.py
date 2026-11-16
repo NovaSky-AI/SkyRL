@@ -91,7 +91,6 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
         from megatron.core.pipeline_parallel import get_forward_backward_func
 
         from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
-            make_batch_generator,
             packed_seq_params_for,
         )
         from skyrl.backends.skyrl_train.distributed.megatron.model_utils import (
@@ -214,7 +213,9 @@ class _ParityProbeWorkerBase(MegatronPolicyWorkerBase):
             return outputs, partial(collection_func, data=batch)
 
         forward_backward_func = get_forward_backward_func()
-        batch_generator = make_batch_generator(micro_buffer, vpp_size=len(self.actor_module))
+        # One iterator per virtual pipeline chunk.
+        chunk_iterators = [iter(micro_buffer) for _ in self.actor_module]
+        batch_generator = chunk_iterators if len(chunk_iterators) > 1 else chunk_iterators[0]
         with torch.no_grad():
             forward_backward_func(
                 forward_step_func=forward_step,
