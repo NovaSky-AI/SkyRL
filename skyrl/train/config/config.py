@@ -675,8 +675,8 @@ class MegatronConfig(BaseConfig):
     """Pass-through kwargs for Megatron's ``TransformerConfig``:
     https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py
     ``rope_parameters`` is the one HuggingFace config key read here (the Megatron counterpart of FSDP's
-    ``model_config_kwargs.rope_parameters``): it is applied to the HF config Megatron-Bridge translates, and
-    startup fails if the model's bridge cannot apply its ``rope_type``.
+    ``model_config_kwargs.rope_parameters``): it is applied to the HF config Megatron-Bridge translates, it
+    must include ``rope_theta``, and startup fails if the model's bridge cannot apply its ``rope_type``.
 
     FP8 training is configured through the top-level ``fp8``, ``fp8_recipe``, ``fp8_param``, and
     ``fp8_amax_compute_algo`` fields above, which fold into these kwargs; setting the same keys

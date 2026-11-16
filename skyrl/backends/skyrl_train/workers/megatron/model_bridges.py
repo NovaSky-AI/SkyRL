@@ -279,7 +279,12 @@ def _expected_rope_fields(provider, rope_parameters: dict) -> dict:
             f"transformer_config_kwargs.rope_parameters.rope_type={rope_type!r} is not supported on the Megatron "
             f"backend; supported: {', '.join(_ROPE_FACTOR_FIELDS)}."
         )
-    expected = {"rotary_base": rope_parameters["rope_theta"]} if "rope_theta" in rope_parameters else {}
+    if "rope_theta" not in rope_parameters:
+        raise ValueError(
+            "transformer_config_kwargs.rope_parameters needs 'rope_theta': it replaces the checkpoint's whole "
+            "rope_parameters, and without it Megatron-Bridge and vLLM fall back to different defaults."
+        )
+    expected = {"rotary_base": rope_parameters["rope_theta"]}
     field = _ROPE_FACTOR_FIELDS[rope_type]
     if field is not None:
         if "factor" not in rope_parameters:

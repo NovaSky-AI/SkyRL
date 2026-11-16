@@ -72,6 +72,12 @@ def _bridge(config, tmp_path):
         pytest.param(_qwen2, LINEAR, "Qwen2Bridge does not translate it", id="qwen2-linear-dropped"),
         pytest.param(_qwen2, {"rope_type": "dynamic", "factor": 2.0}, "'dynamic' is not supported", id="unknown-type"),
         pytest.param(_qwen2, {"rope_type": "yarn", "rope_theta": 1_000_000.0}, "needs a 'factor'", id="no-factor"),
+        pytest.param(
+            _qwen2,
+            {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 4096},
+            "needs 'rope_theta'",
+            id="no-theta",
+        ),
     ],
 )
 def test_rope_override_reaches_the_provider_or_raises(tmp_path, make_config, override, match):
