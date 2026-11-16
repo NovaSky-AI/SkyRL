@@ -218,6 +218,8 @@ def convert_prompts_responses_to_batch_tensors(
     rollout_expert_indices: Optional[List[RoutedExpertIndices]] = None,
     rollout_sample_support: Optional[List[CompactSampleSupport]] = None,
     max_seq_len: Optional[int] = None,
+    *,
+    padded_shape: Optional[Tuple[int, int]] = None,
 ) -> Tuple[
     Float[torch.Tensor, "batch seq_len"],
     Float[torch.Tensor, "batch seq_len"],
@@ -275,6 +277,8 @@ def convert_prompts_responses_to_batch_tensors(
         logprobs: List of rollout log probs for each response
         max_seq_len: Optional. If provided and ``max(prompt_i + response_i)``
             exceeds it, a warning is logged (no truncation is performed).
+        padded_shape: ``(max_total, max_response)`` to pad to instead of these rows' own, so rows
+            collated apart match the same rows collated with others.
 
     Returns:
         sequences: ``(batch, max_total)`` where ``max_total = max(prompt_i + response_i)``.
@@ -297,6 +301,10 @@ def convert_prompts_responses_to_batch_tensors(
     max_response = max(response_token_lens)
     # Pad to the tightest bound: max per-sample total.
     max_total = max(p + r for p, r in zip(prompt_token_lens, response_token_lens))
+    if padded_shape is not None:
+        if padded_shape[0] < max_total or padded_shape[1] < max_response:
+            raise ValueError(f"rows of up to {(max_total, max_response)} tokens do not fit {padded_shape}")
+        max_total, max_response = padded_shape
 
     if max_seq_len is not None and max_total > max_seq_len:
         logger.warning(
@@ -396,15 +404,20 @@ class RowCollation:
     max_seq_len: Optional[int]
     # Off-policy correction is on: every row must carry its rollout logprobs.
     require_rollout_logprobs: bool
+    # Router replay is on: rows with a loss token must carry their routes.
+    routes_expected: bool = False
 
 
-def rows_to_training_input(rows: Mapping[str, Any], collation: RowCollation) -> TrainingInputBatch:
+def rows_to_training_input(
+    rows: Mapping[str, Any], collation: RowCollation, *, padded_shape: Optional[Tuple[int, int]] = None
+) -> TrainingInputBatch:
     """Collate generated rows into a padded ``TrainingInputBatch``.
 
     ``rows`` holds ``GeneratorOutput``'s per-row lists (``prompt_token_ids``, ``response_ids``,
     ``loss_masks`` and, when present, ``rewards``, ``rollout_logprobs``, ``rollout_expert_indices``,
     ``rollout_sample_support``, ``pixel_values`` and ``image_grid_thw``). Rows may be read-only;
     every output tensor is a new buffer. Without ``rewards`` the batch has no rewards tensor.
+    ``padded_shape`` is ``convert_prompts_responses_to_batch_tensors``'s.
 
     Pure: it depends on nothing but its arguments, so a trainer or a worker can call it.
     """
@@ -417,6 +430,9 @@ def rows_to_training_input(rows: Mapping[str, Any], collation: RowCollation) -> 
         image_grid_thw = TensorList(image_grid_thw)
 
     rollout_expert_indices = rows.get("rollout_expert_indices")
+    # Rows with nothing to train (every rollout failed) have nothing to replay, as validate_generator_output allows.
+    if collation.routes_expected and rollout_expert_indices is None and any(any(m) for m in rows["loss_masks"]):
+        raise ValueError("router replay is on, but the rows carry no rollout_expert_indices")
     (
         sequences,
         attention_mask,
@@ -436,6 +452,7 @@ def rows_to_training_input(rows: Mapping[str, Any], collation: RowCollation) -> 
         rollout_expert_indices,
         rows.get("rollout_sample_support"),
         max_seq_len=collation.max_seq_len,
+        padded_shape=padded_shape,
     )
     router_padding_mask = None
     if rollout_expert_indices is not None:

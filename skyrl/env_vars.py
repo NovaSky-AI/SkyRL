@@ -24,6 +24,12 @@ SKYRL_WORKER_NCCL_TIMEOUT_IN_S = int(os.environ.get("SKYRL_WORKER_NCCL_TIMEOUT_I
 Timeout for initializing the NCCL process group for the worker, defaults to 10 minutes.
 """
 
+SKYRL_PAYLOAD_FETCH_TIMEOUT_S = float(os.environ.get("SKYRL_PAYLOAD_FETCH_TIMEOUT_S", 600))
+"""
+Timeout for a training worker to fetch the stored rollouts of one streamed microbatch. A fetch that
+times out raises rather than leaving the other ranks waiting in a collective. Defaults to 10 minutes.
+"""
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Inference Servers
 # ─────────────────────────────────────────────────────────────────────────────
