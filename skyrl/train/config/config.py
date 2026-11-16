@@ -1889,6 +1889,22 @@ class TrainerConfig(BaseConfig):
         if self.ref.model.path is None:
             self.ref.model.path = self.policy.model.path
 
+        # The reference model scores the same tokens as the policy, so it takes the policy's RoPE override; a
+        # different one would make the KL term measure the RoPE difference instead of policy drift.
+        if self.strategy == "megatron":
+            policy_rope = self.policy.megatron_config.transformer_config_kwargs.get("rope_parameters")
+            ref_kwargs = self.ref.megatron_config.transformer_config_kwargs
+            if policy_rope is not None:
+                ref_rope = ref_kwargs.get("rope_parameters")
+                if ref_rope is None:
+                    ref_kwargs["rope_parameters"] = copy.deepcopy(policy_rope)
+                elif ref_rope != policy_rope:
+                    raise ValueError(
+                        "trainer.ref.megatron_config.transformer_config_kwargs.rope_parameters must match "
+                        "trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters (or be unset, to "
+                        "inherit it): the reference model scores the same tokens as the policy."
+                    )
+
         if self.log_example_interval > 0:
             print(
                 f"log_example_interval has been renamed, use print_example_interval instead. Setting print_example_interval to {self.log_example_interval}"

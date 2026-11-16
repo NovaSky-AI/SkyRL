@@ -903,6 +903,37 @@ def test_hf_overrides_rope_parameters_allowed_with_megatron_transformer_config_k
     }
 
 
+_MEGATRON_YARN_OVERRIDES = [
+    f"{prefix}.rope_parameters.{key}={value}"
+    for prefix in (
+        "generator.inference_engine.engine_init_kwargs.hf_overrides",
+        "trainer.policy.megatron_config.transformer_config_kwargs",
+    )
+    for key, value in (("rope_type", "yarn"), ("factor", 2.0), ("rope_theta", 1000000.0))
+]
+
+
+def test_megatron_ref_inherits_the_policy_rope_override():
+    cfg = SkyRLTrainConfig.from_cli_overrides(["trainer.strategy=megatron", *_MEGATRON_YARN_OVERRIDES])
+
+    assert (
+        cfg.trainer.ref.megatron_config.transformer_config_kwargs["rope_parameters"]
+        == cfg.trainer.policy.megatron_config.transformer_config_kwargs["rope_parameters"]
+    )
+
+
+def test_megatron_ref_rope_override_must_match_the_policy():
+    with pytest.raises(ValueError, match="trainer.ref.megatron_config.transformer_config_kwargs.rope_parameters"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                "trainer.strategy=megatron",
+                *_MEGATRON_YARN_OVERRIDES,
+                "trainer.ref.megatron_config.transformer_config_kwargs.rope_parameters.rope_type=default",
+                "trainer.ref.megatron_config.transformer_config_kwargs.rope_parameters.rope_theta=10000.0",
+            ]
+        )
+
+
 def test_hf_overrides_rope_parameters_must_match_fsdp_trainer_side_override():
     with pytest.raises(
         ValueError,
