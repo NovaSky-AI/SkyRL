@@ -124,3 +124,25 @@ class TestMakeSeqPackerFactory:
         assert packer.bin_capacity == 100
         assert packer.min_bin_count == 4
         assert packer.bin_count_multiple == 2
+
+
+def test_balanced_partition_fills_exactly_the_bins_asked_for_with_balanced_totals():
+    from skyrl.train.dataset.bin_packing import Balanced
+
+    lengths = [9, 1, 8, 2, 7, 3, 3]
+    bins = Balanced.partition(lengths, 3)
+
+    assert len(bins) == 3 and all(bins)
+    assert sorted(i for b in bins for i in b) == list(range(len(lengths)))
+    totals = [sum(lengths[i] for i in b) for b in bins]
+    assert max(totals) - min(totals) <= max(lengths)
+    # Longest first into the least-loaded bin: the three longest open the three bins.
+    assert sorted(b[0] for b in bins) == [0, 2, 4]
+
+
+def test_balanced_partition_leaves_bins_empty_only_when_items_run_out():
+    from skyrl.train.dataset.bin_packing import Balanced
+
+    assert Balanced.partition([5, 4], 3) == [[0], [1], []]
+    with pytest.raises(ValueError, match="positive"):
+        Balanced.partition([1], 0)

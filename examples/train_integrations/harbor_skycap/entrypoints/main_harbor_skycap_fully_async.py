@@ -1,7 +1,8 @@
 """Fully-async training on Harbor tasks through skycap.
 
 ``main_harbor_skycap`` with ``FullyAsyncRayPPOTrainer``, as ``main_harbor_fully_async`` is for the
-sibling.
+sibling. With ``trainer.fully_async.store_groups_in_ray=true`` each group's rows stay in the object
+store of the node whose skycap server composed them until they are trained on.
 """
 
 import sys

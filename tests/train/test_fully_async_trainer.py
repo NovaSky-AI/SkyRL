@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import ray
 from torchdata.stateful_dataloader import StatefulDataLoader
 
 from skyrl.train.fully_async_trainer import (
@@ -18,6 +19,7 @@ from skyrl.train.fully_async_trainer import (
     _AsyncStalenessManager,
     _trajectory_ids,
 )
+from skyrl.train.generators.base import StoredRolloutGroup
 from skyrl.train.utils.async_utils import BackgroundFailure
 
 
@@ -242,7 +244,12 @@ def _trainer_with_tol(tol: float):
 
 def _group(rewards, loss_masks, uid="u"):
     return GeneratedOutputGroup(
-        generator_output={"rewards": rewards, "loss_masks": loss_masks},
+        generator_output={
+            "prompt_token_ids": [[0]] * len(rewards),
+            "response_ids": [[0] * len(mask) for mask in loss_masks],
+            "rewards": rewards,
+            "loss_masks": loss_masks,
+        },
         uid=uid,
         global_step_when_scheduled=0,
     )
@@ -307,3 +314,26 @@ def test_should_keep_group_token_level_rewards():
         )
         is True
     )
+
+
+def _stored_group(uid, rewards, num_loss_tokens=None):
+    num_loss_tokens = num_loss_tokens or [1] * len(rewards)
+    output = {
+        "prompt_token_ids": [[1]] * len(rewards),
+        "response_ids": [[2, 3]] * len(rewards),
+        "rewards": rewards,
+        "loss_masks": [[1] * n + [0] * (2 - n) for n in num_loss_tokens],
+    }
+    return GeneratedOutputGroup(
+        generator_output=StoredRolloutGroup.from_output(output), uid=uid, global_step_when_scheduled=0
+    )
+
+
+def test_should_keep_stored_group_without_loading_it(monkeypatch):
+    keep = FullyAsyncRayPPOTrainer._should_keep_group
+    monkeypatch.setattr(ray, "get", lambda *args, **kwargs: pytest.fail("the keep check loaded payloads"))
+
+    assert keep(_trainer_with_tol(0.0), _stored_group("u", [1.0, 1.0], [2, 1])) is False
+    assert keep(_trainer_with_tol(0.0), _stored_group("u", [1.0, 0.0], [2, 1])) is True
+    # A trajectory without loss tokens is not live, so its 0.0 reward is not reward spread.
+    assert keep(_trainer_with_tol(0.0), _stored_group("u", [1.0, 1.0, 0.0], [2, 1, 0])) is False

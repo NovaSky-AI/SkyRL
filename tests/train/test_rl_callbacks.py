@@ -24,6 +24,7 @@ import torch
 
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.generators.base import TrajectoryID
+from skyrl.train.streamed_training import unsupported_streaming_settings
 from skyrl.train.trainer import RayPPOTrainer
 from skyrl.train.utils.callbacks import (
     CallbackInput,
@@ -68,6 +69,7 @@ class RecorderCallback(TrainingCallback):
                     "total_steps": ci.total_steps,
                     "steps_per_epoch": ci.steps_per_epoch,
                     "has_batch": ci.batch is not None,
+                    "streamed_rows": ci.streamed_rows,
                     "trajectory_ids": ci.trajectory_ids,
                     "consumed_trajectory_ids": ci.consumed_trajectory_ids,
                     "has_metrics": ci.metrics is not None,
@@ -433,11 +435,13 @@ def test_step_in_flight_at_epoch_boundary_is_abandoned_cleanly(monkeypatch):
     assert not trainer.all_timings
 
 
-def test_callbacks_fire_during_fully_async_training(monkeypatch):
+@pytest.mark.parametrize("streamed", [False, True])
+def test_callbacks_fire_during_fully_async_training(monkeypatch, streamed):
     """A 2-step fully-async run fires every relevant event, in order, with the right payloads.
 
     Generation is stubbed: each step's mini-batch comes straight from ``_collect_generation_mini_batch``, so the
-    test only exercises the orchestration in ``FullyAsyncRayPPOTrainer.train()``.
+    test only exercises the orchestration in ``FullyAsyncRayPPOTrainer.train()``. A streamed step
+    (``store_groups_in_ray``) builds no batch and hands its callbacks the rows it trained instead.
     """
     from skyrl.train.fully_async_trainer import (
         FullyAsyncRayPPOTrainer,
@@ -453,6 +457,11 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
     cfg.trainer.eval_before_train = True
     # Saves at step 2 (interval and epoch end), so the step-1 save comes only from the force-save callback.
     cfg.trainer.ckpt_interval = 2
+    if streamed:
+        cfg.trainer.fully_async.store_groups_in_ray = True
+        cfg.trainer.max_tokens_per_microbatch = 1024
+        cfg.trainer.algorithm.use_kl_loss = False
+        assert unsupported_streaming_settings(cfg, has_critic=False) == []
 
     tokenizer = MagicMock()
     tokenizer.pad_token_id = 0
@@ -498,6 +507,10 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
         trainer, "convert_generation_group_mini_batch_to_training_input", lambda *_args: _stub_training_input()
     )
     monkeypatch.setattr(trainer, "_run_training", AsyncMock(return_value={"policy_loss": 0.42}))
+    streamed_rows = [object(), object()]
+    monkeypatch.setattr(
+        trainer, "_train_streamed_step", lambda groups, dropped: ({"policy_loss": 0.42}, streamed_rows.pop(0))
+    )
     monkeypatch.setattr(trainer, "eval", AsyncMock(return_value={"eval/score": 0.5}))
     monkeypatch.setattr(trainer, "save_checkpoints", lambda: _FAKE_CKPT_PATH)
     # The stubbed collection bypasses the staleness accounting this epoch-end check validates.
@@ -540,8 +553,10 @@ def test_callbacks_fire_during_fully_async_training(monkeypatch):
         snaps_by_event.setdefault(name, []).append(snap)
 
     for snap in snaps_by_event["on_step_end"]:
-        assert snap["has_batch"], "on_step_end should see the training batch"
+        assert snap["has_batch"] != streamed, "on_step_end should see the training batch, or streamed, none"
+        assert (snap["streamed_rows"] is not None) == streamed, snap
         assert "policy_loss" in snap["metrics_keys"], snap["metrics_keys"]
+    assert not streamed_rows or not streamed, "each streamed step should hand its callbacks its own rows"
     # Each step names its own kept groups' trajectories, and everything it took from the buffer.
     assert [
         ([t.instance_id for t in snap["trajectory_ids"]], [t.instance_id for t in snap["consumed_trajectory_ids"]])
