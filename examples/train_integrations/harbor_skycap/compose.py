@@ -71,6 +71,23 @@ class TrialOutcome:
     unbridged_calls: int = 0
     # R3: the trial finished, but a trained path lacked routed experts.
     missing_routes: bool = False
+    # The skycap trajectory whose samples a server actor composes, when they stayed there.
+    capture_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TrialChecks:
+    """What the generator needs to know about a finished trial's samples to decide whether to train on it."""
+
+    # Some path has a trained token.
+    trainable: bool
+    # Some path that trains lacks its routed experts.
+    missing_routes: bool
+
+    @classmethod
+    def of(cls, samples: List[Sample]) -> "TrialChecks":
+        trained = [sample for sample in samples if _first_trained(sample) is not None]
+        return cls(trainable=bool(trained), missing_routes=not all(map(_has_routes, trained)))
 
 
 @dataclass
@@ -87,13 +104,20 @@ class _Row:
     placeholder: bool = False
 
 
-def split(sample: Sample) -> Optional[_Row]:
-    """A sample as prompt and response, split at its first trained token. None if it trains nothing."""
+def _first_trained(sample: Sample) -> Optional[int]:
+    """The index of the sample's first trained token; None if it trains nothing."""
     if sample.input_ids is None or sample.loss_mask is None:
         raise ValueError("skycap samples need tokens; run skycap in token mode")
     try:
-        first = sample.loss_mask.index(1)
+        return sample.loss_mask.index(1)
     except ValueError:
+        return None
+
+
+def split(sample: Sample) -> Optional[_Row]:
+    """A sample as prompt and response, split at its first trained token. None if it trains nothing."""
+    first = _first_trained(sample)
+    if first is None:
         return None
     return _Row(
         prompt=sample.input_ids[:first],
@@ -109,12 +133,15 @@ def split(sample: Sample) -> Optional[_Row]:
     )
 
 
+def _has_routes(sample: Sample) -> bool:
+    return sample.routed_experts is not None and len(sample.routed_experts) == len(sample.input_ids)
+
+
 def _routes(sample: Sample) -> Optional[RoutedExpertIndices]:
     """The path's routes, less the last token's, which the engine never forwarded."""
-    routed = sample.routed_experts
-    if routed is None or len(routed) != len(sample.input_ids):
+    if not _has_routes(sample):
         return None
-    return compact_routed_expert_indices(np.asarray(routed[:-1]))
+    return compact_routed_expert_indices(np.asarray(sample.routed_experts[:-1]))
 
 
 def _placeholder() -> _Row:

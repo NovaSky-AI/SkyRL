@@ -38,8 +38,8 @@ import hashlib
 import json
 import os
 import queue
-import sys
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -118,9 +118,15 @@ class RecordLog:
         with self._lock:
             self._entries.setdefault(phase, []).append(entry)
 
-    def take(self, phase: str) -> List[RecordEntry]:
+    def take(self, phase: str, trajectories: Optional[Set[Tuple[str, int]]] = None) -> List[RecordEntry]:
+        """A phase's entries, or only those of ``trajectories`` (``(instance_id, repetition_id)``)."""
         with self._lock:
-            return self._entries.pop(phase, [])
+            if trajectories is None:
+                return self._entries.pop(phase, [])
+            entries = self._entries.get(phase, [])
+            taken = [e for e in entries if (e.instance_id, e.repetition_id) in trajectories]
+            self._entries[phase] = [e for e in entries if (e.instance_id, e.repetition_id) not in trajectories]
+            return taken
 
 
 def artifact_name(phase: str, run_id: str) -> str:
@@ -271,17 +277,20 @@ class SkycapRecordIndex(TrainingCallback):
         self._counts = {"logged": 0, "failed": 0, "timed_out": 0, "dropped": 0, "retried": 0, "discarded": 0}
 
     # -- events -----------------------------------------------------------------
-    def on_step_start(self, trainer: Any, callback_input: CallbackInput, control: TrainingControl) -> None:
+    def on_step_end(self, trainer: Any, callback_input: CallbackInput, control: TrainingControl) -> None:
+        # A fully-async step takes only its own trajectories: the rest were generated for later steps.
+        consumed = callback_input.consumed_trajectory_ids
+        trajectories = None if consumed is None else {(str(t.instance_id), t.repetition_id) for t in consumed}
+        self._index(trainer, "train", callback_input.global_step, trained_keys(callback_input), trajectories)
+
+    def on_epoch_end(self, trainer: Any, callback_input: CallbackInput, control: TrainingControl) -> None:
         # Each step's train trajectories are taken at its end, so any still here are from a batch the trainer
-        # dropped unfinished (dynamic sampling at an epoch's end), under the same global step as this one.
+        # dropped unfinished (dynamic sampling, or a partial fully-async mini-batch, at an epoch's end).
         stale = self.records.take("train")
         if stale:
             logger.info(f"skycap record index: {len(stale)} trajectories of an unfinished step aren't indexed")
             with self._lock:
                 self._counts["discarded"] += len(stale)
-
-    def on_step_end(self, trainer: Any, callback_input: CallbackInput, control: TrainingControl) -> None:
-        self._index(trainer, "train", callback_input.global_step, trained_keys(callback_input))
 
     def on_eval_end(self, trainer: Any, callback_input: CallbackInput, control: TrainingControl) -> None:
         self._index(trainer, "eval", callback_input.global_step, set())
@@ -328,8 +337,15 @@ class SkycapRecordIndex(TrainingCallback):
         return not left and not in_flight
 
     # -- building, on the trainer's thread ----------------------------------------
-    def _index(self, trainer: Any, phase: str, step: int, trained: Optional[Set[Tuple[str, int]]]) -> None:
-        entries = self.records.take(phase)
+    def _index(
+        self,
+        trainer: Any,
+        phase: str,
+        step: int,
+        trained: Optional[Set[Tuple[str, int]]],
+        trajectories: Optional[Set[Tuple[str, int]]] = None,
+    ) -> None:
+        entries = self.records.take(phase, trajectories)
         if phase not in self.phases or not entries:
             return
         tracker = getattr(trainer, "tracker", None)

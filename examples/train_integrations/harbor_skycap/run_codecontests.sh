@@ -31,6 +31,8 @@
 #                              one node needs: expert parameters aren't sharded across data parallel
 #   R3=1                       rollout routing replay for an MoE model: vLLM returns each token's
 #                              routed experts and Megatron replays them (needs STRATEGY=megatron)
+#   ASYNC=1                    the fully-async trainer (skycap only): half the GPUs train, half
+#                              serve, with MAX_STALENESS (default 1) and generation workers per prompt
 #
 # Needs: the GPUs, and the sandbox's credentials in a file: `DAYTONA_API_KEY=...`
 # (DAYTONA_KEY_FILE) or `MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...` (MODAL_KEY_FILE). For W&B,
@@ -74,6 +76,8 @@ MEGATRON_PP="${MEGATRON_PP:-1}"
 MEGATRON_EP="${MEGATRON_EP:-1}"
 MEGATRON_ETP="${MEGATRON_ETP:-1}"
 R3="${R3:-0}"
+ASYNC="${ASYNC:-0}"
+MAX_STALENESS="${MAX_STALENESS:-1}"
 OPTIMIZER_OFFLOAD="${OPTIMIZER_OFFLOAD:-1}"
 
 DATA_ROOT="/tmp/harbor/data"
@@ -140,6 +144,22 @@ if [[ "$R3" == 1 ]]; then
     trainer.policy.megatron_config.moe_enable_routing_replay=true
     generator.inference_engine.enable_return_routed_experts=true
     generator.inference_engine.distributed_executor_backend=mp
+  )
+fi
+if [[ "$ASYNC" == 1 ]]; then
+  [[ "$GENERATOR" == skycap ]] || { echo "ASYNC=1 needs GENERATOR=skycap" >&2; exit 1; }
+  ENTRYPOINT=examples.train_integrations.harbor_skycap.entrypoints.main_harbor_skycap_fully_async
+  # Training and generation on disjoint GPUs: half each, engines on the generation half. The
+  # fully-async trainer trains off-policy rollouts with rollout_is, as the sibling recipe does.
+  ARM_ARGS+=(
+    trainer.placement.colocate_all=false
+    trainer.placement.policy_num_gpus_per_node=$((NUM_GPUS / 2))
+    trainer.placement.ref_num_gpus_per_node=$((NUM_GPUS / 2))
+    generator.inference_engine.num_engines=$((NUM_GPUS / 2 / TP_SIZE))
+    trainer.algorithm.policy_loss_type=rollout_is
+    trainer.fully_async.enabled=true
+    trainer.fully_async.max_staleness_steps="$MAX_STALENESS"
+    trainer.fully_async.num_parallel_generation_workers="$NUM_PROMPTS"
   )
 fi
 if [[ "$DETERMINISTIC" == 1 ]]; then

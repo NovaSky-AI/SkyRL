@@ -90,8 +90,8 @@ Terminus-2 keeps the server's own URL. A quick tunnel takes at most 200 calls in
 flight, and a call whose reply hasn't started after about 125 s fails, so use
 `external_host` for many agents or long replies.
 
-If not one trajectory of the run's first batch has anything to train, the
-generator stops the run instead of taking zero-gradient steps. Each trial's
+If not one trajectory of the run's first batch (with the fully-async trainer,
+the first group to finish) has anything to train, the generator stops the run instead of taking zero-gradient steps. Each trial's
 `exception.txt` and agent logs under
 `harbor_trial_config.trials_dir` say why. `skycap.check_first_batch=false`
 skips the check, e.g. for an agent that never calls the model.
@@ -176,11 +176,19 @@ non-zero only when it pulled nothing.
 | Piece | What it does |
 | --- | --- |
 | `entrypoints/main_harbor_skycap.py` | Starts the skycap servers in token mode, in front of the router, from the run's config. Stops them at the end, which writes every trajectory still in memory. |
-| `servers.py` | The server pool: one Ray actor per server, each running a `skycap.CaptureService` on a port of its own. skycap builds how calls reach the model from the options; the integration supplies only its engine wire. |
-| `engine.py` | `SkyRLEngine`: skycap's vLLM wire on `/skyrl/v1/generate`, with packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, and sessions released at `/finish_session`. |
+| `servers.py` | The server pool: one Ray actor per server (`skyrl.train.generators.skycap_store.StoredCaptureServer`), each running a `skycap.CaptureService` on a port of its own with SkyRL's engine wire (`skyrl.train.generators.skycap_engine.SkyRLEngine`: `/skyrl/v1/generate`, packed routed experts and sampler support decoded by SkyRL's own `generate_wire`, sessions released at `/finish_session`). skycap builds how calls reach the model from the options. |
 | `harbor_generator.py` | Per trial: create a trajectory, point the agent's `api_base` at it, run Harbor, and `finish` with the reward to get the samples. A retry gets a fresh trajectory. |
 | `record_index.py` | `SkycapRecordIndex`, a trainer callback: the per-step W&B index of the trajectories the generator logged in a `RecordLog`; and `pull`, which brings a run's records and index back from W&B. Nothing in it is Harbor's. |
 | `compose.py` | Samples to a step-wise `GeneratorOutput`: a trial's paths are contiguous under its `TrajectoryID`, the last one marked `is_last_step` and carrying the reward. |
+| `entrypoints/main_harbor_skycap_fully_async.py` | The same on `FullyAsyncRayPPOTrainer`. |
+
+Each group's trials share one server actor, chosen round-robin. The actor finishes each
+trajectory in its own process and keeps the samples (`skyrl.train.generators.skycap_store`);
+the generator gets back only the checks it retries on. Once the group's trials end, the actor
+composes the group and returns each trajectory's rows as a Ray object owned by the generator,
+so the rows stay in that node's object store: `generate_to_ray`. `generate` returns the same
+rows to the caller. Given only URLs (servers it did not start), the generator finishes over HTTP
+and composes in its own process instead.
 
 What's imposed on every call:
 - **Sampling:** `generator.sampling_params` (`temperature`, `top_p`, `top_k`, `min_p`), since the trainer computes logprobs with them.
