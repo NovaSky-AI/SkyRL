@@ -16,7 +16,8 @@
 #   GENERATOR=skycap|baseline  which integration generates the rollouts (default skycap)
 #   AGENT=terminus-2|codex     the harness (default terminus-2); codex runs SkycapCodex in its sandbox,
 #                              reaching skycap through a Cloudflare quick tunnel (development scale:
-#                              override skycap.exposure.* for more); needs GENERATOR=skycap
+#                              override skycap.exposure.* for more); needs GENERATOR=skycap, and
+#                              defaults to STRATEGY=megatron and 2400 s per trial
 #   NUM_PROMPTS, GROUP_SIZE    prompts per step and samples per prompt (default 32 x 8)
 #   TASKS=a,b                  task names to run instead of the first NUM_PROMPTS
 #   EPOCHS, LR                 passes over the tasks, learning rate (default 1, 1e-6)
@@ -27,7 +28,7 @@
 #   LOGGER=console|wandb       W&B (project harbor-compare, run named after the experiment) by
 #                              default when a key is found, else the console
 #   SANDBOX=daytona|modal      where Harbor runs each trial's sandbox (default daytona)
-#   STRATEGY=fsdp|megatron     the training backend (default fsdp); megatron takes MEGATRON_TP,
+#   STRATEGY=fsdp|megatron     the training backend (default fsdp, megatron for AGENT=codex); megatron takes MEGATRON_TP,
 #                              MEGATRON_PP, MEGATRON_EP (default 1; e.g. 8 for an MoE such as
 #                              Qwen3-30B-A3B on 8 GPUs) and MEGATRON_ETP, and OPTIMIZER_OFFLOAD=1
 #                              (the default) keeps the optimizer state on the CPU, which an MoE on
@@ -72,6 +73,10 @@ SKYCAP_SERVERS="${SKYCAP_SERVERS:-2}"
 # large model colocated with Megatron needs less than the recipe's 0.8 (0.6 for Qwen3-30B-A3B).
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.8}"
 DATASET="${DATASET:-open-thoughts/CodeContests}"
+# Codex runs are validated on Megatron.
+if [[ "$AGENT" == codex ]]; then
+  STRATEGY="${STRATEGY:-megatron}"
+fi
 STRATEGY="${STRATEGY:-fsdp}"
 MEGATRON_TP="${MEGATRON_TP:-1}"
 MEGATRON_PP="${MEGATRON_PP:-1}"
@@ -119,6 +124,8 @@ case "$AGENT" in
       harbor_trial_config.agent.name=null
       harbor_trial_config.agent.import_path=examples.train_integrations.harbor_skycap.codex:SkycapCodex
       harbor_trial_config.agent.kwargs.context_window="$MAX_MODEL_LEN"
+      # Codex's slowest trials on CodeContests run past the 1200 s default (up to ~1750 s with Qwen3-8B).
+      harbor_trial_config.agent.override_timeout_sec=2400
       skycap.exposure.type=cloudflare
     )
     ;;
