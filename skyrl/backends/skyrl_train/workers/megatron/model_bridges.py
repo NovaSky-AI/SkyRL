@@ -248,12 +248,16 @@ except ImportError:
         return False
 
 
-# rope_type -> the provider field Megatron-Bridge sets from the override's "factor" (None: no scaling field).
-_ROPE_FACTOR_FIELDS = {
-    "default": None,
-    "yarn": "yarn_rotary_scaling_factor",
-    "linear": "seq_len_interpolation_factor",
-    "llama3": "rope_scaling_factor",
+# rope_type -> (provider field Megatron-Bridge sets from the override's "factor", or None; the other override keys
+# Bridge translates). Any key outside these, plus rope_type/type/rope_theta/factor, would reach vLLM but not Megatron.
+_ROPE_TYPES = {
+    "default": (None, ()),
+    "yarn": (
+        "yarn_rotary_scaling_factor",
+        ("original_max_position_embeddings", "beta_fast", "beta_slow", "mscale", "mscale_all_dim", "truncate"),
+    ),
+    "linear": ("seq_len_interpolation_factor", ()),
+    "llama3": ("rope_scaling_factor", ("low_freq_factor", "high_freq_factor", "original_max_position_embeddings")),
 }
 
 
@@ -274,25 +278,33 @@ def apply_rope_override(bridge, rope_parameters: dict) -> None:
 def _expected_rope_fields(provider, rope_parameters: dict) -> dict:
     """The provider fields, and values, that Megatron-Bridge sets for this override."""
     rope_type = rope_parameters.get("rope_type") or rope_parameters.get("type") or "default"
-    if rope_type not in _ROPE_FACTOR_FIELDS:
+    if rope_type not in _ROPE_TYPES:
         raise ValueError(
             f"transformer_config_kwargs.rope_parameters.rope_type={rope_type!r} is not supported on the Megatron "
-            f"backend; supported: {', '.join(_ROPE_FACTOR_FIELDS)}."
+            f"backend; supported: {', '.join(_ROPE_TYPES)}."
         )
     if "rope_theta" not in rope_parameters:
         raise ValueError(
             "transformer_config_kwargs.rope_parameters needs 'rope_theta': it replaces the checkpoint's whole "
             "rope_parameters, and without it Megatron-Bridge and vLLM fall back to different defaults."
         )
+    field, translated = _ROPE_TYPES[rope_type]
+    mla = getattr(provider, "multi_latent_attention", False)
+    if rope_type == "yarn" and mla:
+        # Bridge's MLA YaRN mapping has its own field names and no "truncate" (model_bridge.py:672-679).
+        field, translated = "rotary_scaling_factor", tuple(k for k in translated if k != "truncate")
+    untranslated = sorted(set(rope_parameters) - {"rope_type", "type", "rope_theta", "factor", *translated})
+    if untranslated:
+        raise ValueError(
+            f"transformer_config_kwargs.rope_parameters sets {untranslated}, which Megatron-Bridge does not translate "
+            f"for rope_type={rope_type!r}: vLLM would apply them and the Megatron model would not."
+        )
     expected = {"rotary_base": rope_parameters["rope_theta"]}
-    field = _ROPE_FACTOR_FIELDS[rope_type]
     if field is not None:
         if "factor" not in rope_parameters:
             raise ValueError(
                 f"transformer_config_kwargs.rope_parameters with rope_type={rope_type!r} needs a 'factor'."
             )
-        if rope_type == "yarn" and getattr(provider, "multi_latent_attention", False):
-            field = "rotary_scaling_factor"
         expected[field] = rope_parameters["factor"]
     return expected
 

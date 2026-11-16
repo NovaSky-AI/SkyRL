@@ -78,6 +78,9 @@ def _bridge(config, tmp_path):
             "needs 'rope_theta'",
             id="no-theta",
         ),
+        pytest.param(
+            _qwen2, {**YARN, "attention_factor": 1.0}, "does not translate for rope_type='yarn'", id="untranslated-key"
+        ),
     ],
 )
 def test_rope_override_reaches_the_provider_or_raises(tmp_path, make_config, override, match):
