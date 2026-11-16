@@ -15,6 +15,7 @@ from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
 from skyrl.train.config.config import (
     BaseConfig,
     DeltaWeightSyncConfig,
+    MegatronConfig,
     PolicyConfig,
     SkyRLTrainConfig,
     TrainerConfig,
@@ -22,6 +23,7 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
     overrides_dict_to_dotlist,
 )
+from skyrl.train.config.sft_config import SFTConfig
 from skyrl.train.utils import utils as train_utils
 from skyrl.train.utils.utils import (
     prepare_runtime_environment,
@@ -551,28 +553,25 @@ def test_megatron_empty_cuda_cache_from_cli_override():
 
 
 @pytest.mark.parametrize(
-    ("worker", "key", "value"),
+    ("config_cls", "prefix"),
     [
-        ("policy", "rope_parameters", {"rope_type": "default", "rope_theta": 500000.0}),
-        ("policy", "rope_scaling", {"rope_type": "linear", "factor": 2.0}),
-        ("ref", "rope_theta", 500000.0),
+        (SkyRLTrainConfig, "trainer.policy.megatron_config"),
+        (SkyRLTrainConfig, "trainer.ref.megatron_config"),
+        (SFTConfig, "megatron_config"),
     ],
 )
-def test_megatron_validation_rejects_rope_overrides_in_model_config(worker, key, value):
-    cfg = _make_validated_test_config()
-    cfg.trainer.strategy = "megatron"
-    getattr(cfg.trainer, worker).megatron_config.model_config_kwargs = {"model_config": {key: value}}
-
-    with pytest.raises(ValueError, match=f"trainer.{worker}.megatron_config.model_config_kwargs.model_config"):
-        train_utils.validate_megatron_cfg(cfg)
+@pytest.mark.parametrize("key", ["rope_theta", "rope_parameters.rope_theta", "rope_scaling.factor"])
+def test_megatron_config_rejects_rope_overrides_in_model_config(config_cls, prefix, key):
+    # Every entrypoint builds a MegatronConfig, including SFT and Tinker, which never call validate_cfg.
+    with pytest.raises(ValueError, match="megatron_config.model_config_kwargs.model_config sets"):
+        config_cls.from_cli_overrides([f"{prefix}.model_config_kwargs.model_config.{key}=500000.0"])
 
 
-def test_megatron_validation_allows_other_model_config_overrides():
-    cfg = _make_validated_test_config()
-    cfg.trainer.strategy = "megatron"
-    cfg.trainer.policy.megatron_config.model_config_kwargs = {"model_config": {"vocab_size": 151936}}
-
-    train_utils.validate_megatron_cfg(cfg)
+@pytest.mark.parametrize(
+    "model_config_kwargs", [{"model_config": {"vocab_size": 151936}}, {"model_config": None}, {}, None]
+)
+def test_megatron_config_allows_other_model_config_overrides(model_config_kwargs):
+    MegatronConfig(model_config_kwargs=model_config_kwargs)
 
 
 def test_megatron_validation_allows_inference_only_fp8_param_without_gather():
