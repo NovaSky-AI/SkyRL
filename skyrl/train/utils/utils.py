@@ -1240,10 +1240,17 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         unlogged_names.add(annotation_cfg.token_env_var)
     # Opt-in: uv does not pass LD_LIBRARY_PATH from a .env file to the workers, and a forwarded
     # PYTHONPATH can shadow the uv-managed packages.
-    if SKYRL_LD_LIBRARY_PATH_EXPORT:
-        forward_names.add("LD_LIBRARY_PATH")
-    if SKYRL_PYTHONPATH_EXPORT:
-        forward_names.add("PYTHONPATH")
+    for flag, enabled, name in (
+        ("SKYRL_LD_LIBRARY_PATH_EXPORT", SKYRL_LD_LIBRARY_PATH_EXPORT, "LD_LIBRARY_PATH"),
+        ("SKYRL_PYTHONPATH_EXPORT", SKYRL_PYTHONPATH_EXPORT, "PYTHONPATH"),
+    ):
+        if enabled:
+            if not os.environ.get(name):
+                raise ValueError(
+                    f"{flag} is set, but {name} is not set in the shell that launches training. "
+                    f"Export {name} there, or unset {flag}."
+                )
+            forward_names.add(name)
     # Runs last so that every value computed above wins over the driver's.
     _forward_driver_env_vars(env_vars, forward_names, unlogged_names)
     return env_vars

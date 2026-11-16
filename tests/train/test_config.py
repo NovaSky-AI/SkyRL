@@ -228,6 +228,22 @@ def test_runtime_env_forwards_driver_env_vars(monkeypatch, strategy, name, value
     assert env_vars.get(name) == expected
 
 
+@pytest.mark.parametrize(
+    "flag, name",
+    [("SKYRL_LD_LIBRARY_PATH_EXPORT", "LD_LIBRARY_PATH"), ("SKYRL_PYTHONPATH_EXPORT", "PYTHONPATH")],
+)
+def test_runtime_env_export_flag_requires_its_env_var(monkeypatch, flag, name):
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setattr(train_utils, flag, True)
+    monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(ValueError, match=f"{flag} is set, but {name} is not set"):
+        prepare_runtime_environment(example_dummy_config())
+
+    monkeypatch.setenv(name, "/opt/lib")
+    assert prepare_runtime_environment(example_dummy_config())[name] == "/opt/lib"
+
+
 def test_runtime_env_log_hides_secret_and_prefixed_values(monkeypatch):
     from loguru import logger
 
