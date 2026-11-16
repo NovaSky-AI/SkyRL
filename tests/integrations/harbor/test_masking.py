@@ -68,6 +68,10 @@ def test_the_plain_harbor_generator_masks_a_lone_timeout_by_itself(threshold, re
     assert out["rewards"] == rewards and out["loss_masks"] == loss_masks
 
 
+def test_the_harbor_generator_config_still_fills_the_generator_defaults() -> None:
+    assert HarborGeneratorConfig().eval_sampling_params is not None
+
+
 def test_the_timeout_threshold_must_be_at_least_one() -> None:
     with pytest.raises(ValueError, match="timeout_mask_instance_threshold must be at least 1"):
         HarborGeneratorConfig(timeout_mask_instance_threshold=0)

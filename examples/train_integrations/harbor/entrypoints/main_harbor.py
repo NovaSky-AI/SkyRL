@@ -47,6 +47,7 @@ class HarborGeneratorConfig(GeneratorConfig):
     masks its instance."""
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if self.timeout_mask_instance_threshold < 1:
             raise ValueError(
                 "generator.timeout_mask_instance_threshold must be at least 1, "
