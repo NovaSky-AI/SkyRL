@@ -8,7 +8,8 @@
 - ``FakeTrial``: what Harbor's ``Trial`` is to the generator. Its task path picks
   a script: a linear chat, a summarization (the history is rewritten), a
   discarded reply asked again for (mini-swe-agent's format-error retry), a
-  timeout, an agent that exits on skycap's context-length error (``overflow``), a crash, or a sandbox that times out starting on the first attempt
+  timeout, a timeout before the agent's first model call (``stuck``), an agent that exits on skycap's context-length
+  error (``overflow``), a crash, or a sandbox that times out starting on the first attempt
   (``slow_start``; "first" counts every trial of that task path since
   ``FakeTrial.configs`` was reset, so a test runs one such trial). Results carry Harbor's phase timings: the sandbox takes
   ``SETUP`` seconds to start, the agent ``AGENT`` and the verifier ``VERIFY``.
@@ -220,6 +221,9 @@ class FakeTrial:
                 return verified(1.0, timed=False)
             if script == "slow_start" and attempt == 0:
                 return start_timed_out()
+            if script == "stuck":
+                # Timed out before the agent's first model call, so skycap captured nothing.
+                return verified(0.0, "AgentTimeoutError")
             history = [{"role": "user", "content": script}]
             history.append(await chat(session, history))
             if script == "timeout":

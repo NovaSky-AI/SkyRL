@@ -428,6 +428,18 @@ async def test_timeouts_mask_their_instance_from_the_threshold_on(
 
 
 @pytest.mark.asyncio
+async def test_a_timeout_before_the_first_model_call_is_still_a_timeout(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("stuck", "linear"), disable_tqdm=True)
+
+    # Not retried, and masked as a lone timeout rather than as an error that masks its instance.
+    metrics = out["rollout_metrics"]
+    assert metrics["generate/harbor/num_retried_attempts"] == 0
+    assert metrics["generate/skycap/num_timeout_trajectories"] == 1
+    assert metrics["generate/skycap/num_traj_masked_individually"] == 1
+    assert metrics["generate/skycap/num_masked_instances"] == 0
+
+
+@pytest.mark.asyncio
 async def test_an_agent_that_exits_on_skycaps_context_length_error_is_a_context_length_trial(
     skycap, trials, generator
 ) -> None:

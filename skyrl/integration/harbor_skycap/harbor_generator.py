@@ -312,6 +312,14 @@ class HarborSkycapGenerator(GeneratorInterface):
             if self.records is not None and trajectory is not None:
                 self.records.add(phase, trajectory_id, attempt, trajectory)
 
+        if stop_reason == "agent_timeout":
+            # Masked whatever skycap captured, so a capture problem below must not turn it into a retried error.
+            return TrialOutcome(
+                trajectory_id=trajectory_id,
+                samples=finished.samples,
+                stop_reason=stop_reason,
+                unbridged_calls=finished.unbridged_calls,
+            )
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.
             logger.warning(f"Trajectory {trajectory_id}: skycap status {finished.status!r}, not training on it")
