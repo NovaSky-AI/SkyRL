@@ -87,10 +87,11 @@ class WorkerDispatch:
     @property
     def _dp_balance_max_tokens(self) -> int:
         """Token cap for the token-balanced DP split, or 0 when the split is off."""
-        trainer_cfg = self.cfg.trainer
-        if getattr(trainer_cfg, "balance_dp_tokens", False) and trainer_cfg.max_tokens_per_microbatch > 0:
-            return trainer_cfg.max_tokens_per_microbatch
-        return 0
+        trainer_cfg = getattr(getattr(self, "cfg", None), "trainer", None)
+        if getattr(trainer_cfg, "balance_dp_tokens", False) is not True:
+            return 0
+        max_tokens = getattr(trainer_cfg, "max_tokens_per_microbatch", -1)
+        return max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else 0
 
     def register_actor_group(self, model: str, actor_group: PPORayActorGroup) -> None:
         self._actor_groups[model] = actor_group
