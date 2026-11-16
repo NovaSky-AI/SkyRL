@@ -1,9 +1,7 @@
 import functools
-import ipaddress
 import logging
 import math
 import os
-import socket
 import sys
 import time
 from contextlib import contextmanager
@@ -969,13 +967,6 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
         )
 
 
-@ray.remote
-def get_all_env_variables():
-    import os
-
-    return os.environ
-
-
 def ray_noset_visible_devices(env_vars=os.environ):
     # Refer to
     # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/nvidia_gpu.py#L95-L96
@@ -997,14 +988,6 @@ def ray_noset_visible_devices(env_vars=os.environ):
         "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR",
     ]
     return any(env_vars.get(env_var) for env_var in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST)
-
-
-def get_physical_gpu_id():
-    import torch
-
-    device = torch.cuda.current_device()
-    props = torch.cuda.get_device_properties(device)
-    return str(props.uuid)
 
 
 # Env vars read by the Ray workers that are copied unchanged from the driver when set there. Ray
@@ -1473,17 +1456,6 @@ class ResolvedPlacementGroup:
         return len(self._get_bundle_placement()) // self.num_nodes
 
 
-def torch_dtype_to_str(dtype: torch.dtype) -> str:
-    if dtype == torch.bfloat16:
-        return "bfloat16"
-    elif dtype == torch.float16:
-        return "float16"
-    elif dtype == torch.float32:
-        return "float32"
-    else:
-        return str(dtype)
-
-
 def str_to_torch_dtype(dtype: str) -> torch.dtype:
     if dtype == "bfloat16":
         return torch.bfloat16
@@ -1574,30 +1546,3 @@ def _apply_overrides_in_place(module_config, override_config_kwargs):
             _apply_overrides_in_place(getattr(module_config, key), val)
         else:
             setattr(module_config, key, val)
-
-
-def get_tcp_url(host: str, port: int) -> str:
-    """
-    Formats the TCP URL for the given host and port, handling IPv6 addresses correctly.
-
-    Args:
-        host (str): The hostname or IP address.
-        port (int): The port number.
-    Returns:
-        str: The formatted TCP URL.
-    """
-    try:
-        if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
-            return f"tcp://[{host}]:{port}"
-    except ValueError:
-        # not a literal IP, probably a hostname
-        pass
-    return f"tcp://{host}:{port}"
-
-
-def get_free_port():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port

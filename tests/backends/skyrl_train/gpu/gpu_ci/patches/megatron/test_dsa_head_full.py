@@ -23,7 +23,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from skyrl.train.utils.utils import get_free_port
+from skyrl.backends.skyrl_train.distributed.utils import get_free_port
 
 
 def _check_matches_megatron(group) -> bool:
