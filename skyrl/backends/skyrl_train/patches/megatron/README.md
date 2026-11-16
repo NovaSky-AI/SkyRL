@@ -368,8 +368,7 @@ bypasses the hook.
   varlen indexer top-k (`_indexer_topk_bshd` no longer falls back to `_indexer_topk_from_score_chunks`
   for packed inputs), or exposes per-hook backend selection.
 - **Remove:** the module-level `apply_dsa_hybrid_indexer_patch()` call and import in
-  `megatron_worker.py`, the `SKYRL_DSA_INDEXER_BACKEND` entry in `prepare_runtime_environment`,
-  the module, and its CPU test.
+  `megatron_worker.py`, the module, and its CPU test.
 
 ### `patch_dist_ckpt_exchange_wait.py`: megatron-core fully-parallel checkpoint load
 
@@ -397,8 +396,8 @@ flag does the all-to-all's layout moves with one Triton block copy; zigzag balan
 grows with position. Applies to absorbed-MLA DSA (GLM-5 / GLM-5.3, DeepSeek-V3.2) under TP > 1.
 - **Landed?** Not an upstream fix: obsolete once megatron-core's DSA kernels run efficiently at
   `heads / TP` heads per rank, or megatron-core shards absorbed sparse attention by query rows itself.
-- **Remove:** the `apply_dsa_head_full_patch()` call and import in `megatron_worker.py`, the
-  `SKYRL_DSA_HEAD_FULL*` entries in `prepare_runtime_environment`, and both modules.
+- **Remove:** the `apply_dsa_head_full_patch()` call and import in `megatron_worker.py`, and both
+  modules.
 
 ### `patch_vision_attention_backend.py`: Megatron-Bridge `get_vision_model_config`
 

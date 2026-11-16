@@ -202,6 +202,56 @@ def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):
     assert "VLLM_USE_DEEP_GEMM_E8M0" not in env_vars
 
 
+@pytest.mark.parametrize(
+    "strategy, name, value, expected",
+    [
+        ("megatron", "HF_HOME", "/mnt/hf", "/mnt/hf"),
+        ("megatron", "SKYRL_DSA_HEAD_FULL", "1", "1"),
+        ("megatron", "NCCL_SOCKET_IFNAME", "eth0", "eth0"),
+        ("megatron", "FI_PROVIDER", "efa", "efa"),
+        ("fsdp", "NVTE_DEBUG", "1", "1"),
+        ("megatron", "TRITON_CACHE_DIR", "/cache", None),
+        ("megatron", "HF_HOME", "", None),
+        # Computed for weight_sync_backend=nccl; the driver's value does not override it.
+        ("megatron", "NCCL_CUMEM_ENABLE", "1", "0"),
+    ],
+)
+def test_runtime_env_forwards_driver_env_vars(monkeypatch, strategy, name, value, expected):
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setenv(name, value)
+    cfg = example_dummy_config()
+    cfg.trainer.strategy = strategy
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert env_vars.get(name) == expected
+
+
+def test_runtime_env_log_hides_secret_and_prefixed_values(monkeypatch):
+    from loguru import logger
+
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    secrets = ("HF_TOKEN", "WANDB_API_KEY", "GRAFANA_API_TOKEN", "SKYRL_TEST_TOKEN")
+    for name in secrets:
+        monkeypatch.setenv(name, "s3cr3t")
+    monkeypatch.setenv("HF_HOME", "/mnt/hf")
+    cfg = example_dummy_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.grafana_annotations.enabled = True
+
+    messages = []
+    handler_id = logger.add(messages.append, level="INFO")
+    try:
+        env_vars = prepare_runtime_environment(cfg)
+    finally:
+        logger.remove(handler_id)
+    log = "".join(messages)
+
+    assert all(env_vars[name] == "s3cr3t" for name in secrets)
+    assert "HF_HOME=/mnt/hf" in log and "HF_TOKEN=[REDACTED]" in log and "SKYRL_TEST_TOKEN" in log
+    assert "s3cr3t" not in log
+
+
 def test_serialized_fp8_runtime_defaults_to_fp32_scales(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
     monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)

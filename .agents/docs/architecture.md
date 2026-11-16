@@ -31,6 +31,7 @@ examples/train/         # Example training scripts per model/backend
 ## Key Patterns
 
 - **Ray orchestration**: Training workers and inference engines run as Ray actors.
+- **Env vars on Ray workers**: workers see only the env vars in the job's runtime env, built by `prepare_runtime_environment` (`skyrl/train/utils/utils.py`). Driver env vars starting with `SKYRL_`, `NCCL_` or `FI_` are forwarded already; to forward another one, add it to `_FORWARDED_ENV_VARS`, and to `_UNLOGGED_ENV_VARS` if its value is a secret.
 - **Config hierarchy**: `SkyRLTrainConfig` → `TrainerConfig`, `GeneratorConfig`, `DataConfig`, `EnvironmentConfig`. Accessed as `cfg.trainer.*`, `cfg.generator.*`, etc.
 - **CLI**: Config uses OmegaConf + dataclasses — OmegaConf for CLI parsing and merging, loaded into dataclasses for better typing. Pass overrides as `key=value` CLI args.
 - **Backend selection**: `trainer.strategy` chooses backend — `fsdp` (default), `megatron`, or `jax`.
