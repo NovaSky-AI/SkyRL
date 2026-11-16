@@ -4,6 +4,9 @@ from typing import Any
 
 from torch import Tensor
 
+# The output processor's context key for the LM-head weight.
+LM_HEAD_WEIGHT = "lm_head_weight"
+
 
 def fused_lm_head_output_processor(
     *,
@@ -15,7 +18,7 @@ def fused_lm_head_output_processor(
 ) -> Tensor:
     """Return hidden states and retain the LM-head weight for fused log-probs."""
     if context is not None:
-        context["lm_head_weight"] = output_weight if output_weight is not None else output_layer.weight
+        context[LM_HEAD_WEIGHT] = output_weight if output_weight is not None else output_layer.weight
 
     if output_layer.sequence_parallel:
         from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
