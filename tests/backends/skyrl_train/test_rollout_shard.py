@@ -189,15 +189,19 @@ def test_stored_microbatches_match_the_collated_shards_including_padding_microba
     select = select_forward_inputs if forward else None
     # Another DP rank has two more microbatches, so this one pads.
     monkeypatch.setattr(TokenBasedBatchIterator, "_sync_num_microbatches", lambda self: len(self._microbatches) + 2)
-    # Padding microbatches draw their ids at random; fix them so both iterators' match.
-    monkeypatch.setattr(torch, "randint", lambda low, high, size, device=None: torch.zeros(size, dtype=torch.long))
 
     expected = TokenBasedBatchIterator(select(whole) if forward else whole, max_tokens_per_microbatch=budget)
     stored = StoredShardBatchIterator(ShardRows(shard), budget, select=select)
 
-    assert stored._microbatches == expected._microbatches
+    assert stored.microbatch_rows() == expected.microbatch_rows()
     assert stored.num_padding_microbatches == 2
-    assert (stored.num_rows, stored.num_actions) == (expected.num_rows, expected.num_actions)
+    assert (stored.num_rows, stored.seq_len, stored.num_actions) == (
+        expected.num_rows,
+        expected.seq_len,
+        expected.num_actions,
+    )
+    assert stored.row_seqlens() == expected.row_seqlens()
+    assert stored.has_routes and expected.has_routes
     for actual, reference in zip(stored, expected, strict=True):
         _assert_same_batch(actual, reference)
 
@@ -262,10 +266,11 @@ def test_building_a_microbatch_pulls_only_the_next_few_ahead(monkeypatch, pull_a
     monkeypatch.setattr(worker_utils, "PULL_AHEAD_MICROBATCHES", pull_ahead)
     monkeypatch.setattr(worker_utils, "pull_payloads", pulls.append)
     iterator = StoredShardBatchIterator(ShardRows(shard), 4)
-    rows = iterator._microbatches
+    rows = iterator.microbatch_rows()
     assert len(rows) >= 3
 
-    for index, _ in enumerate(iterator):
+    for index in range(len(rows)):
+        iterator.microbatch(index)
         # Each microbatch within reach is pulled once, in order, and none beyond it.
         reach = min(index + pull_ahead, len(rows) - 1)
         assert pulls == [ShardRows(shard).payload_refs(r) for r in rows[1 : reach + 1]]
