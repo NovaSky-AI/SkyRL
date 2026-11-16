@@ -765,14 +765,17 @@ class MegatronConfig(BaseConfig):
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
             self.transformer_config_kwargs = {}
-        # Megatron-Bridge builds the model from the checkpoint's own config, so a RoPE override in model_config would
-        # never reach it. Checked here, where every entrypoint builds this config (SFT and Tinker never call
-        # validate_cfg), rather than in validate_megatron_cfg.
+        # Megatron-Bridge builds the model from the checkpoint's own config, so these model_config overrides would
+        # never reach it (q_lora_rank used to, through a provider fixup that no longer exists). Checked here, where
+        # every entrypoint builds this config (SFT and Tinker never call validate_cfg), rather than in
+        # validate_megatron_cfg.
         model_config_overrides = (self.model_config_kwargs or {}).get("model_config") or {}
-        rope_keys = sorted({"rope_parameters", "rope_scaling", "rope_theta"} & set(model_config_overrides))
-        if rope_keys:
+        unapplied = sorted(
+            {"rope_parameters", "rope_scaling", "rope_theta", "q_lora_rank"} & set(model_config_overrides)
+        )
+        if unapplied:
             raise ValueError(
-                f"megatron_config.model_config_kwargs.model_config sets {rope_keys}, which the Megatron backend does "
+                f"megatron_config.model_config_kwargs.model_config sets {unapplied}, which the Megatron backend does "
                 "not apply: Megatron-Bridge builds the model from the checkpoint's own config. Remove the override."
             )
         # The top-level FP8 fields fold into the TransformerConfig kwargs; explicitly

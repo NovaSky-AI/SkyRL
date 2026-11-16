@@ -560,8 +560,8 @@ def test_megatron_empty_cuda_cache_from_cli_override():
         (SFTConfig, "megatron_config"),
     ],
 )
-@pytest.mark.parametrize("key", ["rope_theta", "rope_parameters.rope_theta", "rope_scaling.factor"])
-def test_megatron_config_rejects_rope_overrides_in_model_config(config_cls, prefix, key):
+@pytest.mark.parametrize("key", ["rope_theta", "rope_parameters.rope_theta", "rope_scaling.factor", "q_lora_rank"])
+def test_megatron_config_rejects_unapplied_overrides_in_model_config(config_cls, prefix, key):
     # Every entrypoint builds a MegatronConfig, including SFT and Tinker, which never call validate_cfg.
     with pytest.raises(ValueError, match="megatron_config.model_config_kwargs.model_config sets"):
         config_cls.from_cli_overrides([f"{prefix}.model_config_kwargs.model_config.{key}=500000.0"])
