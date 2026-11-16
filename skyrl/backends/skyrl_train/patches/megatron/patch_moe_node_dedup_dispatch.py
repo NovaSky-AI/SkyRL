@@ -517,6 +517,10 @@ def patch_moe_node_dedup_dispatch() -> bool:
     _install_profile("fused" if mode == "fused" else "twohop")
     logger.info(
         f"{_ENV}={mode}: MoE all-to-all sends each token once per destination node"
-        + (" (fused kernels)" if mode == "fused" else "")
+        + (
+            f" (fused, {os.environ.get('SKYRL_MOE_NODE_DEDUP_KERNELS', 'triton').lower()} kernels)"
+            if mode == "fused"
+            else ""
+        )
     )
     return True
