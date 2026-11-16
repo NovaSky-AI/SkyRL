@@ -17,6 +17,7 @@ from skyrl.train.utils.utils import initialize_ray
 from skyrl.train.utils.rate_limiter import RateLimiterConfig
 from skyrl.integration.harbor.harbor_generator import HarborGenerator
 from skyrl.integration.harbor.dataset import HarborTaskDataset
+from skyrl.integration.harbor.masking import TIMEOUT_MASK_INSTANCE_THRESHOLD
 
 # NOTE (sumanthrh): We use a YAML to store the defaults for the Harbor trial configuration
 # TODO: Convert to a dataclass
@@ -35,9 +36,22 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
 
 @dataclass
 class HarborGeneratorConfig(GeneratorConfig):
-    """GeneratorConfig with Harbor-specific rate limiting."""
+    """GeneratorConfig with Harbor-specific rate limiting and failure masking."""
 
     rate_limit: RateLimiterConfig = field(default_factory=RateLimiterConfig)
+    timeout_mask_instance_threshold: int = TIMEOUT_MASK_INSTANCE_THRESHOLD
+    """How many trials of one instance must run out of Harbor's agent time (``AgentTimeoutError``) before every
+    trial of the instance is masked. Below it, only the timed-out trials are masked and the instance's other trials
+    train; a masked trial still counts as reward 0 in its group's GRPO baseline. ``1`` masks the instance on any
+    timeout. A trial that fails any other way (a sandbox that never starts, no verifier result, a crash) always
+    masks its instance."""
+
+    def __post_init__(self) -> None:
+        if self.timeout_mask_instance_threshold < 1:
+            raise ValueError(
+                "generator.timeout_mask_instance_threshold must be at least 1, "
+                f"got {self.timeout_mask_instance_threshold}."
+            )
 
 
 @dataclass

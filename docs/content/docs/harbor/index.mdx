@@ -194,7 +194,7 @@ Each trajectory gets up to 2 attempts (`MAX_NUM_RETRIES_PER_TRIAL = 2`). The ret
 |---|---|---|---|
 | **Success** | N/A | From verifier | Yes |
 | **`ContextLengthExceededError`** | No | 0 | Configurable (see below) |
-| **`AgentTimeoutError`** | No | - | No (loss-masked) |
+| **`AgentTimeoutError`** | No | 0 | No (loss-masked, see below) |
 | **Missing verifier result** | Yes | - | - |
 | **Other exceptions** | Yes | - | - |
 
@@ -205,7 +205,13 @@ When a trajectory hits `ContextLengthExceededError`, its reward is set to 0. Wha
 
 ### Instance-Level Masking
 
-After all trajectories in a batch complete, `_mask_failed_instances_and_compute_metrics()` scans the results. If **any** trajectory for a given prompt fails (timeout or error), **all** trajectories for that prompt are zeroed out (`loss_mask=[0]`) as a conservative approach.
+After all trajectories in a batch complete, the generator decides per prompt which trajectories to zero out (`loss_mask=[0]`, reward 0):
+
+- If **any** trajectory for a prompt failed after its retries (a sandbox that never started, no verifier result, an exception), **all** trajectories for that prompt are zeroed out.
+- If at least `generator.timeout_mask_instance_threshold` (default 2) trajectories for a prompt hit `AgentTimeoutError`, all of them are zeroed out too: several timeouts in one group usually point at the task or the infrastructure.
+- Below that, only the timed-out trajectories are zeroed out, and the prompt's other trajectories train. Set the threshold to `1` to zero out the whole prompt on any timeout.
+
+A zeroed-out trajectory still counts as reward 0 in its group's GRPO baseline. `trainer.algorithm.zero_variance_filter` ignores zeroed-out trajectories, so it drops a group whose other trajectories all have the same reward.
 
 ### Rate Limiting
 
@@ -262,6 +268,7 @@ agent:
 | `generator.n_samples_per_prompt` | SkyRL config | Number of trajectories per prompt for GRPO advantage estimation (e.g., 8) |
 | `trainer.algorithm.max_seq_len` | SkyRL config | Maximum total sequence length (context window length). Required for Harbor — set to match vLLM's `max_model_len` |
 | `generator.apply_overlong_filtering` | SkyRL config | When `true`, zero out loss mask for context-length-exceeded trajectories (default: `false`) |
+| `generator.timeout_mask_instance_threshold` | SkyRL config | How many trajectories of one prompt must hit `AgentTimeoutError` before all of them are zeroed out; fewer zero out only themselves (default: `2`) |
 | `trainer.algorithm.advantage_estimator` | SkyRL config | Advantage method: `grpo`, `rloo`, `reinforce_pp`, etc. |
 | `trainer.train_batch_size` | SkyRL config | Number of unique prompts per training batch |
 | `environment.type` | Harbor config | Sandbox provider: `daytona`, `docker`, `modal`, `e2b`, `gke` |
@@ -412,5 +419,7 @@ The following metrics are logged to W&B:
 | `generate/num_timeout_trajectories` | Trajectories that hit agent timeout |
 | `generate/num_error_trajectories` | Trajectories that hit sandbox/agent errors |
 | `generate/num_masked_instances` | Instances excluded from training due to failures |
+| `generate/num_instance_with_timeouts_unmasked` | Instances with timed-out trajectories that still trained, below the threshold |
+| `generate/num_traj_masked_individually` | Timed-out trajectories zeroed out on their own |
 | `generate/trajectories_context_length_exceeded` | Trajectories that exceeded context window |
 | `generate/trajectories_summarized` | Trajectories where context summarization was triggered |

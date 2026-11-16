@@ -19,6 +19,7 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     InferenceEngineInterface,
 )
+from skyrl.integration.harbor.masking import TIMEOUT_MASK_INSTANCE_THRESHOLD, mask_failed_trials
 from skyrl.integration.harbor.trial_metrics import TrialAttempts, trial_metrics
 from skyrl.train.generators.base import (
     GeneratorInput,
@@ -54,7 +55,7 @@ class HarborTrajectoryOutput:
     reward: float = 0.0
     num_turns: int = 0
     # One of: "complete", "context_length", "agent_timeout", "error". Used by
-    # `build_step_wise_generator_output` to decide whether to skip the entire prompt group.
+    # `build_step_wise_generator_output` to decide which trajectories to mask.
     stop_reason: str = "complete"
     # End-to-end wall-clock time (seconds) to generate this trajectory. Optional: left as None if
     # timing was not recorded.
@@ -62,32 +63,29 @@ class HarborTrajectoryOutput:
 
 
 def build_step_wise_generator_output(
-    trajectory_outputs: List[HarborTrajectoryOutput], overlong_filtering: bool
+    trajectory_outputs: List[HarborTrajectoryOutput],
+    overlong_filtering: bool,
+    timeout_mask_instance_threshold: int = TIMEOUT_MASK_INSTANCE_THRESHOLD,
 ) -> GeneratorOutput:
     """Flatten per-trajectory rollout details into one entry per LLM turn.
 
     Steps for one trajectory are emitted contiguously and the last step has
-    ``is_last_step=True``. Failures (timeout / unknown error / empty rollout
-    details) are batched per ``instance_id``: if any rollout for prompt P
-    failed, all rollouts for P are replaced with single zeroed-out
-    placeholder steps.
+    ``is_last_step=True``. A failed trajectory (timeout / unknown error / empty
+    rollout details) is replaced with a single zeroed-out placeholder step, and
+    so is every other rollout of its prompt when ``mask_failed_trials`` masks
+    the whole instance.
     """
-    # 1. Identify failed instances. If any rollout for prompt P failed, mask all rollouts for P (conservative).
-    timeout_instance_ids = set()
-    error_instance_ids = set()
-    all_instance_ids = set()
-    num_timeout_trajectories = 0
-    num_error_trajectories = 0
-    for traj in trajectory_outputs:
-        instance_id = traj.trajectory_id.instance_id
-        all_instance_ids.add(instance_id)
-        if traj.stop_reason == "agent_timeout":
-            num_timeout_trajectories += 1
-            timeout_instance_ids.add(instance_id)
-        elif traj.stop_reason == "error" or traj.rollout_details is None:
-            num_error_trajectories += 1
-            error_instance_ids.add(instance_id)
-    masked_instance_ids = timeout_instance_ids | error_instance_ids
+    # 1. Decide which trajectories to mask. One without rollout details that didn't time out is an error.
+    masked, masking_counts = mask_failed_trials(
+        [
+            (
+                traj.trajectory_id.instance_id,
+                "error" if traj.stop_reason != "agent_timeout" and traj.rollout_details is None else traj.stop_reason,
+            )
+            for traj in trajectory_outputs
+        ],
+        timeout_mask_instance_threshold,
+    )
 
     # 2. Walk trajectories and emit one entry of GeneratorOutput per step.
     prompt_token_ids: List[List[int]] = []
@@ -108,11 +106,11 @@ def build_step_wise_generator_output(
     # One generation time per emitted step, aligned 1:1 with the flattened per-step arrays above.
     # Per trajectory we replicate its trajectory-level e2e_time across all of its steps.
     out_trajectory_generation_times: List[Optional[float]] = []
-    for traj in trajectory_outputs:
+    for traj, is_masked in zip(trajectory_outputs, masked):
         tid = traj.trajectory_id
 
-        # 2.1. For failed trajectories, set loss mask to [0] and stop reason to "error".
-        if tid.instance_id in masked_instance_ids:
+        # 2.1. For masked trajectories, set loss mask to [0] and stop reason to "error".
+        if is_masked:
             prompt_token_ids.append([0])
             response_ids.append([0])
             rewards.append(0.0)
@@ -200,9 +198,7 @@ def build_step_wise_generator_output(
     else:
         rollout_metrics = {}
 
-    rollout_metrics["generate/num_timeout_trajectories"] = num_timeout_trajectories
-    rollout_metrics["generate/num_error_trajectories"] = num_error_trajectories
-    rollout_metrics["generate/num_masked_instances"] = len(masked_instance_ids)
+    rollout_metrics.update({f"generate/{name}": count for name, count in masking_counts.items()})
 
     return GeneratorOutput(
         prompt_token_ids=prompt_token_ids,
@@ -351,7 +347,9 @@ class HarborGenerator(GeneratorInterface):
             progress.close()
 
         output = build_step_wise_generator_output(
-            all_outputs, overlong_filtering=self.generator_cfg.apply_overlong_filtering
+            all_outputs,
+            overlong_filtering=self.generator_cfg.apply_overlong_filtering,
+            timeout_mask_instance_threshold=self.generator_cfg.timeout_mask_instance_threshold,
         )
         output["rollout_metrics"].update(trial_metrics(all_attempts))
         return output
