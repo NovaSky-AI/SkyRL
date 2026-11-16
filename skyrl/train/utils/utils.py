@@ -1024,6 +1024,7 @@ _FORWARDED_ENV_VARS = (
     "VLLM_ALLREDUCE_USE_SYMM_MEM",
     "RAY_CGRAPH_get_timeout",
     "PYTORCH_CUDA_ALLOC_CONF",
+    "NCCL_NET_PLUGIN",
     # Ray sets OMP_NUM_THREADS=num_cpus (1 per policy actor) unless the runtime env has it,
     # which leaves the CPU-offloaded optimizer step single-threaded.
     "OMP_NUM_THREADS",
@@ -1034,11 +1035,11 @@ _FORWARDED_ENV_VARS = (
     "PYTHONFAULTHANDLER",
     "TORCH_SHOW_CPP_STACKTRACES",
     "TORCH_USE_CUDA_DSA",
+    "NCCL_DEBUG",
 )
-# Every driver env var with one of these prefixes is copied too. `skyrl/env_vars.py` reads its
-# SKYRL_* knobs at import time in every process, and NCCL and libfabric (EFA) settings are read
-# by the worker processes that create the communicators.
-_FORWARDED_ENV_PREFIXES = ("SKYRL_", "NCCL_", "FI_")
+# Every driver env var with one of these prefixes is copied too: `skyrl/env_vars.py` reads its
+# SKYRL_* knobs at import time in every process.
+_FORWARDED_ENV_PREFIXES = ("SKYRL_",)
 # Forwarded env vars whose values are never logged.
 _UNLOGGED_ENV_VARS = frozenset(
     {

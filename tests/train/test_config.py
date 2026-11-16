@@ -207,8 +207,9 @@ def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):
     [
         ("megatron", "HF_HOME", "/mnt/hf", "/mnt/hf"),
         ("megatron", "SKYRL_DSA_HEAD_FULL", "1", "1"),
-        ("megatron", "NCCL_SOCKET_IFNAME", "eth0", "eth0"),
-        ("megatron", "FI_PROVIDER", "efa", "efa"),
+        ("megatron", "NCCL_DEBUG", "INFO", "INFO"),
+        # Per-node NCCL settings reach the workers through each raylet's own env.
+        ("megatron", "NCCL_SOCKET_IFNAME", "eth0", None),
         ("fsdp", "NVTE_DEBUG", "1", "1"),
         ("megatron", "TRITON_CACHE_DIR", "/cache", None),
         ("megatron", "HF_HOME", "", None),
@@ -235,6 +236,7 @@ def test_runtime_env_log_hides_secret_and_prefixed_values(monkeypatch):
     for name in secrets:
         monkeypatch.setenv(name, "s3cr3t")
     monkeypatch.setenv("HF_HOME", "/mnt/hf")
+    monkeypatch.setenv("NCCL_DEBUG", "INFO")
     cfg = example_dummy_config()
     cfg.trainer.strategy = "megatron"
     cfg.trainer.grafana_annotations.enabled = True
@@ -248,7 +250,8 @@ def test_runtime_env_log_hides_secret_and_prefixed_values(monkeypatch):
     log = "".join(messages)
 
     assert all(env_vars[name] == "s3cr3t" for name in secrets)
-    assert "HF_HOME=/mnt/hf" in log and "HF_TOKEN=[REDACTED]" in log and "SKYRL_TEST_TOKEN" in log
+    assert "HF_HOME=/mnt/hf" in log and "NCCL_DEBUG=INFO" in log and "HF_TOKEN=[REDACTED]" in log
+    assert "SKYRL_TEST_TOKEN" in log
     assert "s3cr3t" not in log
 
 
