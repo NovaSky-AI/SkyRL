@@ -84,6 +84,14 @@ class WorkerDispatch:
             name: GPUState(model_on_gpu=True, optimizer_on_gpu=(name != "ref")) for name in self._actor_groups.keys()
         }
 
+    @property
+    def _dp_balance_max_tokens(self) -> int:
+        """Token cap for the token-balanced DP split, or 0 when the split is off."""
+        trainer_cfg = self.cfg.trainer
+        if getattr(trainer_cfg, "balance_dp_tokens", False) and trainer_cfg.max_tokens_per_microbatch > 0:
+            return trainer_cfg.max_tokens_per_microbatch
+        return 0
+
     def register_actor_group(self, model: str, actor_group: PPORayActorGroup) -> None:
         self._actor_groups[model] = actor_group
         # Not initialized yet -- callers register, then call init_model(), which
@@ -290,10 +298,14 @@ class WorkerDispatch:
         if loss_fn_config is not None:
             kwargs["loss_fn_config"] = loss_fn_config
 
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data, **kwargs)
+        refs = self._actor_groups[model].async_run_ray_method(
+            "mesh", "forward", data=data, dp_balance_max_tokens=self._dp_balance_max_tokens, **kwargs
+        )
         results = deadline.ray_get(refs, "forward")
 
-        return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
+        return WorkerOutput.cat(
+            self._actor_groups[model].actor_infos, results, sample_order=getattr(refs, "sample_order", None)
+        )
 
     def forward_from_staged(
         self,
@@ -341,7 +353,9 @@ class WorkerDispatch:
             **kwargs,
         )
         results = deadline.ray_get(refs, "forward")
-        return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
+        return WorkerOutput.cat(
+            self._actor_groups[model].actor_infos, results, sample_order=getattr(chunk_refs, "sample_order", None)
+        )
 
     def stage_data(
         self,
@@ -364,7 +378,9 @@ class WorkerDispatch:
             ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*.
         """
         dp_size = self._actor_groups[model].actor_infos[0].rank.dp_size
-        return MeshDispatch.stage_chunks(dp_size, data, mini_batch_boundaries)
+        return MeshDispatch.stage_chunks(
+            dp_size, data, mini_batch_boundaries, dp_balance_max_tokens=self._dp_balance_max_tokens
+        )
 
     def forward_backward(
         self,
@@ -405,12 +421,16 @@ class WorkerDispatch:
         if loss_fn_config is not None:
             kwargs["loss_fn_config"] = loss_fn_config
 
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward_backward", data, **kwargs)
+        refs = self._actor_groups[model].async_run_ray_method(
+            "mesh", "forward_backward", data, dp_balance_max_tokens=self._dp_balance_max_tokens, **kwargs
+        )
         statuses = deadline.ray_get(refs, "forward_backward")
 
         self._save_memory_snapshot(model, "forward_backward")
 
-        return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
+        return WorkerOutput.cat(
+            self._actor_groups[model].actor_infos, statuses, sample_order=getattr(refs, "sample_order", None)
+        )
 
     def forward_backward_from_staged(
         self,
@@ -456,7 +476,9 @@ class WorkerDispatch:
         statuses = deadline.ray_get(refs, "forward_backward")
 
         self._save_memory_snapshot(model, "forward_backward")
-        return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
+        return WorkerOutput.cat(
+            self._actor_groups[model].actor_infos, statuses, sample_order=getattr(chunk_refs, "sample_order", None)
+        )
 
     def optim_step(self, model: str, model_id: Optional[str] = None) -> Optional[float]:
         """Run optimizer step. For single-tenant training, the model should already be on GPU from forward_backward.
