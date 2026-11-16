@@ -40,11 +40,12 @@ class HarborGeneratorConfig(GeneratorConfig):
 
     rate_limit: RateLimiterConfig = field(default_factory=RateLimiterConfig)
     timeout_mask_instance_threshold: int = TIMEOUT_MASK_INSTANCE_THRESHOLD
-    """How many trials of one instance must run out of Harbor's agent time (``AgentTimeoutError``) before every
-    trial of the instance is masked. Below it, only the timed-out trials are masked and the instance's other trials
-    train; advantage estimators that compare an instance's trials (``grpo``, ``rloo``, ``maxrl``) still count a
-    masked trial as reward 0. ``1`` masks the instance on any timeout. A trial that fails any other way (a sandbox that never starts, no verifier result, a crash) always
-    masks its instance."""
+    """An instance with at least this many timed-out trials is masked whole; fewer timeouts mask only themselves.
+
+    A timed-out trial ran out of Harbor's agent time (``AgentTimeoutError``). Below the threshold, the instance's
+    other trials train; advantage estimators that compare an instance's trials (``grpo``, ``rloo``, ``maxrl``) still
+    count a masked trial as reward 0. ``1`` masks the instance on any timeout. A trial that fails any other way (a
+    sandbox that never starts, no verifier result, a crash) always masks its instance."""
 
     def __post_init__(self) -> None:
         super().__post_init__()
