@@ -92,8 +92,8 @@ class SkycapConfig:
     wandb: SkycapWandbConfig = field(default_factory=SkycapWandbConfig)
     """The per-step index of the records in W&B."""
     ttl: float = 3600.0
-    """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it. Also
-    how long a server keeps the samples of a finished trajectory whose group is never composed."""
+    """Seconds an open trajectory may be idle before skycap writes it as abandoned and releases it. It doesn't
+    apply to finished ones: a server actor keeps their samples until their group is composed or discarded."""
     max_concurrent_finishes: int = 64
     """Trajectories each server actor may be finishing at once."""
     renderer_pool_size: int = 8

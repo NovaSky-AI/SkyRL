@@ -33,6 +33,49 @@ def test_samples_are_taken_once_and_discarded_ones_are_gone() -> None:
     assert len(cache) == 0
 
 
+def test_a_finish_that_lands_after_its_group_discarded_it_caches_nothing() -> None:
+    # A cancelled group discards its trajectories while a finish of one is still running on the actor.
+    cache = SampleCache()
+    cache.discard(["late"])
+    cache.put("late", ["sample"])
+
+    assert len(cache) == 0
+    with pytest.raises(KeyError, match="samples of late were discarded"):
+        cache.take("late")
+
+
+def test_a_discarded_trajectory_finished_twice_caches_nothing() -> None:
+    cache = SampleCache()
+    cache.put("twice", ["first"])
+    cache.discard(["twice"])
+    cache.put("twice", ["first"])
+    cache.put("twice", ["retry"])
+
+    assert len(cache) == 0
+
+
+def test_discarding_other_trajectories_leaves_a_put_to_be_taken() -> None:
+    cache = SampleCache()
+    cache.discard(["retried-attempt"])
+    cache.put("kept", ["sample"])
+    cache.put("kept", ["sample"])
+
+    assert cache.take("kept") == ["sample"]
+    assert len(cache) == 0
+
+
+def test_only_the_newest_discarded_ids_are_remembered() -> None:
+    cache = SampleCache(max_discarded=2)
+    cache.discard(["a", "b"])
+    cache.discard(["c"])
+    cache.put("a", ["forgotten"])
+    cache.put("b", ["dropped"])
+    cache.put("c", ["dropped"])
+
+    assert cache.take("a") == ["forgotten"]
+    assert len(cache) == 0
+
+
 def test_a_group_s_samples_wait_however_long_its_slowest_trial_takes() -> None:
     cache = SampleCache()
     cache.put("early", ["x"])

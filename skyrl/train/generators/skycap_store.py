@@ -11,6 +11,7 @@ Needs the ``skycap`` extra.
 
 import threading
 from abc import ABC, abstractmethod
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import (
     Any,
@@ -54,22 +55,32 @@ class SampleCache:
     """Finished trajectories' samples, held by the server actor until their group is composed.
 
     An entry leaves when its group takes it or discards it (a retried attempt, a cancelled group),
-    however long the group's slowest trial runs. Thread-safe: a server actor finishes
+    however long the group's slowest trial runs. A discarded id stays discarded, so a later ``put`` of
+    it caches nothing: cancelling a finish doesn't stop the actor method, which may put after its
+    group discarded it, and a trajectory may be finished twice. Thread-safe: a server actor finishes
     trajectories concurrently.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_discarded: int = 1 << 16) -> None:
         self._entries: Dict[str, List[Sample]] = {}
+        # An ordered set; past ``max_discarded`` the oldest id is forgotten. A late put follows its
+        # discard by at most a finish's queueing and deadline, so it only has to outlast those discards.
+        self._discarded: OrderedDict[str, None] = OrderedDict()
+        self._max_discarded = max_discarded
         self._lock = threading.Lock()
 
     def put(self, trajectory_id: str, samples: List[Sample]) -> None:
         with self._lock:
-            self._entries[trajectory_id] = samples
+            if trajectory_id not in self._discarded:
+                self._entries[trajectory_id] = samples
 
     def take(self, trajectory_id: str) -> List[Sample]:
         with self._lock:
             samples = self._entries.pop(trajectory_id, None)
+            discarded = trajectory_id in self._discarded
         if samples is None:
+            if discarded:
+                raise KeyError(f"the samples of {trajectory_id} were discarded")
             raise KeyError(f"no samples cached for {trajectory_id}; was it finished on this server?")
         return samples
 
@@ -77,6 +88,9 @@ class SampleCache:
         with self._lock:
             for trajectory_id in trajectory_ids:
                 self._entries.pop(trajectory_id, None)
+                self._discarded[trajectory_id] = None
+            while len(self._discarded) > self._max_discarded:
+                self._discarded.popitem(last=False)
 
     def __len__(self) -> int:
         with self._lock:
