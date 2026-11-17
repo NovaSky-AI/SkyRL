@@ -7,7 +7,7 @@ pytest.importorskip("harbor")
 from examples.train_integrations.harbor.entrypoints.main_harbor import (  # noqa: E402
     HarborGeneratorConfig,
 )
-from examples.train_integrations.harbor.harbor_generator import (  # noqa: E402
+from skyrl.integration.harbor.harbor_generator import (  # noqa: E402
     HarborTrajectoryOutput,
     build_step_wise_generator_output,
 )

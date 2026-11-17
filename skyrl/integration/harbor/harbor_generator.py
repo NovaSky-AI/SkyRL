@@ -19,7 +19,10 @@ from skyrl.backends.skyrl_train.inference_servers.base import (
     ConversationType,
     InferenceEngineInterface,
 )
-from skyrl.integration.harbor.masking import TIMEOUT_MASK_INSTANCE_THRESHOLD, mask_failed_trials
+from skyrl.integration.harbor.masking import (
+    TIMEOUT_MASK_INSTANCE_THRESHOLD,
+    mask_failed_trials,
+)
 from skyrl.integration.harbor.trial_metrics import TrialAttempts, trial_metrics
 from skyrl.train.generators.base import (
     GeneratorInput,

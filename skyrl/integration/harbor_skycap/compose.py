@@ -50,7 +50,10 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_LOGPROBS_DTYPE,
     CompactSampleSupport,
 )
-from skyrl.integration.harbor.masking import TIMEOUT_MASK_INSTANCE_THRESHOLD, mask_failed_trials
+from skyrl.integration.harbor.masking import (
+    TIMEOUT_MASK_INSTANCE_THRESHOLD,
+    mask_failed_trials,
+)
 from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import get_rollout_metrics
 
