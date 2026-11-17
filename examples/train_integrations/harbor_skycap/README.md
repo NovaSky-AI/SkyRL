@@ -253,10 +253,17 @@ What's imposed on every call:
 - **`cache_salt`:** derived from the policy's weight version. It rides in the request body and skycap forwards it.
 - **Session id:** the trajectory id, sent to the router as `X-Session-ID`.
 
-Masking is the sibling's:
-- **Timeout or failed rollout:** the whole instance is masked.
+Masking is the sibling's, from the same function (`skyrl/integration/harbor/masking.py`):
+- **Failed rollout** (a sandbox that never started, no verifier result, a crash, nothing captured, or a
+  trajectory skycap failed, e.g. on an unattributable prompt): the whole instance is masked.
+- **Agent timeout** (`AgentTimeoutError`, not retried): when at least `generator.timeout_mask_instance_threshold`
+  (default 2) trials of an instance time out, the whole instance is masked. Below that, only the timed-out
+  trials are, and the instance's other trials train. `1` masks the instance on any timeout.
 - **Context-length stop:** trains with reward 0, unless overlong filtering is on.
-- **Failed inside skycap** (e.g. an unattributable prompt): the trial isn't trained on.
+
+Advantage estimators that compare an instance's trials (`grpo`, `rloo`, `maxrl`) still count a masked trial as
+reward 0. `trainer.algorithm.zero_variance_filter` ignores masked trials, so it drops a group whose other trials
+all have the same reward.
 
 R3 (rollout routing replay) needs
 `generator.inference_engine.enable_return_routed_experts=true` and

@@ -200,6 +200,7 @@ async def test_the_plain_harbor_generator_logs_a_start_timeout_rescued_by_a_retr
             "step_wise_trajectories": True,
             "merge_stepwise_output": True,
             "apply_overlong_filtering": False,
+            "timeout_mask_instance_threshold": 2,
             "rate_limit": None,
         }
     )
