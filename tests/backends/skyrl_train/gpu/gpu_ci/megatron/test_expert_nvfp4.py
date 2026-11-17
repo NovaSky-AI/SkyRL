@@ -642,7 +642,7 @@ def w4a4_alltoall_worker(rank: int, world: int, port: int, queue) -> None:
     for other in (ref, wref, raw):
         other.load_state_dict(model.state_dict())
     bs = BLOCK_SCALE_FOUR_OVER_SIX
-    results = {"registered": expert_nvfp4.install_expert_nvfp4([model], "w4a4", bs, bf16_layers=[1])}
+    results = {"registered": expert_nvfp4.install_expert_nvfp4([model], "w4a4", bs, bs, bf16_layers=[1])}
     results["input_hooks"] = len(expert_nvfp4._INPUT_ROUNDING_MODULES)
 
     # Reference: layer 0's experts pre-rounded, their inputs rounded by a bf16 pre-hook; layer 1 untouched.

@@ -307,15 +307,21 @@ class MegatronWorker:
         )
         from skyrl.backends.skyrl_train.weight_sync.nvfp4 import nvfp4_bf16_layers
         from skyrl.backends.skyrl_train.workers.megatron.quantization.expert_nvfp4 import (
+            block_scale_name,
             install_expert_nvfp4,
         )
 
         hf = resolve_text_config(self.strategy.hf_config)
+        weights, inputs = mc.expert_nvfp4_weight_rounding, mc.expert_nvfp4_activation_rounding
         install_expert_nvfp4(
             self.actor_module,
             mc.expert_nvfp4_mode,
-            mc.expert_nvfp4_block_scale,
+            block_scale_name(weights.four_over_six),
+            block_scale_name(inputs.four_over_six),
             nvfp4_bf16_layers(hf.num_hidden_layers, mc),
+            weight_stochastic=weights.stochastic_rounding,
+            activation_stochastic=inputs.stochastic_rounding,
+            seed=self.cfg.seed,
         )
 
     def init_configs(
@@ -1686,6 +1692,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.model.run_pending_grad_sync()
 
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+        if self.cfg.policy.megatron_config.expert_nvfp4:
+            from skyrl.backends.skyrl_train.workers.megatron.quantization.expert_nvfp4 import (
+                advance_weight_rounding,
+            )
+
+            # New weights: stochastic weight rounding draws afresh (a no-op count otherwise).
+            advance_weight_rounding()
 
         # Clear the DDP grad buffers for the next window. `optimizer.zero_grad()` inside
         # `optimizer_step` only drops `param.grad` / the fp32 main-param grads -- the

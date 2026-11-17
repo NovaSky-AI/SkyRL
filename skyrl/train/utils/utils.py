@@ -441,6 +441,24 @@ def _validate_expert_nvfp4_cfg(cfg: SkyRLTrainConfig):
             f"{name} needs whole experts per rank: set trainer.policy.megatron_config.expert_tensor_parallel_size: 1 "
             f"(got {etp}{unset})"
         )
+    # The trainer's own rounding: 4/6 defaults to the rollouts' grid (expert_nvfp4_block_scale); another setting is kept.
+    rollouts_46 = mc.expert_nvfp4_block_scale == BLOCK_SCALE_FOUR_OVER_SIX
+    for rounding, field_name in (
+        (mc.expert_nvfp4_weight_rounding, "expert_nvfp4_weight_rounding"),
+        (mc.expert_nvfp4_activation_rounding, "expert_nvfp4_activation_rounding"),
+    ):
+        if rounding.four_over_six is None:
+            rounding.four_over_six = rollouts_46
+        elif rounding.four_over_six != rollouts_46:
+            logger.warning(
+                f"trainer.policy.megatron_config.{field_name}.four_over_six={rounding.four_over_six} differs from the "
+                f"rollouts' expert_nvfp4_block_scale={mc.expert_nvfp4_block_scale!r}: the trainer rounds to another grid"
+            )
+    if mc.expert_nvfp4_mode != EXPERT_NVFP4_MODE_W4A4 and mc.expert_nvfp4_activation_rounding.stochastic_rounding:
+        raise ValueError(
+            "trainer.policy.megatron_config.expert_nvfp4_activation_rounding.stochastic_rounding rounds the expert "
+            "inputs, which only expert_nvfp4_mode=w4a4 does"
+        )
     if mc.expert_nvfp4_mode == EXPERT_NVFP4_MODE_W4A4:
         # The trainer (expert TP 1) quantizes each fc2 input per token over the whole intermediate row. vLLM does the
         # same under expert parallelism, but over a 1/R shard when its experts are tensor-sharded R ways (DP x TP).

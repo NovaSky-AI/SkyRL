@@ -552,6 +552,21 @@ DEFAULT_TRANSFORMER_CONFIG_KWARGS = {
 
 
 @dataclass
+class QatRoundingConfig(BaseConfig):
+    """How the trainer's QAT rounds one quantized tensor class (``expert_nvfp4``'s routed-expert weights or inputs).
+    Trainer-only: the rollouts keep their own quantizer settings, so a setting that differs from theirs makes the
+    trainer round differently from the rollouts it emulates (logged at startup)."""
+
+    four_over_six: Optional[bool] = None
+    """NVFP4 4/6 block scales: per 16-block amax/6 or amax/4, whichever has the lower squared error (FlashInfer's
+    4over6), instead of amax/6. ``None``: the rollouts' setting."""
+    stochastic_rounding: bool = False
+    """Round each scaled value to one of its two E2M1 neighbours, up with probability equal to its distance from the
+    lower one: unbiased, where round-to-nearest repeats the same error every time. Scales stay the round-to-nearest
+    grid's, one E4M3 step larger where a block's largest value would saturate."""
+
+
+@dataclass
 class MegatronConfig(BaseConfig):
     """Megatron-Core backend configuration, used when ``trainer.strategy="megatron"``.
 
@@ -729,7 +744,15 @@ class MegatronConfig(BaseConfig):
     ``four_over_six`` (humans&' recipe) picks amax/6 or amax/4 per 16-block, whichever has the lower squared error
     (FlashInfer's 4over6 with its fast MSE error path, E4M3 bound 448); ``absmax`` (amax/6) is vLLM's own
     quantizer. The weight sync quantizes the experts with it (FlashInfer ``fp4_quantize`` with vLLM's per-expert
-    global scale), and the vLLM engines' FlashInfer activation quantizer is configured from it."""
+    global scale), and the vLLM engines' FlashInfer activation quantizer is configured from it, so it is the rollouts'
+    grid; the trainer rounds on it too unless ``expert_nvfp4_*_rounding.four_over_six`` says otherwise."""
+    expert_nvfp4_weight_rounding: QatRoundingConfig = field(default_factory=QatRoundingConfig)
+    """How the trainer rounds the routed-expert weights (``four_over_six`` defaults to ``expert_nvfp4_block_scale``).
+    Stochastic weights draw once per optimizer step and expert: every fprop, dgrad and recompute of a step, and every
+    rank holding the expert, round it alike."""
+    expert_nvfp4_activation_rounding: QatRoundingConfig = field(default_factory=QatRoundingConfig)
+    """How ``w4a4`` rounds the per-token expert inputs (``four_over_six`` defaults to ``expert_nvfp4_block_scale``).
+    Stochastic inputs draw afresh in every forward (activation recompute redraws the same)."""
     expert_nvfp4_stacked_sync: bool = True
     """With ``expert_nvfp4``: ship each NVFP4 MoE layer's experts to vLLM as 8 tensors stacked over all experts,
     already in vLLM's ModelOpt-NVFP4 ``FusedMoE`` parameter layout (``weight_sync/nvfp4_stacked.py``), instead of

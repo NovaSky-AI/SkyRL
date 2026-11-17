@@ -1993,6 +1993,34 @@ def test_expert_nvfp4_defaults_to_w4a16_with_four_over_six():
     assert (mc.expert_nvfp4_mode, mc.expert_nvfp4_block_scale) == ("w4a16", "four_over_six")
 
 
+@pytest.mark.parametrize("block_scale", ["absmax", "four_over_six"])
+def test_expert_nvfp4_trainer_rounding_defaults_to_the_rollouts_grid(block_scale):
+    """``expert_nvfp4_*_rounding.four_over_six`` follows ``expert_nvfp4_block_scale`` unless set; stochastic rounding
+    is off by default."""
+    cfg = _expert_nvfp4_config("w4a4")
+    mc = cfg.trainer.policy.megatron_config
+    mc.expert_nvfp4_block_scale = block_scale
+    _validate_expert_nvfp4_cfg(cfg)
+    for rounding in (mc.expert_nvfp4_weight_rounding, mc.expert_nvfp4_activation_rounding):
+        assert rounding.four_over_six is (block_scale == "four_over_six") and rounding.stochastic_rounding is False
+
+
+@pytest.mark.parametrize("field", ["expert_nvfp4_weight_rounding", "expert_nvfp4_activation_rounding"])
+def test_expert_nvfp4_trainer_rounding_may_differ_from_the_rollouts(field):
+    cfg = _expert_nvfp4_config("w4a4")
+    rounding = getattr(cfg.trainer.policy.megatron_config, field)
+    rounding.four_over_six, rounding.stochastic_rounding = False, True
+    _validate_expert_nvfp4_cfg(cfg)
+    assert rounding.four_over_six is False and rounding.stochastic_rounding is True
+
+
+def test_expert_nvfp4_stochastic_inputs_need_w4a4():
+    cfg = _expert_nvfp4_config("w4a16")
+    cfg.trainer.policy.megatron_config.expert_nvfp4_activation_rounding.stochastic_rounding = True
+    with pytest.raises(ValueError, match="only expert_nvfp4_mode=w4a4"):
+        _validate_expert_nvfp4_cfg(cfg)
+
+
 @pytest.mark.parametrize("mode", ["w4a16", "w4a4"])
 @pytest.mark.parametrize("colocated", [False, True])
 def test_expert_nvfp4_accepts_packed_push_backends(colocated, mode):

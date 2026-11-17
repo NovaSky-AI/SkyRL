@@ -49,6 +49,19 @@ With `w4a16`, each routed-expert fprop and dgrad GEMM uses the weight rounded to
 
 `w4a4` also rounds the inputs of both expert GEMMs as the W4A4 rollouts quantize them, with one scale per token and FlashInfer's own per-token quantizer; dgrad passes through the rounding unchanged and wgrad reads the rounded input. The expert fprops run on NVFP4 tensor cores (FlashInfer's CuTe DSL grouped GEMM). It works on any token dispatcher, and needs expert parallelism on the engines (`generator.inference_engine.expert_parallel_size`) so that vLLM quantizes whole fc2-input rows as the trainer does.
 
+The trainer's own rounding has separate knobs, which leave what the engines serve alone:
+
+```bash
+# block scales (default: expert_nvfp4_block_scale, the rollouts') and value rounding (default: round-to-nearest)
+trainer.policy.megatron_config.expert_nvfp4_weight_rounding.four_over_six=true
+trainer.policy.megatron_config.expert_nvfp4_weight_rounding.stochastic_rounding=true
+# w4a4 only
+trainer.policy.megatron_config.expert_nvfp4_activation_rounding.four_over_six=true
+trainer.policy.megatron_config.expert_nvfp4_activation_rounding.stochastic_rounding=true
+```
+
+A block scale that differs from the rollouts' makes the trainer round to another grid than the one it emulates (logged at startup). Stochastic rounding keeps the round-to-nearest grid's block scales (one E4M3 step larger where a block's largest value would saturate) and rounds each value to one of its two E2M1 neighbours, up with probability equal to its distance from the lower one, so it is unbiased. Weights draw once per optimizer step and expert, so every fprop, dgrad and recompute of a step, and every rank holding the expert, round alike; inputs draw afresh in each forward, and activation recompute redraws the same.
+
 The trainer needs whole experts per rank (`expert_tensor_parallel_size: 1`), `moe_grouped_gemm` and the NCCL or CUDA-IPC weight sync. LoRA, MTP and `fake_int4_qat` are not supported. See `examples/train/megatron/run_megatron_dapo_qwen3_30b_a3b_nvfp4.sh`.
 
 ## Enabling off-policy correction (TIS)

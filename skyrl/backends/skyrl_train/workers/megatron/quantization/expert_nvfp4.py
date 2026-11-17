@@ -27,12 +27,20 @@ straight-through (:func:`pack_input_pre_hook`): dgrad passes through the roundin
 input (TE saves it; no second copy exists). The fprops run on NVFP4 tensor cores: inputs and weights packed on
 exactly that grid and multiplied by a grouped NVFP4 GEMM, accumulating the exact products in fp32 as vLLM's W4A4
 kernel does (:func:`fp4_fprop`). dgrad and wgrad stay bf16, on the round trips. Any token dispatcher.
+
+The trainer's rounding has its own knobs (``expert_nvfp4_weight_rounding``, ``expert_nvfp4_activation_rounding``): 4/6
+or absmax block scales, by default ``expert_nvfp4_block_scale`` (the grid the weight sync and the engines use), and
+round-to-nearest (the default) or stochastic values (``kernels.nvfp4_quant.stochastic``). Stochastic weights draw once
+per weight version (optimizer step, :func:`advance_weight_rounding`) and expert, so every fprop, dgrad and recompute of
+a version, and every rank holding the expert, round it alike; stochastic inputs draw afresh in each forward from the
+CUDA generator, which activation checkpointing restores for the recompute.
 """
 
 from __future__ import annotations
 
 import functools
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -43,6 +51,11 @@ from skyrl.backends.skyrl_train.kernels.nvfp4_quant import (
     BLOCK_SCALE_FOUR_OVER_SIX,
     NVFP4_GROUP_SIZE,
     check_block_scale,
+)
+from skyrl.backends.skyrl_train.kernels.nvfp4_quant.stochastic import (
+    WeightDraw,
+    expert_stream,
+    weight_seed,
 )
 
 EXPERT_NVFP4_MODE_W4A16 = "w4a16"
@@ -58,26 +71,72 @@ NVFP4_DEVICE_CAPABILITIES = ((10, 0), (10, 3))
 _ROUTED_EXPERT_WEIGHTS: dict[int, torch.nn.Parameter] = {}
 # Routed-expert TEGroupedLinears with an input rounding hook, by id().
 _INPUT_ROUNDING_MODULES: dict[int, torch.nn.Module] = {}
+# Stochastic weight rounding: each registered weight's stream (stochastic.expert_stream), by id().
+_WEIGHT_STREAMS: dict[int, int] = {}
+
+
+def block_scale_name(four_over_six: bool) -> str:
+    """The block-scale name of a ``QatRoundingConfig.four_over_six`` setting."""
+    return BLOCK_SCALE_FOUR_OVER_SIX if four_over_six else BLOCK_SCALE_ABSMAX
+
+
+@dataclass
+class _WeightRounding:
+    """Stochastic weight rounding: off, or on with a base seed and the current weight version."""
+
+    stochastic: bool = False
+    base_seed: int = 0
+    version: int = 0
+
+
+_WEIGHT_ROUNDING = _WeightRounding()
+
+
+def set_weight_rounding(stochastic: bool, base_seed: int = 0) -> None:
+    """Round the registered weights stochastically (one draw per weight version and expert) or to nearest."""
+    _WEIGHT_ROUNDING.stochastic = stochastic
+    _WEIGHT_ROUNDING.base_seed = base_seed
+    _WEIGHT_ROUNDING.version = 0
+
+
+def advance_weight_rounding() -> None:
+    """A new weight version (call after each optimizer step): stochastic weight rounding draws afresh. Within a
+    version every fprop, dgrad and recompute rounds a weight alike."""
+    _WEIGHT_ROUNDING.version += 1
+
+
+def weight_draw(weights: Sequence[torch.Tensor]) -> WeightDraw | None:
+    """The stochastic-rounding draw of registered expert weights at the current version; None when rounding to
+    nearest."""
+    if not _WEIGHT_ROUNDING.stochastic:
+        return None
+    try:
+        streams = tuple(_WEIGHT_STREAMS[id(w)] for w in weights)
+    except KeyError:
+        raise RuntimeError("expert_nvfp4 stochastic weight rounding: an expert weight was not registered") from None
+    return WeightDraw(weight_seed(_WEIGHT_ROUNDING.base_seed, _WEIGHT_ROUNDING.version), streams)
 
 
 def fake_nvfp4_quantize_weights(weights: Sequence[torch.Tensor], block_scale: str) -> list[torch.Tensor]:
     """``dequant(quant(w))`` of each ``[N, K]`` expert weight on the rollouts' NVFP4 grid, in one
-    fused round trip; one global scale per expert."""
+    fused round trip; one global scale per expert. Stochastic with :func:`set_weight_rounding`."""
     from skyrl.backends.skyrl_train.kernels.nvfp4_quant.fake_experts import (
         fake_quantize_expert_weights,
     )
 
     check_block_scale(block_scale)
+    draw = weight_draw(weights)
     with torch.no_grad():
-        return fake_quantize_expert_weights([w.detach() for w in weights], block_scale)
+        return fake_quantize_expert_weights([w.detach() for w in weights], block_scale, draw)
 
 
 def fake_nvfp4_quantize_activations(
-    x: torch.Tensor, block_scale: str = BLOCK_SCALE_ABSMAX, inplace: bool = False
+    x: torch.Tensor, block_scale: str = BLOCK_SCALE_ABSMAX, inplace: bool = False, stochastic: bool = False
 ) -> torch.Tensor:
     """``dequant(quant(x))`` on vLLM's per-token NVFP4 activation grid (one scale per row of ``x``),
     in bf16: the decode of FlashInfer's ``nvfp4_quantize(per_token_activation=True)`` bytes, with its
-    4over6 fast path for ``four_over_six``. ``inplace`` overwrites ``x``."""
+    4over6 fast path for ``four_over_six``; ``stochastic`` re-rounds the values stochastically on those scales.
+    ``inplace`` overwrites ``x``."""
     from skyrl.backends.skyrl_train.kernels.nvfp4_quant.per_token import (
         fake_quantize_per_token,
     )
@@ -85,7 +144,7 @@ def fake_nvfp4_quantize_activations(
     four_over_six = check_block_scale(block_scale) == BLOCK_SCALE_FOUR_OVER_SIX
     with torch.no_grad():
         rows = x.detach().view(-1, x.shape[-1])
-        y = fake_quantize_per_token(rows, inplace=inplace, four_over_six=four_over_six)
+        y = fake_quantize_per_token(rows, inplace=inplace, four_over_six=four_over_six, stochastic=stochastic)
     return x if inplace else y.view(x.shape)
 
 
@@ -95,7 +154,7 @@ def fprop_packed_weights(weights: Sequence[torch.Tensor], block_scale: str):
         pack_expert_weights,
     )
 
-    return pack_expert_weights([w.detach() for w in weights], block_scale)
+    return pack_expert_weights([w.detach() for w in weights], block_scale, draw=weight_draw(weights))
 
 
 def fp4_fprop(
@@ -223,12 +282,13 @@ def round_input_pre_hook(quantize_: Callable[[torch.Tensor], None]):
 _fprop_operand: tuple | None = None
 
 
-def pack_input_pre_hook(block_scale: str):
+def pack_input_pre_hook(block_scale: str, stochastic: bool = False):
     """Forward pre-hook for ``w4a4``: packs a routed-expert ``TEGroupedLinear``'s input ``(x, m_splits)`` into the
     NVFP4 GEMM operand (FlashInfer's quantizer) and overwrites ``x`` with its round trip, straight-through, as
     :func:`round_input_pre_hook` does. Rounding here, before the module runs, keeps the in-place write off the views
     TE saves for wgrad; writing back from inside TE's forward (after it split the input) leaves those saved views
-    stale for the recompute's backward."""
+    stale for the recompute's backward. ``stochastic``: the values are rounded stochastically (the round trip and the
+    packed operand alike)."""
     four_over_six = check_block_scale(block_scale) == BLOCK_SCALE_FOUR_OVER_SIX
 
     def hook(module: torch.nn.Module, args: tuple) -> tuple:
@@ -247,12 +307,14 @@ def pack_input_pre_hook(block_scale: str):
             rows = t.view(-1, t.shape[-1])
             if n % 128 or k % 64 or not rows.is_contiguous():
                 # The fprop runs the bf16 GEMM of the round trips (_warn_fp4_fallback): round only.
-                fake_nvfp4_quantize_activations(t, block_scale, inplace=True)
+                fake_nvfp4_quantize_activations(t, block_scale, inplace=True, stochastic=stochastic)
                 return
             splits = tuple(int(m) for m in m_splits)
             layout = tile_layout(splits, t.device)
             with torch.no_grad():
-                packed = pack_per_token(rows, layout.dst, layout.padded_rows, four_over_six, write_back=True)
+                packed = pack_per_token(
+                    rows, layout.dst, layout.padded_rows, four_over_six, write_back=True, stochastic=stochastic
+                )
             _fprop_operand = (rows, splits, packed, layout)
 
         return (_RoundInputInPlace.apply(x, pack_), m_splits, *rest)
@@ -342,17 +404,17 @@ def nvfp4_modules(model_chunks: Iterable[torch.nn.Module], cls: type, bf16_layer
                 yield name, module
 
 
-def routed_expert_grouped_linears(
+def routed_expert_projections(
     model_chunks: Iterable[torch.nn.Module], bf16_layers: Iterable[int] = ()
-) -> list[tuple[str, Any]]:
-    """``(name, TEGroupedLinear)`` of every routed expert projection outside the BF16 layers: the grouped linears
-    inside a ``TEGroupedMLP`` (shared experts and dense MLPs use ``TELinear``, which is left alone). Raises if an
-    MoE layer runs its experts some other way (e.g. ``SequentialMLP``, ``moe_grouped_gemm=False``)."""
+) -> list[tuple[str, Any, Any]]:
+    """``(name, TEGroupedLinear, MoELayer)`` of every routed expert projection outside the BF16 layers: the grouped
+    linears inside a ``TEGroupedMLP`` (shared experts and dense MLPs use ``TELinear``, which is left alone). Raises if
+    an MoE layer runs its experts some other way (e.g. ``SequentialMLP``, ``moe_grouped_gemm=False``)."""
     from megatron.core.extensions.transformer_engine import TEGroupedLinear
     from megatron.core.transformer.moe.experts import TEGroupedMLP
     from megatron.core.transformer.moe.moe_layer import MoELayer
 
-    found: list[tuple[str, Any]] = []
+    found: list[tuple[str, Any, Any]] = []
     for name, module in nvfp4_modules(model_chunks, MoELayer, bf16_layers):
         if not isinstance(module.experts, TEGroupedMLP):
             raise ValueError(
@@ -361,22 +423,35 @@ def routed_expert_grouped_linears(
             )
         check_supported_transformer_config(module.experts.config)
         found += [
-            (f"{name}.experts.{sub_name}", sub)
+            (f"{name}.experts.{sub_name}", sub, module)
             for sub_name, sub in module.experts.named_modules()
             if isinstance(sub, TEGroupedLinear)
         ]
     return found
 
 
+def routed_expert_grouped_linears(
+    model_chunks: Iterable[torch.nn.Module], bf16_layers: Iterable[int] = ()
+) -> list[tuple[str, Any]]:
+    """``(name, TEGroupedLinear)`` of :func:`routed_expert_projections`."""
+    return [(name, module) for name, module, _ in routed_expert_projections(model_chunks, bf16_layers)]
+
+
 def register_routed_expert_weights(
     model_chunks: Sequence[torch.nn.Module], params_dtype: torch.dtype, bf16_layers: Iterable[int] = ()
 ) -> int:
-    """Register every routed-expert weight of ``model_chunks`` outside ``bf16_layers`` for rounding; returns the
-    count."""
+    """Register every routed-expert weight of ``model_chunks`` outside ``bf16_layers`` for rounding, with its
+    stochastic-rounding stream (global layer number, fc1 / fc2, global expert index); returns the count."""
     count = 0
-    for name, module in routed_expert_grouped_linears(model_chunks, bf16_layers):
-        for w in _check_grouped_linear(module, name, params_dtype):
+    for name, module, moe_layer in routed_expert_projections(model_chunks, bf16_layers):
+        weights = _check_grouped_linear(module, name, params_dtype)
+        experts = moe_layer.local_expert_indices
+        if len(experts) != len(weights):
+            raise ValueError(f"expert_nvfp4: {name} has {len(weights)} weights for {len(experts)} local experts")
+        fc2 = name.endswith(FC2_NAME)
+        for w, expert in zip(weights, experts):
             _ROUTED_EXPERT_WEIGHTS[id(w)] = w
+            _WEIGHT_STREAMS[id(w)] = expert_stream(moe_layer.layer_number, fc2, expert)
             count += 1
     return count
 
@@ -403,21 +478,24 @@ def register_routed_expert_input_rounding(
     block_scale: str = BLOCK_SCALE_ABSMAX,
     pack_fp4: bool = False,
     bf16_layers: Iterable[int] = (),
+    stochastic: bool = False,
 ) -> int:
     """Round the input of every routed-expert ``TEGroupedLinear`` of ``model_chunks`` in place,
     straight-through (wgrad reads the rounded input); returns the number of hooked modules.
     ``pack_fp4`` (``w4a4``'s NVFP4 fprop): the hook also packs the NVFP4 GEMM operand (:func:`pack_input_pre_hook`).
+    ``stochastic``: round the values stochastically (a fresh draw per forward from the current CUDA generator, which
+    activation checkpointing restores for the recompute).
     """
     check_block_scale(block_scale)
 
     def round_(x: torch.Tensor) -> None:
-        fake_nvfp4_quantize_activations(x, block_scale, inplace=True)
+        fake_nvfp4_quantize_activations(x, block_scale, inplace=True, stochastic=stochastic)
 
     count = 0
     for _, module in routed_expert_grouped_linears(model_chunks, bf16_layers):
         check_supported_input_rounding_config(module.config)
         if id(module) not in _INPUT_ROUNDING_MODULES:
-            hook = pack_input_pre_hook(block_scale) if pack_fp4 else round_input_pre_hook(round_)
+            hook = pack_input_pre_hook(block_scale, stochastic) if pack_fp4 else round_input_pre_hook(round_)
             module.register_forward_pre_hook(hook)
             _INPUT_ROUNDING_MODULES[id(module)] = module
         count += 1
@@ -440,24 +518,49 @@ def install_grouped_gemm_hook(block_scale: str, fp4_forward: bool = False) -> No
 
 
 def install_expert_nvfp4(
-    model_chunks: Sequence[torch.nn.Module], mode: str, block_scale: str, bf16_layers: Iterable[int] = ()
+    model_chunks: Sequence[torch.nn.Module],
+    mode: str,
+    block_scale: str,
+    activation_block_scale: str,
+    bf16_layers: Iterable[int] = (),
+    weight_stochastic: bool = False,
+    activation_stochastic: bool = False,
+    seed: int = 0,
 ) -> int:
     """``expert_nvfp4`` on a built model (outside ``bf16_layers``): ``w4a16`` rounds the routed-expert weights,
-    ``w4a4`` the per-token expert inputs as well (see the module docstring). Returns the number of rounded weights."""
+    ``w4a4`` the per-token expert inputs as well (see the module docstring). ``block_scale`` /
+    ``activation_block_scale``: the weights' / inputs' block scales; ``weight_stochastic`` / ``activation_stochastic``
+    round the values stochastically (weights: one draw per weight version under ``seed``, advanced by
+    :func:`advance_weight_rounding`). Returns the number of rounded weights."""
     if mode not in EXPERT_NVFP4_MODES:
         raise ValueError(f"expert_nvfp4_mode must be one of {EXPERT_NVFP4_MODES}, got {mode!r}")
     if torch.cuda.is_available() and torch.cuda.get_device_capability() not in NVFP4_DEVICE_CAPABILITIES:
         raise RuntimeError(f"expert_nvfp4 requires SM100/SM103, got {torch.cuda.get_device_capability()}")
     bf16_layers = sorted(bf16_layers)
     w4a4 = mode == EXPERT_NVFP4_MODE_W4A4
+    if activation_stochastic and not w4a4:
+        raise ValueError("expert_nvfp4 stochastic activation rounding needs expert_nvfp4_mode=w4a4")
+    set_weight_rounding(weight_stochastic, seed)
     install_grouped_gemm_hook(block_scale, fp4_forward=w4a4)
     count = register_routed_expert_weights(model_chunks, torch.bfloat16, bf16_layers)
     if w4a4:
         # The pre-hooks round the inputs in place and pack them for the NVFP4 fprop.
-        register_routed_expert_input_rounding(model_chunks, block_scale, pack_fp4=True, bf16_layers=bf16_layers)
+        register_routed_expert_input_rounding(
+            model_chunks,
+            activation_block_scale,
+            pack_fp4=True,
+            bf16_layers=bf16_layers,
+            stochastic=activation_stochastic,
+        )
     logger.info(
-        f"expert_nvfp4 ({mode}): {count} routed-expert weights rounded to NVFP4 (block_scale={block_scale}"
-        + (", inputs per token" if w4a4 else "")
+        f"expert_nvfp4 ({mode}): {count} routed-expert weights rounded to NVFP4 (block_scale={block_scale}, "
+        + ("stochastic" if weight_stochastic else "round-to-nearest")
+        + (
+            f"; inputs per token, block_scale={activation_block_scale}, "
+            + ("stochastic" if activation_stochastic else "round-to-nearest")
+            if w4a4
+            else ""
+        )
         + f"; BF16 layers {bf16_layers}); fprop on "
         + ("NVFP4 tensor cores." if w4a4 else "bf16 GEMMs of the round trips.")
     )

@@ -36,6 +36,11 @@ from skyrl.backends.skyrl_train.kernels.nvfp4_quant import (
     nvfp4_global_scale,
 )
 from skyrl.backends.skyrl_train.kernels.nvfp4_quant.decode import dequantize_rows
+from skyrl.backends.skyrl_train.kernels.nvfp4_quant.stochastic import (
+    WeightDraw,
+    expert_uniforms,
+    stochastic_requantize,
+)
 
 # How stack_experts read the experts, for tests and logs.
 STACK_STATS = {"views": 0, "copies": 0}
@@ -170,22 +175,43 @@ class PackedExperts:
         return sum(t.numel() * t.element_size() for t in ts)
 
 
-def fake_quantize_expert_weights(weights: Sequence[torch.Tensor], block_scale: str) -> list[torch.Tensor]:
+def _stochastic_quantize(
+    stack: ExpertStack, gs: torch.Tensor, block_scale: str, draw: WeightDraw
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(codes (E, N, K/2), linear E4M3 scales (E, N, K/16))`` of the stacked experts, rounded stochastically
+    (:mod:`.stochastic`) on the round-to-nearest grid's scales."""
+    w3 = stack.data
+    e, n, k = w3.shape
+    _, sf = quantize(w3, gs, block_scale)
+    u = expert_uniforms((e, n, k), draw, stack.reversed, w3.device)
+    q, sf = stochastic_requantize(w3.view(e * n, k), gs.repeat_interleave(n), sf.view(e * n, k // 16), u.view(e * n, k))
+    return q.view(e, n, k // 2), sf.view(e, n, k // 16)
+
+
+def fake_quantize_expert_weights(
+    weights: Sequence[torch.Tensor], block_scale: str, draw: WeightDraw | None = None
+) -> list[torch.Tensor]:
     """``dequant(quant(w))`` of each ``(N, K)`` bf16 expert weight on the rollouts' grid (see the module docstring):
-    one FlashInfer quantize and one decode for all experts. CUDA only."""
+    one FlashInfer quantize and one decode for all experts. ``draw``: round the values stochastically with this
+    draw instead (:mod:`.stochastic`). CUDA only."""
     stack = stack_experts(weights)
     w3 = stack.data
     e, n, k = w3.shape
     gs, alpha = global_scales(w3)
-    q, sf = quantize(w3, gs, block_scale)
+    if draw is None:
+        q, sf = quantize(w3, gs, block_scale)
+    else:
+        q, sf = _stochastic_quantize(stack, gs, block_scale, draw)
     stack.data = w3 = None  # a stacked copy is freed before the round trip is allocated
     y = dequantize_rows(q.view(e * n, k // 2), sf.view(e * n, k // 16), alpha.repeat_interleave(n)).view(e, n, k)
     return stack.in_expert_order(y.unbind(0))
 
 
-def pack_expert_weights(weights: Sequence[torch.Tensor], block_scale: str, keep_linear: bool = False) -> PackedExperts:
-    """The quantization of :func:`fake_quantize_expert_weights`, packed for the NVFP4 grouped GEMM (128x4-swizzled
-    scales; ``N % 128 == 0``, ``K % 64 == 0``). ``keep_linear`` also keeps the linear scales for
+def pack_expert_weights(
+    weights: Sequence[torch.Tensor], block_scale: str, keep_linear: bool = False, draw: WeightDraw | None = None
+) -> PackedExperts:
+    """The quantization of :func:`fake_quantize_expert_weights` (same ``draw``), packed for the NVFP4 grouped GEMM
+    (128x4-swizzled scales; ``N % 128 == 0``, ``K % 64 == 0``). ``keep_linear`` also keeps the linear scales for
     :meth:`PackedExperts.dequantize`."""
     from flashinfer import block_scale_interleave
 
@@ -193,12 +219,12 @@ def pack_expert_weights(weights: Sequence[torch.Tensor], block_scale: str, keep_
     w3 = stack.data
     e, n, k = w3.shape
     gs, alpha = global_scales(w3)
-    if not keep_linear:
+    if draw is None and not keep_linear:
         q, sf = quantize(w3, gs, block_scale, swizzled=True)
         return PackedExperts(q, sf, alpha, stack.reversed)
-    q, lin = quantize(w3, gs, block_scale)
-    sf = block_scale_interleave(lin).view(torch.uint8).reshape(e, -1)
-    return PackedExperts(q, sf, alpha, stack.reversed, lin)
+    q, lin = quantize(w3, gs, block_scale) if draw is None else _stochastic_quantize(stack, gs, block_scale, draw)
+    sf = block_scale_interleave(lin.contiguous()).view(torch.uint8).reshape(e, -1)
+    return PackedExperts(q, sf, alpha, stack.reversed, lin if keep_linear else None)
 
 
 def reference_round_trip(w3: torch.Tensor, block_scale: str) -> torch.Tensor:

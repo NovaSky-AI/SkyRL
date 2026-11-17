@@ -326,30 +326,47 @@ def test_bf16_layers_are_skipped_by_global_layer_number(monkeypatch):
 
 
 @pytest.mark.parametrize("mode", ["w4a16", "w4a4"])
-def test_install_wires_the_mode(monkeypatch, mode):
+@pytest.mark.parametrize("weight_sr, input_sr", [(False, False), (True, False), (True, True)])
+def test_install_wires_the_mode(monkeypatch, mode, weight_sr, input_sr):
     """w4a16 hooks the GEMM for the weights only; w4a4 also rounds and packs both expert inputs for the NVFP4 fprop,
-    with the same block scale, on any dispatcher."""
+    with their own block scale and rounding, on any dispatcher."""
+    if input_sr and mode != "w4a4":
+        pytest.skip("stochastic inputs need w4a4 (test_install_rejects_stochastic_inputs_without_w4a4)")
     calls = {}
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(expert_nvfp4, "_WEIGHT_ROUNDING", expert_nvfp4._WeightRounding())
     monkeypatch.setattr(expert_nvfp4, "install_grouped_gemm_hook", lambda *a, **k: calls.update(hook=(a, k)))
     monkeypatch.setattr(expert_nvfp4, "register_routed_expert_weights", lambda *a: 4)
     monkeypatch.setattr(
         expert_nvfp4, "register_routed_expert_input_rounding", lambda *a, **k: calls.update(rounding=(a, k))
     )
-    assert expert_nvfp4.install_expert_nvfp4([], mode, "absmax", [3]) == 4
+    count = expert_nvfp4.install_expert_nvfp4(
+        [], mode, "absmax", "four_over_six", [3], weight_stochastic=weight_sr, activation_stochastic=input_sr, seed=9
+    )
+    assert count == 4
+    assert expert_nvfp4._WEIGHT_ROUNDING == expert_nvfp4._WeightRounding(weight_sr, 9, 0)
     assert calls["hook"] == (("absmax",), {"fp4_forward": mode == "w4a4"})
     assert ("rounding" in calls) == (mode == "w4a4")
     if mode == "w4a4":
-        assert calls["rounding"] == (([], "absmax"), {"pack_fp4": True, "bf16_layers": [3]})
+        assert calls["rounding"] == (
+            ([], "four_over_six"),
+            {"pack_fp4": True, "bf16_layers": [3], "stochastic": input_sr},
+        )
+
+
+def test_install_rejects_stochastic_inputs_without_w4a4(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(ValueError, match="needs expert_nvfp4_mode=w4a4"):
+        expert_nvfp4.install_expert_nvfp4([], "w4a16", "absmax", "absmax", activation_stochastic=True)
 
 
 def test_install_rejects_unknown_modes_and_non_blackwell_devices(monkeypatch):
     with pytest.raises(ValueError, match="expert_nvfp4_mode"):
-        expert_nvfp4.install_expert_nvfp4([], "w8a8", "absmax")
+        expert_nvfp4.install_expert_nvfp4([], "w8a8", "absmax", "absmax")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *a: (9, 0))
     with pytest.raises(RuntimeError, match="SM100"):
-        expert_nvfp4.install_expert_nvfp4([], "w4a16", "absmax")
+        expert_nvfp4.install_expert_nvfp4([], "w4a16", "absmax", "absmax")
 
 
 def test_block_scales_are_checked():
