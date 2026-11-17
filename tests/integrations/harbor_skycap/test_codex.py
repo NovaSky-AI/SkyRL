@@ -19,6 +19,7 @@ from examples.train_integrations.harbor_skycap import (
     codex as codex_module,  # noqa: E402
 )
 from examples.train_integrations.harbor_skycap.codex import (  # noqa: E402
+    AGENTS_MD_PATH,
     CATALOG_PATH,
     CODEX_VERSION,
     SkycapCodex,
@@ -210,6 +211,28 @@ async def test_without_prompt_md_codex_does_not_start(tmp_path, github, codex_st
     with pytest.raises(RuntimeError, match=f"rust-v{CODEX_VERSION}/codex-rs/models-manager/prompt.md"):
         await agent(tmp_path).run("task", FakeEnvironment(), context=None)
     assert codex_starts == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [None, "# Working on this task\n- Run your solution on the example.\n"])
+async def test_codex_starts_with_the_runs_agents_md_in_its_home(tmp_path, github, codex_starts, text) -> None:
+    kwargs = {}
+    if text is not None:
+        (tmp_path / "instructions.md").write_text(text)
+        kwargs["agents_md"] = str(tmp_path / "instructions.md")
+    environment = FakeEnvironment(default_user="agent")
+    await agent(tmp_path, **kwargs).run("task", environment, context=None)
+
+    # The CODEX_HOME Harbor's Codex.run() exports; a Harbor release that moves it moves Codex's global AGENTS.md.
+    assert AGENTS_MD_PATH == "/tmp/codex-home/AGENTS.md"
+    assert codex_starts[0].get(AGENTS_MD_PATH) == text
+    owned = any(user == "root" and f"chown agent {AGENTS_MD_PATH}" in command for command, user in environment.commands)
+    assert owned == (text is not None)
+
+
+def test_a_missing_agents_md_fails_the_agent_before_its_sandbox_starts(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        agent(tmp_path, agents_md=str(tmp_path / "missing.md"))
 
 
 # -- selecting it --------------------------------------------------------------------------

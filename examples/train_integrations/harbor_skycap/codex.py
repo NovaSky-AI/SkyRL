@@ -9,15 +9,20 @@ retries and no WebSocket transport, and installs the Codex version these setting
 Codex has no metadata for open-weight models, and without it Codex leaves out its ``apply_patch`` tool while its
 instructions still tell the model to edit files with it. ``SkycapCodex`` gives Codex a model catalog entry for the
 served model: Codex's fallback metadata with ``apply_patch`` on.
+
+With ``agents_md``, Codex also gets a global ``AGENTS.md``: guidance for the task at hand, which Codex sends the
+model as a user message ahead of the task.
 """
 
 import asyncio
 import functools
 import hashlib
 import json
+import posixpath
 import re
 import shlex
 import urllib.request
+from pathlib import Path
 from typing import Any, Optional
 
 from harbor.agents.installed.codex import Codex
@@ -35,6 +40,9 @@ DISABLED_FEATURES = ("multi_agent", "goals")
 #: Where the model catalog goes in the sandbox: Harbor's run() creates, and afterwards deletes, Codex's own
 #: directories; /tmp exists before that.
 CATALOG_PATH = "/tmp/skycap-model-catalog.json"
+
+#: Codex's global AGENTS.md, in the CODEX_HOME that Harbor's run() sets, and deletes afterwards.
+AGENTS_MD_PATH = (Codex._REMOTE_CODEX_HOME / "AGENTS.md").as_posix()
 
 #: Codex's base instructions at a git ref: the text its fallback metadata sends for a model it doesn't know.
 PROMPT_URL = "https://raw.githubusercontent.com/openai/codex/{ref}/codex-rs/models-manager/prompt.md"
@@ -137,11 +145,18 @@ def catalog_entry(slug: str, instructions: str) -> dict[str, Any]:
 
 class SkycapCodex(Codex):
     def __init__(
-        self, *args: Any, version: Optional[str] = CODEX_VERSION, context_window: Optional[int] = None, **kwargs: Any
+        self,
+        *args: Any,
+        version: Optional[str] = CODEX_VERSION,
+        context_window: Optional[int] = None,
+        agents_md: Optional[str] = None,
+        **kwargs: Any,
     ) -> None:
-        """``context_window`` is the engine's context length, which Codex can't look up for a local model."""
+        """``context_window`` is the engine's context length, which Codex can't look up for a local model.
+        ``agents_md`` is a local file Codex gets as its global ``AGENTS.md``."""
         super().__init__(*args, version=version, **kwargs)
         self._context_window = context_window
+        self._agents_md = Path(agents_md).read_text() if agents_md is not None else None
 
     def build_cli_flags(self) -> str:
         base_url = self._get_env("OPENAI_BASE_URL")
@@ -173,10 +188,18 @@ class SkycapCodex(Codex):
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         # Harbor runs `codex exec --model <the name's last component>`, which the entry's slug has to match.
         entry = catalog_entry(self.model_name.split("/")[-1], await asyncio.to_thread(base_instructions, self._version))
-        catalog = self.logs_dir / "model_catalog.json"
-        catalog.write_text(json.dumps({"models": [entry]}))
-        await environment.upload_file(catalog, CATALOG_PATH)
+        await self._upload(environment, "model_catalog.json", json.dumps({"models": [entry]}), CATALOG_PATH)
+        if self._agents_md is not None:
+            # Harbor's run() creates CODEX_HOME with `mkdir -p` and only adds to it.
+            await self.exec_as_agent(environment, command=f"mkdir -p {shlex.quote(posixpath.dirname(AGENTS_MD_PATH))}")
+            await self._upload(environment, "AGENTS.md", self._agents_md, AGENTS_MD_PATH)
+        await super().run(instruction, environment, context)
+
+    async def _upload(self, environment: BaseEnvironment, name: str, text: str, target: str) -> None:
+        """``text`` into the sandbox at ``target``, owned by the agent's user; the trial's agent logs keep a copy."""
+        local = self.logs_dir / name
+        local.write_text(text)
+        await environment.upload_file(local, target)
         if environment.default_user is not None:
             # upload_file copies as root; Harbor hands its auth.json to the agent's user the same way.
-            await self.exec_as_root(environment, command=f"chown {environment.default_user} {CATALOG_PATH}")
-        await super().run(instruction, environment, context)
+            await self.exec_as_root(environment, command=f"chown {environment.default_user} {shlex.quote(target)}")
