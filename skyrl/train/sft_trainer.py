@@ -37,6 +37,7 @@ from ray.util.placement_group import placement_group
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import AutoTokenizer
 
+from skyrl.backends.skyrl_train.fields import BatchMetadataKey, TrainingField
 from skyrl.backends.skyrl_train.training_batch import (
     TensorList,
     TrainingInputBatch,
@@ -746,14 +747,14 @@ def collate_sft_batch(examples: list, tokenizer) -> TrainingInputBatch:
 
     batch = TrainingInputBatch(
         {
-            "sequences": torch.from_numpy(sequences_np),
-            "attention_mask": torch.from_numpy(attention_mask_np),
-            "loss_mask": torch.from_numpy(loss_mask_np),
-            "pixel_values": TensorList(pixel_values) if batch_has_images else None,
-            "image_grid_thw": TensorList(image_grid_thw) if batch_has_images else None,
+            TrainingField.SEQUENCES: torch.from_numpy(sequences_np),
+            TrainingField.ATTENTION_MASK: torch.from_numpy(attention_mask_np),
+            TrainingField.LOSS_MASK: torch.from_numpy(loss_mask_np),
+            TrainingField.PIXEL_VALUES: TensorList(pixel_values) if batch_has_images else None,
+            TrainingField.IMAGE_GRID_THW: TensorList(image_grid_thw) if batch_has_images else None,
         }
     )
-    batch.metadata = {"response_length": max_num_actions}
+    batch.metadata = {BatchMetadataKey.RESPONSE_LENGTH: max_num_actions}
     return batch
 
 
@@ -1669,7 +1670,7 @@ class SFTTrainer:
             # Pad the last (possibly-short) chunk so every dispatch sees exactly
             # ``eval_chunk_size`` rows. ``pad_training_input_batch`` zeros the
             # ``loss_mask`` for padding rows; with ``pad_size=0`` it is a no-op.
-            num_rows = batch["sequences"].shape[0]
+            num_rows = batch[TrainingField.SEQUENCES].shape[0]
             pad_rows = eval_chunk_size - num_rows
             if pad_rows > 0:
                 logger.info(
@@ -1682,7 +1683,7 @@ class SFTTrainer:
             # We use the attention_mask response window via collate_sft_batch's loss_mask which
             # was 0/1 before scaling. Recover the count from the batch by counting positive entries.
             # Padded rows have loss_mask=0 so they are excluded here.
-            nonpad_tokens = int((batch["loss_mask"] > 0).sum().item())
+            nonpad_tokens = int((batch[TrainingField.LOSS_MASK] > 0).sum().item())
             # Eval consumes metrics only; skip per-token loss_fn_outputs.
             output = self.dispatch.forward(
                 "policy",
@@ -1800,12 +1801,12 @@ class SFTTrainer:
 
         batch = TrainingInputBatch(
             {
-                "sequences": sequences,
-                "attention_mask": attention_mask,
-                "loss_mask": loss_mask,
+                TrainingField.SEQUENCES: sequences,
+                TrainingField.ATTENTION_MASK: attention_mask,
+                TrainingField.LOSS_MASK: loss_mask,
             }
         )
-        batch.metadata = {"response_length": num_actions}
+        batch.metadata = {BatchMetadataKey.RESPONSE_LENGTH: num_actions}
         return batch
 
     def _train_dummy(self):
@@ -1843,7 +1844,7 @@ class SFTTrainer:
                     all_timings.update(step_result["timings"])
                 self._fire("on_step_end", batch=batch, metrics=step_result)
 
-                actual_num_tokens = batch["attention_mask"].sum().item()
+                actual_num_tokens = batch[TrainingField.ATTENTION_MASK].sum().item()
                 self._total_tokens_processed += actual_num_tokens
                 tokens_per_second = actual_num_tokens / all_timings["step"]
 
@@ -2073,10 +2074,10 @@ class SFTTrainer:
                 # tail batch appends ``pad_size`` rows (copies of row 0) that are
                 # masked out of the loss; exclude them from the token count so the
                 # throughput metric reflects only real tokens.
-                batch_padded_seq_len = batch["sequences"].shape[1]
-                pad_size = batch.metadata.get("pad_size", 0) if batch.metadata else 0
-                real_rows = batch["attention_mask"].shape[0] - pad_size
-                actual_num_tokens = batch["attention_mask"][:real_rows].sum().item()
+                batch_padded_seq_len = batch[TrainingField.SEQUENCES].shape[1]
+                pad_size = batch.metadata.get(BatchMetadataKey.PAD_SIZE, 0) if batch.metadata else 0
+                real_rows = batch[TrainingField.ATTENTION_MASK].shape[0] - pad_size
+                actual_num_tokens = batch[TrainingField.ATTENTION_MASK][:real_rows].sum().item()
                 self._total_tokens_processed += actual_num_tokens
                 tokens_per_second = actual_num_tokens / all_timings["step"]
 

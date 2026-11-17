@@ -17,6 +17,7 @@ from aiohttp.test_utils import TestServer  # noqa: E402
 from examples.train_integrations.harbor_skycap.servers import (
     start_servers,  # noqa: E402
 )
+from skyrl.backends.skyrl_train.fields import PAYLOAD_KEYS
 from tests.integrations.harbor_skycap.fakes import (  # noqa: E402
     FakeRenderer,
     MockRouter,
@@ -220,7 +221,6 @@ def _cached_samples(servers):
 
 @pytest.mark.asyncio
 async def test_a_stored_group_is_composed_on_its_one_server_and_left_in_its_object_store(stored) -> None:
-    from skyrl.backends.skyrl_train.rollout_shard import PAYLOAD_KEYS
     from tests.integrations.harbor_skycap.test_harbor_skycap import batch
 
     gen, servers, trials = stored.make(), stored.servers, stored.trials

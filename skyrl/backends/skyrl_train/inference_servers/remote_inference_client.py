@@ -71,6 +71,10 @@ import orjson
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
+from skyrl.backends.skyrl_train.fields import (
+    InferenceEngineInputKey,
+    InferenceEngineOutputKey,
+)
 from skyrl.backends.skyrl_train.inference_servers.base import (
     InferenceEngineInput,
     InferenceEngineInterface,
@@ -662,25 +666,25 @@ class RemoteInferenceClient(InferenceEngineInterface):
         """
         model = self._resolve_model(model, "generate")
 
-        prompt_token_ids = input_batch.get("prompt_token_ids")
+        prompt_token_ids = input_batch.get(InferenceEngineInputKey.PROMPT_TOKEN_IDS)
         if prompt_token_ids is None:
             raise ValueError("RemoteInferenceClient only accepts `prompt_token_ids`, not `prompts`.")
 
-        sampling_params = input_batch.get("sampling_params") or {}
+        sampling_params = input_batch.get(InferenceEngineInputKey.SAMPLING_PARAMS) or {}
         if sampling_params.get("n", 1) > 1:
             raise ValueError("n > 1 is not supported. Use `config.generator.n_samples_per_prompt` instead.")
 
-        session_ids = input_batch.get("session_ids")
-        mm_features = input_batch.get("mm_features")
-        cache_salt = input_batch.get("cache_salt")
-        routed_experts_prompt_starts = input_batch.get("routed_experts_prompt_starts")
+        session_ids = input_batch.get(InferenceEngineInputKey.SESSION_IDS)
+        mm_features = input_batch.get(InferenceEngineInputKey.MM_FEATURES)
+        cache_salt = input_batch.get(InferenceEngineInputKey.CACHE_SALT)
+        routed_experts_prompt_starts = input_batch.get(InferenceEngineInputKey.ROUTED_EXPERTS_PROMPT_STARTS)
         if routed_experts_prompt_starts is not None:
             if not self.enable_return_routed_experts:
                 raise ValueError("routed_experts_prompt_starts requires enable_return_routed_experts=True")
             if len(routed_experts_prompt_starts) != len(prompt_token_ids):
                 raise ValueError("routed_experts_prompt_starts must have one entry per prompt")
         return_sample_support = self.enable_return_sample_support_set and input_batch.get(
-            "return_sample_support", False
+            InferenceEngineInputKey.RETURN_SAMPLE_SUPPORT, False
         )
         return_sample_support_logprobs = return_sample_support and self.enable_return_sample_support_logprobs
         get_logprobs = sampling_params.get("logprobs") is not None
@@ -749,7 +753,9 @@ class RemoteInferenceClient(InferenceEngineInterface):
             responses=responses,
             stop_reasons=[r["stop_reason"] for r in raw_results],
             response_ids=[r["response_ids"] for r in raw_results],
-            response_logprobs=[r["response_logprobs"] for r in raw_results] if get_logprobs else None,
+            response_logprobs=(
+                [r[InferenceEngineOutputKey.RESPONSE_LOGPROBS] for r in raw_results] if get_logprobs else None
+            ),
             rollout_expert_indices=rollout_expert_indices,
             rollout_sample_support=rollout_sample_support,
         )
@@ -953,7 +959,7 @@ class RemoteInferenceClient(InferenceEngineInterface):
         if include_prompt_logprobs:
             result_prompt_logprobs, result_topk_prompt_logprobs = convert_vllm_prompt_logprobs(
                 token_ids,
-                response.get("prompt_logprobs"),
+                response.get(InferenceEngineOutputKey.PROMPT_LOGPROBS),
                 topk=topk_prompt_logprobs_k,
             )
 

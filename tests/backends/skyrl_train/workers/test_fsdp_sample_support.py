@@ -10,6 +10,7 @@ import torch
 from torch import nn
 
 from skyrl.backends.skyrl_train.distributed.ulysses import utils as ulysses_utils
+from skyrl.backends.skyrl_train.fields import TrainingField
 from skyrl.backends.skyrl_train.utils.loss_normalization import (
     MinibatchLossNormalization,
 )
@@ -19,7 +20,6 @@ from skyrl.backends.skyrl_train.utils.packed_tensor import (
     cu_seqlens_from_lengths,
 )
 from skyrl.backends.skyrl_train.utils.sample_support import (
-    SAMPLE_SUPPORT_FIELD,
     SAMPLE_SUPPORT_NO_ROW,
     SAMPLE_SUPPORT_TORCH_DTYPE,
     SCORE_CENTERING_SCORES_KEY,
@@ -310,7 +310,7 @@ def test_replay_disabled_takes_the_ordinary_full_vocabulary_path():
 
 @pytest.mark.parametrize(
     ("omitted", "message"),
-    [("sample_support", f"received no {SAMPLE_SUPPORT_FIELD!r}"), ("loss_mask", "no loss mask")],
+    [("sample_support", f"received no {TrainingField.ROLLOUT_SAMPLE_SUPPORT!r}"), ("loss_mask", "no loss mask")],
 )
 def test_replay_requires_both_the_support_and_the_loss_mask(omitted, message):
     sequences, attention_mask = _ragged_batch()

@@ -3,6 +3,7 @@ import asyncio
 from loguru import logger
 from tqdm import tqdm
 
+from skyrl.backends.skyrl_train.fields import BatchMetadataKey, GeneratorOutputKey
 from skyrl.backends.skyrl_train.inference_servers.engine_utils import (
     get_sampling_params_for_backend,
 )
@@ -145,7 +146,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
             generator_output, uids = await failure.guard(generation_buffer.get())  # GeneratorOutput, List[str]
 
         # print example just for debugging
-        vis = self.tokenizer.decode(generator_output["response_ids"][0])
+        vis = self.tokenizer.decode(generator_output[GeneratorOutputKey.RESPONSE_IDS][0])
         logger.info(f"Example generated: {vis}")
 
         with Timer("convert_to_training_input", self.all_timings):
@@ -166,7 +167,7 @@ class AsyncRayPPOTrainer(RayPPOTrainer):
             # remove some unwanted keys
             for key in ["rewards"]:
                 training_input.pop(key)
-            training_input.metadata.pop("uids")
+            training_input.metadata.pop(BatchMetadataKey.UIDS)
 
         if self.cfg.trainer.dump_data_batch:
             # dump data to file

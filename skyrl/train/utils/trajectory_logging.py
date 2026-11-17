@@ -4,6 +4,8 @@ import dataclasses
 import random
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from skyrl.backends.skyrl_train.fields import GeneratorOutputKey
+
 if TYPE_CHECKING:
     from skyrl.train.utils.tracking import Tracking
 
@@ -155,11 +157,11 @@ class TrajectoryLogger:
         No-op when ``num_samples <= 0`` or the tracker is not a backend we
         know how to write to.
         """
-        response_ids = generator_output.get("response_ids") or []
+        response_ids = generator_output.get(GeneratorOutputKey.RESPONSE_IDS) or []
         if num_samples <= 0 or tracker is None or tracker.backend != "wandb" or not response_ids:
             return
-        loss_masks = generator_output.get("loss_masks") or []
-        rewards = generator_output.get("rewards") or []
+        loss_masks = generator_output.get(GeneratorOutputKey.LOSS_MASKS) or []
+        rewards = generator_output.get(GeneratorOutputKey.REWARDS) or []
         if num_turns_list is None:
             num_turns_list = [self.count_assistant_turns(m) for m in loss_masks]
         samples = self.build_samples(
