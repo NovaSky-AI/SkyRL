@@ -4,7 +4,7 @@ import pathlib
 
 import pytest
 
-from examples.train_integrations.harbor.dataset import HarborTaskDataset
+from skyrl.integration.harbor.dataset import HarborTaskDataset
 
 pytestmark = pytest.mark.integrations
 
