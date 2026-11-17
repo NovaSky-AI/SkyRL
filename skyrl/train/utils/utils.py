@@ -479,6 +479,41 @@ def _validate_expert_nvfp4_cfg(cfg: SkyRLTrainConfig):
             )
 
 
+def _apply_kv_cache_qat_cfg(cfg: SkyRLTrainConfig) -> None:
+    """Check ``trainer.policy.megatron_config.kv_cache_qat`` against the engines' KV cache, and copy its format to
+    ``kv_cache_qat_format``."""
+    from skyrl.backends.skyrl_train.workers.megatron.quantization.fake_kv_cache_qat import (
+        KvCacheFormat,
+    )
+
+    mc = cfg.trainer.policy.megatron_config
+    name = "trainer.policy.megatron_config.kv_cache_qat"
+    if not mc.kv_cache_qat:
+        if mc.kv_cache_qat_format is not None:
+            raise ValueError(f"{name}_format is set but {name} is off")
+        return
+    if cfg.trainer.strategy != "megatron":
+        raise ValueError(f"{name} needs trainer.strategy=megatron")
+    engine_kwargs = cfg.generator.inference_engine.engine_init_kwargs
+    kv_dtype = engine_kwargs.get("kv_cache_dtype", "auto")
+    if kv_dtype not in tuple(KvCacheFormat):
+        raise ValueError(
+            f"{name} emulates the engines' quantized KV cache, which must be one of {[f.value for f in KvCacheFormat]} "
+            f"(generator.inference_engine.engine_init_kwargs.kv_cache_dtype), got {kv_dtype!r}"
+        )
+    attention_config = engine_kwargs.get("attention_config") or {}
+    if not attention_config.get("sparse_mla_force_mqa", False):
+        raise ValueError(
+            f"{name} needs engine_init_kwargs.attention_config.sparse_mla_force_mqa: true; without it vLLM runs short "
+            "prefills on the fresh bf16 keys instead of the cache rows the trainer emulates"
+        )
+    if mc.kv_cache_qat_format not in (None, kv_dtype):
+        raise ValueError(
+            f"{name}_format={mc.kv_cache_qat_format!r} disagrees with the engines' kv_cache_dtype {kv_dtype!r}"
+        )
+    mc.kv_cache_qat_format = kv_dtype
+
+
 def validate_step_timeouts(step_timeout_s: Optional[float], weight_sync_timeout_s: Optional[float]) -> None:
     for name, value in (("step_timeout_s", step_timeout_s), ("weight_sync_timeout_s", weight_sync_timeout_s)):
         if value is None:
@@ -546,6 +581,7 @@ def validate_cfg(cfg: SkyRLTrainConfig):
     _apply_mtp_config(cfg)
     _validate_draft_weight_sync_cfg(cfg)
     _validate_expert_nvfp4_cfg(cfg)
+    _apply_kv_cache_qat_cfg(cfg)
 
     from skyrl.backends.skyrl_train.utils.ppo_utils import (
         AdvantageEstimatorRegistry,

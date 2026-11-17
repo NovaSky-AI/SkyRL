@@ -764,6 +764,18 @@ class MegatronConfig(BaseConfig):
     unexpected shapes). NCCL or CUDA-IPC backend only. The BF16 layers are unaffected. On by default (parity with
     the per-expert path is bitwise, see ``tests/backends/skyrl_train/gpu/gpu_ci/test_nvfp4_stacked_sync.py``); set
     ``false`` to use the per-expert path. Ignored without ``expert_nvfp4``."""
+    kv_cache_qat: bool = False
+    """Attend over the rollouts' quantized KV cache: each absorbed-MLA (DSA) layer's keys and values become the
+    dequantized cache rows the engines hold (``engine_init_kwargs.kv_cache_dtype``: ``nvfp4_ds_mla`` or
+    ``fp8_ds_mla``), built with vLLM's own cache writer and reader arithmetic, so they are bit-identical to what the
+    rollouts' attention reads. The rounding is straight-through: the backward runs on the rounded keys and values,
+    and their gradient reaches the unrounded key unchanged. DeepSeek-V3.2 / GLM-5.x geometry; needs vLLM in the
+    trainer env (and Blackwell for ``nvfp4_ds_mla``) and ``engine_init_kwargs.attention_config.sparse_mla_force_mqa:
+    true``, which makes every engine prefill read the cache. The ref model mirrors the policy's setting. See
+    ``skyrl.backends.skyrl_train.workers.megatron.quantization.fake_kv_cache_qat``."""
+    kv_cache_qat_format: Optional[Literal["nvfp4_ds_mla", "fp8_ds_mla"]] = None
+    """Copied from ``generator.inference_engine.engine_init_kwargs.kv_cache_dtype`` during config validation; leave
+    unset."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
     Used for bridge resolution. Not a general HF-config override -- use

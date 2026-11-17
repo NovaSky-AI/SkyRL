@@ -64,6 +64,28 @@ A block scale that differs from the rollouts' makes the trainer round to another
 
 The trainer needs whole experts per rank (`expert_tensor_parallel_size: 1`), `moe_grouped_gemm` and the NCCL or CUDA-IPC weight sync. LoRA, MTP and `fake_int4_qat` are not supported. See `examples/train/megatron/run_megatron_dapo_qwen3_30b_a3b_nvfp4.sh`.
 
+### KV cache QAT: attending over the rollouts' KV cache
+
+With a quantized KV cache on DSA models (DeepSeek-V3.2, GLM-5.x on FlashMLA sparse), every key and value the rollouts attend over is a dequantized cache row. The Megatron trainer can attend over the same rows:
+
+```bash
+generator.inference_engine.engine_init_kwargs.kv_cache_dtype=nvfp4_ds_mla  # or fp8_ds_mla
+generator.inference_engine.engine_init_kwargs.attention_config.sparse_mla_force_mqa=true
+trainer.policy.megatron_config.kv_cache_qat=true
+```
+
+Each absorbed-MLA layer's key, `[kv_layernorm(latent) | rope(k_pe)]`, which also supplies its value, is replaced by the row vLLM writes for that token, decoded back to BF16. One Triton pass computes it with vLLM's own RMSNorm and RoPE code and its cache writer's rounding, and it is bit-identical to vLLM's writer followed by its reader. The format is copied from `kv_cache_dtype`. `sparse_mla_force_mqa` is required: without it vLLM runs short prefills on the fresh BF16 keys instead of the cache. The rounding is straight-through: the backward runs on the rounded keys and values, and the gradient reaches the unrounded key. It works with packed sequences, context parallelism and activation recompute, and costs about 0.3 ms per layer forward at 256k tokens on B200.
+
+On a 7-layer slice of GLM-5.3 (3 dense and 4 MoE layers, real weights, routing replay, rollouts with W4A4 experts and `nvfp4_ds_mla`), it roughly halves the trainer-rollout logprob mismatch at any expert setting. Mean |Δlogp| on sampled tokens (KL in parentheses):
+
+| trainer experts | `kv_cache_qat=false` | `kv_cache_qat=true` |
+|---|---|---|
+| BF16 | 0.062 (3.1e-3) | 0.041 (1.4e-3) |
+| `expert_nvfp4_mode=w4a16` | 0.054 (2.4e-3) | 0.029 (7.6e-4) |
+| `expert_nvfp4_mode=w4a4` | 0.056 (2.5e-3) | 0.028 (6.7e-4) |
+
+For reference, a BF16 trainer against BF16 rollouts with a BF16 cache gives 0.0095 (1.0e-4). The slice has relatively more attention than MoE layers than the full model, which overstates the cache's share.
+
 ## Enabling off-policy correction (TIS)
 
 To apply TIS, we need the inference engine to return the rollout logprobs for the generated tokens, and we configure the correction on the policy loss:
