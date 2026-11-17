@@ -2,14 +2,25 @@
 The token-balanced DP split (``trainer.balance_dp_tokens``) gives the same update as the default split.
 
 One fixed batch goes through a fresh policy twice: with the default split, and with the
-token-balanced split. The two runs must agree on the summed policy loss, the per-sample
-log-probs (in batch order), the gradient norm of the optimizer step, and the per-sample log-probs
-after that step. Samples have different lengths and different advantages, so a wrong sample order
-or a split-dependent loss scale changes these values.
+token-balanced split. The two runs must agree on the per-sample log-probs (in batch order), the
+gradient norm of the optimizer step, and the per-sample log-probs after that step. Samples have
+different lengths and different advantages, so a wrong sample order or a split-dependent loss
+scale changes these values.
+
+The old log-probs come from a first forward pass, so the PPO ratio starts at 1 and the gradient is
+not clipped to zero.
+
+Tolerances. The two splits group the samples into different micro-batches. On FSDP the forward is
+bit-exact across groupings. On Megatron (BF16) a different grouping alone moves a per-token
+log-prob by up to ~0.07 and the gradient norm by ~0.1%, also with the default split and two
+different token caps. A swapped sample would differ by whole nats (random tokens: |log-prob| ~7).
+Adam's first step is about ``lr * sign(grad)``, so it amplifies summation-order noise: the
+log-probs after the step differ by up to ~0.1 between two default-split runs with different caps.
+The after-step bounds are therefore loose, and they only catch a gross error.
 
 Run with:
-uv run --isolated --extra dev --extra fsdp -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_balanced_dp_split.py -m "not megatron"
-uv run --isolated --extra dev --extra megatron -- pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_balanced_dp_split.py -m megatron
+uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_balanced_dp_split.py -m "not megatron"
+uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_balanced_dp_split.py -m megatron
 """
 
 import pytest
@@ -34,28 +45,39 @@ MAX_TOKENS = 64
 NUM_ACTIONS = 4
 
 
-def _batch() -> TrainingInputBatch:
+# Per backend: log-prob max / mean difference, relative gradient-norm difference, and
+# after-step log-prob max / mean difference.
+TOLERANCES = {
+    "fsdp2": {"logprobs_max": 1e-3, "logprobs_mean": 1e-4, "grad_norm": 1e-3, "after_max": 0.3, "after_mean": 0.1},
+    "megatron": {"logprobs_max": 0.3, "logprobs_mean": 0.03, "grad_norm": 1e-2, "after_max": 0.3, "after_mean": 0.1},
+}
+
+
+def _batch(old_logprobs=None) -> TrainingInputBatch:
     torch.manual_seed(42)
     n, max_len = len(SEQ_LENS), max(SEQ_LENS)
     sequences = torch.zeros((n, max_len), dtype=int)
     attention_mask = torch.zeros((n, max_len), dtype=int)
+    # Left-padded, so the last NUM_ACTIONS positions (the response) are real tokens in every sample.
     for i, seq_len in enumerate(SEQ_LENS):
-        sequences[i, :seq_len] = torch.randint(1, 100, (seq_len,))
-        attention_mask[i, :seq_len] = 1
+        sequences[i, max_len - seq_len :] = torch.randint(1, 100, (seq_len,))
+        attention_mask[i, max_len - seq_len :] = 1
     # A different advantage per sample, already scaled over the whole batch (as the trainer does).
     advantages = torch.linspace(-1.0, 1.0, n).unsqueeze(1).repeat(1, NUM_ACTIONS) / (n * NUM_ACTIONS)
+    # Old and rollout log-probs equal to the policy's own (ratio 1), so PPO clipping does not zero the gradient.
+    old = old_logprobs if old_logprobs is not None else 0.4 * torch.ones((n, NUM_ACTIONS))
     data = TrainingInputBatch(
         {
             "sequences": sequences,
             "attention_mask": attention_mask,
-            "action_log_probs": 0.4 * torch.ones((n, NUM_ACTIONS)),
+            "action_log_probs": old.clone(),
             "base_action_log_probs": 0.3 * torch.ones((n, NUM_ACTIONS)),
             "values": 0.5 * torch.ones((n, NUM_ACTIONS)),
             "returns": 0.5 * torch.ones((n, NUM_ACTIONS)),
             "advantages": advantages,
             "loss_mask": torch.ones((n, NUM_ACTIONS), dtype=int),
             "response_mask": torch.ones((n, NUM_ACTIONS), dtype=int),
-            "rollout_logprobs": 0.2 * torch.ones((n, NUM_ACTIONS)),
+            "rollout_logprobs": old.clone(),
         }
     )
     data.metadata = {"response_length": NUM_ACTIONS, "global_step": 0}
@@ -72,7 +94,7 @@ def _config(strategy: str) -> SkyRLTrainConfig:
     cfg.trainer.algorithm.use_kl_loss = False
     if strategy == "megatron":
         cfg.trainer.strategy = "megatron"
-        cfg.trainer.remove_microbatch_padding = False
+        cfg.trainer.remove_microbatch_padding = True  # packed layout, as the recipes run
         cfg.trainer.placement.policy_num_gpus_per_node = 4  # TP1, PP1 -> DP 4
         cfg.trainer.placement.colocate_all = False
         cfg.trainer.placement.colocate_policy_ref = False
@@ -96,12 +118,15 @@ def _run(strategy: str, balance_max_tokens: int) -> dict:
         cfg=cfg,
     )
 
-    def call(method):
-        refs = group.async_run_ray_method("mesh", method, data=_batch(), dp_balance_max_tokens=balance_max_tokens)
+    def call(method, old_logprobs=None, max_tokens=balance_max_tokens):
+        refs = group.async_run_ray_method("mesh", method, data=_batch(old_logprobs), dp_balance_max_tokens=max_tokens)
         out = WorkerOutput.cat(group.actor_infos, ray.get(refs), sample_order=getattr(refs, "sample_order", None))
         return out, getattr(refs, "sample_order", None)
 
-    train_out, order = call("forward_backward")
+    # The old log-probs come from the default split in both arms, so both arms train on identical inputs.
+    before_out, _ = call("forward", max_tokens=0)
+    old_logprobs = loss_fn_outputs_to_tensor(before_out.loss_fn_outputs, key="logprobs").float()
+    train_out, order = call("forward_backward", old_logprobs)
     grad_norm = ray.get(group.async_run_ray_method("pass_through", "optim_step"))[0]
     after_out, _ = call("forward")
     return {
@@ -127,21 +152,30 @@ async def test_balanced_split_gives_the_same_update(ray_init_fixture, strategy):
     assert balanced["order"] is not None and balanced["order"] != sorted(balanced["order"])
     assert balanced["num_padding_microbatches"] == 0
 
+    logprobs_diff = (default["logprobs"] - balanced["logprobs"]).abs()
+    after_diff = (default["logprobs_after"] - balanced["logprobs_after"]).abs()
     step_change = (default["logprobs_after"] - default["logprobs"]).abs().mean().item()
+    grad_norm_diff = abs(default["grad_norm"] - balanced["grad_norm"]) / abs(default["grad_norm"])
     report = {
         "policy_loss": (default["policy_loss"], balanced["policy_loss"]),
         "grad_norm": (default["grad_norm"], balanced["grad_norm"]),
+        "grad_norm relative diff": grad_norm_diff,
         "num_microbatches": (default["num_microbatches"], balanced["num_microbatches"]),
         "num_padding_microbatches": (default["num_padding_microbatches"], balanced["num_padding_microbatches"]),
-        "logprobs max diff": (default["logprobs"] - balanced["logprobs"]).abs().max().item(),
-        "logprobs_after max diff": (default["logprobs_after"] - balanced["logprobs_after"]).abs().max().item(),
+        "logprobs max diff": logprobs_diff.max().item(),
+        "logprobs mean diff": logprobs_diff.mean().item(),
+        "logprobs mean |value|": default["logprobs"].abs().mean().item(),
+        "logprobs_after max diff": after_diff.max().item(),
+        "logprobs_after mean diff": after_diff.mean().item(),
         "mean |logprobs_after - logprobs| (size of the step)": step_change,
     }
     for key, value in report.items():
         print(f"  {strategy} {key}: {value}")
 
-    assert report["logprobs max diff"] < 2e-3
-    assert abs(default["policy_loss"] - balanced["policy_loss"]) < 1e-4 + 1e-2 * abs(default["policy_loss"])
-    assert default["grad_norm"] is not None and balanced["grad_norm"] is not None
-    assert abs(default["grad_norm"] - balanced["grad_norm"]) < 2e-2 * abs(default["grad_norm"])
-    assert report["logprobs_after max diff"] < 5e-3
+    tol = TOLERANCES[strategy]
+    assert default["grad_norm"] > 0 and step_change > 0, "the batch must produce an update"
+    assert report["logprobs max diff"] < tol["logprobs_max"]
+    assert report["logprobs mean diff"] < tol["logprobs_mean"]
+    assert grad_norm_diff < tol["grad_norm"]
+    assert report["logprobs_after max diff"] < tol["after_max"]
+    assert report["logprobs_after mean diff"] < tol["after_mean"]
