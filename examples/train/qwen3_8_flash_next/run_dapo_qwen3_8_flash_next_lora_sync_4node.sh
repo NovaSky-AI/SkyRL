@@ -70,6 +70,12 @@ N_SAMPLES_PER_PROMPT=8
 EVAL_N_SAMPLES_PER_PROMPT=12
 EVAL_INTERVAL="${EVAL_INTERVAL:-5}"   # held-out AIME-2024 at steps 0, 5, 10, ...
 MAX_TOKENS_PER_MICROBATCH=10752  # must hold one full sequence
+# Token-balanced data-parallel split: the driver packs each mini-batch and gives every rank the
+# same number of micro-batches and about the same tokens. Measured on 2 x 8 B200 (16 ranks,
+# 12 steps): policy_train 58.3 s -> 32.8 s, step 197.9 s -> 165.9 s, same AIME-2024 curve.
+# policy_entropy and minibatch_rollout_logprobs_abs_diff_mean are means over micro-batches, so
+# they are not comparable with a BALANCE_DP_TOKENS=false run.
+BALANCE_DP_TOKENS="${BALANCE_DP_TOKENS:-true}"
 
 # Rollout router replay (R3): vLLM returns the experts each token was routed to and Megatron
 # replays them, so the trainer scores rollouts with the sampler's routing (512 experts, top-10).
@@ -152,6 +158,7 @@ uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"}
   trainer.fused_lm_head_logprob=true \
   trainer.logprobs_chunk_size=1024 \
   trainer.max_tokens_per_microbatch=$MAX_TOKENS_PER_MICROBATCH \
+  trainer.balance_dp_tokens=$BALANCE_DP_TOKENS \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \
