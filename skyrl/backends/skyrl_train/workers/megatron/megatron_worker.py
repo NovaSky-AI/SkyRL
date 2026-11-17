@@ -87,6 +87,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_mtp_roll_allgather import (
+    apply_mtp_roll_allgather_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
 )
@@ -1167,6 +1170,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             language_model_only=self.cfg.policy.language_model_only,
             bridge_weights_path=bridge_weights_path,
             enable_mtp=self.cfg.mtp.enabled,
+        )
+        # MTP with CP > 1: exchange the MTP roll's CP boundary tokens with one all-gather instead of megatron-core's
+        # P2P, whose lazy P2P connection setup can deadlock across nodes (SKYRL_MTP_ROLL_ALLGATHER=0/1 overrides).
+        apply_mtp_roll_allgather_patch(
+            mtp_enabled=self.cfg.mtp.enabled,
+            context_parallel_size=self.cfg.policy.megatron_config.context_parallel_size,
         )
 
         if self.enable_router_replay:

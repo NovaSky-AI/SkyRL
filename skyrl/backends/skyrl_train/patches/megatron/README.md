@@ -39,6 +39,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
 | `patches/megatron/test_dist_optim_te_load_state_dict.py` (CPU) | `patch_dist_optim_te_load_state_dict.py` |
 | `patches/megatron/test_dist_ckpt_exchange_wait.py` (CPU) | `patch_dist_ckpt_exchange_wait.py` |
+| `patches/megatron/test_mtp_roll_allgather.py` (CPU) | `patch_mtp_roll_allgather.py` vs megatron-core's P2P exchange (gloo, CP=4), install gating |
+| `gpu_ci/patches/megatron/test_mtp_roll_allgather_nccl.py` | `patch_mtp_roll_allgather.py` vs megatron-core's P2P exchange on NCCL (CP=2/4/8, one node) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -386,6 +388,18 @@ fp32 copies of all optimizer state. With allocated FusedAdam state the patch res
 - **Landed?** `DistributedOptimizer.load_state_dict` no longer calls `self.optimizer.state_dict()`.
 - **Remove:** the `apply_dist_optim_te_load_state_dict_patch()` call and import in `megatron_worker.py`,
   the module, and its CPU test.
+
+### `patch_mtp_roll_allgather.py`: megatron-core MTP roll under CP, no upstream PR yet
+
+megatron-core's MTP `roll_tensor` (packed and unpacked) sends the CP boundary tokens to the neighbours
+through `_exchange_cp_roll_boundaries`, one `batch_isend_irecv` per call. Those are the only P2P ops on
+the CP communicator, so the first call sets up its P2P connections lazily, which can deadlock when the
+CP group spans nodes. With MTP and CP > 1 the patch swaps that helper for one `all_gather_into_tensor`
+(`SKYRL_MTP_ROLL_ALLGATHER=0` / `1` forces it off / on). The roll itself stays megatron-core's.
+- **Landed?** `_exchange_cp_roll_boundaries` no longer uses P2P. On a megatron-core without the helper
+  (before NVIDIA/Megatron-LM#8389) the patch logs a warning and does nothing.
+- **Remove:** the `apply_mtp_roll_allgather_patch()` call and import in `megatron_worker.py`, the
+  module, and its CPU and GPU tests.
 
 ### `patch_dsa_head_full.py` (+ `_block_copy_kernel.py`): SkyRL-only, no upstream counterpart
 
