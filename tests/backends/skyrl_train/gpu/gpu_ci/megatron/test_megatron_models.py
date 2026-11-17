@@ -976,6 +976,7 @@ async def test_logprobs_matching_roundtrip(
         or "kimi-k3" in model_name.lower()
         or "qwen3.8-flash-next" in model_name.lower()
         or _is_beam(model_name)
+        or bool(rope_parameters)
     )
     if _is_beam(model_name):
         create_beam_tiny(model_name)
@@ -1204,7 +1205,9 @@ async def test_logprobs_matching_roundtrip(
             # has a flat enough distribution that 53 of 80 sequences diverged
             # (~0.93 positional vs ~0.008 on prefixes). So does the 4-of-48-layer
             # Qwen3.8-Flash-Next slice, whose greedy output differs between two
-            # unsynced runs of the same engine. The Kimi K3 slice is the same story.
+            # unsynced runs of the same engine. The Kimi K3 slice is the same story, and so is
+            # the RoPE-override test: Qwen3-0.6B at rope_theta 1e4 instead of its trained 1e6
+            # (0.166 positional; per-token means -0.2550 vs -0.2579).
             if compare_common_prefix:
                 ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
                 ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]
