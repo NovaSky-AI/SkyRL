@@ -157,7 +157,7 @@ def test_sample_mean_weights_are_equal_for_every_sample():
         ActorInfo(None, MeshRank(dp=i, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size, pp_size=1))
         for i in range(dp_size)
     ]
-    for balance_max_tokens in (0, 64):
+    for balance_max_tokens in (None, 64):
         chunks, _ = split_for_dp(_batch(lengths), dp_size=dp_size, balance_max_tokens=balance_max_tokens)
         if balance_max_tokens:
             assert len({len(chunk) for chunk in chunks}) > 1  # ranks hold different numbers of samples

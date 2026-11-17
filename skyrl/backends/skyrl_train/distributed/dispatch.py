@@ -19,7 +19,7 @@ from skyrl.backends.skyrl_train.training_batch import (
 from skyrl.train.dataset.bin_packing import balanced_dp_assignment
 
 
-class OrderedRefs(list):
+class OrderedRefs(List[ObjectRef]):
     """A list of object refs that remembers how the driver permuted the samples.
 
     ``sample_order[i]`` is the batch index of the i-th sample in the concatenation of the
@@ -30,19 +30,23 @@ class OrderedRefs(list):
 
 
 def split_for_dp(
-    data: TrainingInputBatch, dp_size: int, balance_max_tokens: int = 0
+    data: TrainingInputBatch, dp_size: int, balance_max_tokens: Optional[int] = None
 ) -> Tuple[List[TrainingInputBatch], Optional[List[int]]]:
     """Split ``data`` into one chunk per DP rank.
 
     Default: ``dp_size`` chunks with the same number of samples, in batch order.
 
-    With ``balance_max_tokens > 0``: token-balanced chunks from :func:`balanced_dp_assignment`.
+    With ``balance_max_tokens`` set (a token cap per micro-batch): token-balanced chunks from :func:`balanced_dp_assignment`.
     Each chunk lists its micro-batches in its metadata (``MICROBATCH_SIZES_KEY``). The second
     return value is the sample order of the concatenated chunks (``None`` for the default split).
     """
     assignment = None
     # Rows with sub-sequences are already laid out per rank by the collator.
-    if balance_max_tokens > 0 and data.get("sub_seq_lengths") is None and data.get("attention_mask") is not None:
+    if (
+        balance_max_tokens is not None
+        and data.get("sub_seq_lengths") is None
+        and data.get("attention_mask") is not None
+    ):
         token_counts = data["attention_mask"].sum(dim=1).cpu().tolist()
         assignment = balanced_dp_assignment(token_counts, dp_size, balance_max_tokens)
     if assignment is None:
@@ -167,11 +171,11 @@ class MeshDispatch(Dispatch):
         actor_infos: List[ActorInfo],
         method: str,
         data: TrainingInputBatch,
-        dp_balance_max_tokens: int = 0,
+        dp_balance_max_tokens: Optional[int] = None,
         **kwargs,
-    ) -> List[ObjectRef]:
-        """``dp_balance_max_tokens > 0`` selects the token-balanced split (see :func:`split_for_dp`);
-        the returned list then carries the sample order (:class:`OrderedRefs`)."""
+    ) -> OrderedRefs:
+        """A ``dp_balance_max_tokens`` value selects the token-balanced split (see :func:`split_for_dp`);
+        the returned list then carries the sample order."""
         assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
         object_refs = OrderedRefs()
         dp_size = actor_infos[0].rank.dp_size
@@ -193,8 +197,8 @@ class MeshDispatch(Dispatch):
         dp_size: int,
         data: TrainingInputBatch,
         mini_batch_boundaries: List[Tuple[int, int]],
-        dp_balance_max_tokens: int = 0,
-    ) -> List[List[ObjectRef]]:
+        dp_balance_max_tokens: Optional[int] = None,
+    ) -> List[OrderedRefs]:
         """Pre-stage mini-batch chunks into the object store.
 
         Each mini-batch is defined by a ``(start, end)`` index pair from mini_batch_boundaries.
@@ -207,14 +211,14 @@ class MeshDispatch(Dispatch):
             mini_batch_boundaries: List of ``(start, end)`` index pairs.  The i-th mini-batch is
                 data[mini_batch_boundaries[i][0]:mini_batch_boundaries[i][1]].
 
-            dp_balance_max_tokens: When > 0, split each mini-batch with the token-balanced split
+            dp_balance_max_tokens: When set, split each mini-batch with the token-balanced split
                 (see :func:`split_for_dp`).
 
         Returns:
             ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*. Each
             ``result[i]`` is an :class:`OrderedRefs` that carries the sample order of mini-batch *i*.
         """
-        all_chunk_refs: List[List[ObjectRef]] = []
+        all_chunk_refs: List[OrderedRefs] = []
         for start, end in mini_batch_boundaries:
             mini_batch = data[start:end]
             mb_size = end - start

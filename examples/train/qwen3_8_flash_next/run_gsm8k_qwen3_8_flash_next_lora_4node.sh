@@ -50,8 +50,7 @@ MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-32}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 MAX_TOKENS_PER_MICROBATCH=8192
 # Token-balanced data-parallel split: the driver packs each mini-batch and gives every rank the
-# same number of micro-batches and about the same tokens. Measured on 2 x 8 B200 (16 ranks,
-# 6 steps): policy_train 22.8 s -> 14.3 s, step 55.6 s -> 46.6 s (2 micro-batches -> 1).
+# same number of micro-batches and about the same tokens.
 BALANCE_DP_TOKENS="${BALANCE_DP_TOKENS:-true}"
 # vLLM sizes its KV pool at engine start; the trainer's post-offload residual grows to ~24 GiB/GPU
 # after the first optimizer step, and 0.85 OOMed adding the adapter at step 2. At 0.6 vLLM has

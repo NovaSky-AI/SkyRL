@@ -24,6 +24,8 @@ uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/
 uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_balanced_dp_split.py -m megatron
 """
 
+from typing import Optional
+
 import pytest
 import ray
 import torch
@@ -106,7 +108,7 @@ def _config(strategy: str) -> SkyRLTrainConfig:
     return cfg
 
 
-def _run(strategy: str, balance_max_tokens: int) -> dict:
+def _run(strategy: str, balance_max_tokens: Optional[int]) -> dict:
     cfg = _config(strategy)
     group = init_worker_with_type(
         "policy",
@@ -122,7 +124,7 @@ def _run(strategy: str, balance_max_tokens: int) -> dict:
         return out, getattr(refs, "sample_order", None)
 
     # The old log-probs come from the default split in both arms, so both arms train on identical inputs.
-    before_out, _ = call("forward", max_tokens=0)
+    before_out, _ = call("forward", max_tokens=None)
     old_logprobs = loss_fn_outputs_to_tensor(before_out.loss_fn_outputs, key="logprobs").float()
     train_out, order = call("forward_backward", old_logprobs)
     grad_norm = ray.get(group.async_run_ray_method("pass_through", "optim_step"))[0]
@@ -146,7 +148,7 @@ _RESULTS: dict = {}
 
 @pytest.mark.parametrize("strategy", STRATEGIES)
 def test_default_split_arm(ray_init_fixture, strategy):
-    result = _run(strategy, balance_max_tokens=0)
+    result = _run(strategy, balance_max_tokens=None)
     assert result["order"] is None
     _RESULTS[(strategy, "default")] = result
 
