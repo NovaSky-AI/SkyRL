@@ -916,8 +916,24 @@ class WorkerDispatch:
             if is_lora and not (
                 strategy == "megatron" and self.cfg.trainer.policy.megatron_config.lora_config.merge_lora
             ):
-                # in-place lora case (mostly for multi-tenant training) - no need to pause - can just rely on load_lora_adapter to swap adapter in place
-                await _broadcast_and_finish()
+                if self.cfg.generator.inference_engine.data_parallel_size > 1:
+                    # Under data parallelism the DP ranks step in lockstep; pause first so every rank is idle.
+                    # - memory sync: the update is a collective RPC on every vLLM worker. A rank that enters the
+                    #   weight receive stops stepping, and a rank still in a generation step then blocks in the DP
+                    #   all-reduce forever (and the sync never completes).
+                    # - disk sync: each DP rank swaps the adapter whenever its own load_lora_adapter lands, so with
+                    #   expert parallelism a single forward can mix old and new adapter weights across ranks.
+                    # TODO: this pauses every adapter's generation on each tenant's sync; consider an engine-side
+                    # swap at a common DP step instead of a global pause.
+                    await self._inference_engine_client.pause_generation()
+                    async with cleanup_preserving_primary(
+                        self._inference_engine_client.resume_generation, "resume_generation"
+                    ):
+                        await _broadcast_and_finish()
+                else:
+                    # in-place lora case (mostly for multi-tenant training) on a single DP rank - no need to pause -
+                    # can just rely on load_lora_adapter to swap adapter in place
+                    await _broadcast_and_finish()
             elif self.cfg.generator.inference_engine.offload_kv_for_weight_sync:
                 # Sleep the engine to free GPU memory during the sync (wake weights,
                 # broadcast, wake KV cache) so gpu_memory_utilization can run higher.
