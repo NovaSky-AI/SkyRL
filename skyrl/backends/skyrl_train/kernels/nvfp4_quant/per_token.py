@@ -6,7 +6,8 @@ call). Everything else here is layout, done with built-ins:
 
 - the bf16 round trip (``fake_quantize_per_token``) is the decode of FlashInfer's bytes (:mod:`.decode`); on sm_100
   it and ``pack_per_token`` run as one fused pass instead (:mod:`.fused_rt`, FlashInfer's quantizer arithmetic in
-  registers: bit-identical bytes, round trip and write-back; FlashInfer stays the fallback);
+  registers: bit-identical bytes, round trip and write-back; FlashInfer stays the fallback), stochastic rounding
+  included (hardware ``cvt.rs``);
 - the tile-padded, 128x4-swizzled GEMM operand (``pack_per_token``) is a row copy of those bytes into the padded
   rows plus FlashInfer's ``block_scale_interleave``.
 """
@@ -67,7 +68,11 @@ def fake_quantize_per_token(
     if inplace and not x.is_contiguous():
         raise ValueError("in-place per-token NVFP4 needs a contiguous input")
     y = x if inplace else torch.empty(x.shape, dtype=x.dtype, device=x.device)
-    if x.shape[0] and not stochastic and fused_rt.supports(x) and fused_rt.per_token_quantize(x, four_over_six, out=y):
+    if (
+        x.shape[0]
+        and fused_rt.supports(x)
+        and fused_rt.per_token_quantize(x, four_over_six, out=y, stochastic=stochastic)
+    ):
         return y
     if x.shape[0]:
         q, sf, t = quantize_per_token(x, four_over_six, stochastic)
@@ -96,11 +101,12 @@ def pack_per_token(
     opts = torch.empty((padded_rows,), dtype=torch.float32, device=x.device)
     if m == 0:  # FlashInfer's kernels reject empty launches
         return oq, torch.zeros((padded_rows * (k // 16),), dtype=torch.uint8, device=x.device), opts
-    if not stochastic and fused_rt.supports(x) and fused_rt.per_token_fits(k):
+    if fused_rt.supports(x) and fused_rt.per_token_fits(k):
         sw = torch.zeros((padded_rows * (k // 16),), dtype=torch.uint8, device=x.device)
         fused_rt.per_token_quantize(
-            x, four_over_six, out=x if write_back else None, codes=oq, sf_swizzled=sw, t=opts, dst=dst
-        )
+            x, four_over_six, out=x if write_back else None, codes=oq, sf_swizzled=sw, t=opts, dst=dst,
+            stochastic=stochastic,
+        )  # fmt: skip
         return oq, sw, opts
     lin = torch.zeros((padded_rows, k // 16), dtype=torch.uint8, device=x.device)
     q, sf, t = quantize_per_token(x, four_over_six, stochastic)

@@ -26,6 +26,15 @@
 //     product is exact, so a single rounding equals FlashInfer's fsub of the decoded candidate), then only the
 //     chosen candidate is decoded for the output;
 //   - both candidate scales rounded to E4M3 and decoded back with one cvt each (e4m3x2).
+//
+// Stochastic rounding (SR template flag, expert_nvfp4's trainer-side rounding): the block's scale is the one above
+// (absmax or the 4/6 choice, both decided by round-to-nearest error), one E4M3 step larger if the block's largest
+// scaled value exceeds 6 (E2M1 would saturate it, a downward bias), and the values round with the hardware's
+// cvt.rs.satfinite.e2m1x4.f32: up iff the carry of 8 random bits added to the bits truncated off, so up with
+// probability (|v| - lo) / (hi - lo) in multiples of 1/256. The random bits are Philox4x32-10 (Random123, as curand),
+// 128 per 16-block: weights keyed by the version seed with the counter (block in expert, expert stream), so a weight
+// version rounds alike in every call; activations keyed by a seed the caller draws from the CUDA generator, counter
+// (block index in the call).
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -106,6 +115,46 @@ __device__ __forceinline__ uint32_t e2m1x8(const float2* p) {
       : "=r"(r)
       : "f"(p[0].x), "f"(p[0].y), "f"(p[1].x), "f"(p[1].y), "f"(p[2].x), "f"(p[2].y), "f"(p[3].x), "f"(p[3].y));
   return r;
+}
+
+// e2m1x8 with stochastic rounding: elements 4i..4i+3 take the 32 random bits rb_i (8 each, the instruction's split).
+__device__ __forceinline__ uint32_t e2m1x8_rs(const float2* p, uint32_t rb0, uint32_t rb1) {
+  uint32_t r;
+  asm("{\n"
+      ".reg .b16 h0, h1;\n"
+      "cvt.rs.satfinite.e2m1x4.f32 h0, {%4, %3, %2, %1}, %9;\n"
+      "cvt.rs.satfinite.e2m1x4.f32 h1, {%8, %7, %6, %5}, %10;\n"
+      "mov.b32 %0, {h0, h1};\n"
+      "}"
+      : "=r"(r)
+      : "f"(p[0].x), "f"(p[0].y), "f"(p[1].x), "f"(p[1].y), "f"(p[2].x), "f"(p[2].y), "f"(p[3].x), "f"(p[3].y),
+        "r"(rb0), "r"(rb1));
+  return r;
+}
+
+// Philox4x32-10 (Random123's philox4x32, curand's Philox4_32_10): 128 random bits of (counter c, key k).
+__device__ __forceinline__ uint4 philox4x32_10(uint4 c, uint2 k) {
+#pragma unroll
+  for (int i = 0; i < 10; i++) {
+    uint32_t const hi0 = __umulhi(0xD2511F53u, c.x), lo0 = 0xD2511F53u * c.x;
+    uint32_t const hi1 = __umulhi(0xCD9E8D57u, c.z), lo1 = 0xCD9E8D57u * c.z;
+    c = make_uint4(hi1 ^ c.y ^ k.x, lo1, hi0 ^ c.w ^ k.y, lo0);
+    k.x += 0x9E3779B9u;
+    k.y += 0xBB67AE85u;
+  }
+  return c;
+}
+
+__device__ __forceinline__ uint4 philox_bits(uint64_t counter, uint64_t stream, uint64_t seed) {
+  return philox4x32_10(make_uint4((uint32_t)counter, (uint32_t)(counter >> 32), (uint32_t)stream,
+                                  (uint32_t)(stream >> 32)),
+                       make_uint2((uint32_t)seed, (uint32_t)(seed >> 32)));
+}
+
+// The f16 value of a positive finite E4M3 byte.
+__device__ __forceinline__ __half e4m3_to_half(uint32_t byte) {
+  __half_raw const h = __nv_cvt_fp8_to_halfraw((__nv_fp8_storage_t)byte, __NV_E4M3);
+  return __half(h);
 }
 
 // 8 E2M1 codes -> 4 f16x2 (exact).
@@ -195,10 +244,26 @@ struct BlockResult {
   float2 v[8];      // q * s as exact fp32 pairs
 };
 
+// SR: one E4M3 step up for the block scale `bytes` (decoded `s`) when the block's largest scaled value would exceed
+// 6, then the stochastic codes of x * os.
+__device__ __forceinline__ void sr_codes(const float2* xp, float amax, float rg, uint32_t& byte, __half& s,
+                                         float& os, uint4 rb, BlockResult& r) {
+  if (amax * os > 6.0f && byte - 1u < 0x7du) {  // positive finite, below 448
+    byte += 1u;
+    s = e4m3_to_half(byte);
+    os = rcp_approx(__half2float(s) * rg);
+  }
+  float2 q[8];
+#pragma unroll
+  for (int i = 0; i < 8; i++) q[i] = __fmul2_rn(xp[i], bcast(os));
+  r.c0 = e2m1x8_rs(q, rb.x, rb.y);
+  r.c1 = e2m1x8_rs(q + 4, rb.z, rb.w);
+}
+
 // One 16-element block on FlashInfer's grid. g: the encode (global) scale, rg = rcp.approx(g),
-// rcp6 = rcp.approx(6).
-template <bool FOUR_SIX>
-__device__ __forceinline__ void quant_block(const V8& x, uint32_t abits, float g, float rg, float rcp6,
+// rcp6 = rcp.approx(6). SR: round the values stochastically with the 128 random bits rb.
+template <bool FOUR_SIX, bool SR>
+__device__ __forceinline__ void quant_block(const V8& x, uint32_t abits, float g, float rg, float rcp6, uint4 rb,
                                             BlockResult& r) {
   float const amax = __uint_as_float(abits << 16);
   float2 xp[8];
@@ -209,14 +274,22 @@ __device__ __forceinline__ void quant_block(const V8& x, uint32_t abits, float g
     float const sfh = g * (amax * rcp6);
     uint32_t bytes;
     __half2 const h2 = e4m3x2(sfh, 0.0f, bytes);
-    float const os = amax != 0.0f ? rcp_approx(__low2float(h2) * rg) : 0.0f;
-    float2 q[8];
+    float os = amax != 0.0f ? rcp_approx(__low2float(h2) * rg) : 0.0f;
+    if constexpr (SR) {
+      uint32_t byte = bytes & 0xffu;
+      __half s = __low2half(h2);
+      sr_codes(xp, amax, rg, byte, s, os, rb, r);
+      r.sf = byte;
+      s2 = __half2half2(s);
+    } else {
+      float2 q[8];
 #pragma unroll
-    for (int i = 0; i < 8; i++) q[i] = __fmul2_rn(xp[i], bcast(os));
-    r.c0 = e2m1x8(q);
-    r.c1 = e2m1x8(q + 4);
-    r.sf = bytes & 0xffu;
-    s2 = __low2half2(h2);
+      for (int i = 0; i < 8; i++) q[i] = __fmul2_rn(xp[i], bcast(os));
+      r.c0 = e2m1x8(q);
+      r.c1 = e2m1x8(q + 4);
+      r.sf = bytes & 0xffu;
+      s2 = __low2half2(h2);
+    }
   } else {
     if (amax == 0.0f) {
       r.c0 = r.c1 = 0u;
@@ -257,10 +330,19 @@ __device__ __forceinline__ void quant_block(const V8& x, uint32_t abits, float g
       err = __fadd2_rn(err, __fmul2_rn(d, d));
     }
     bool const pick4 = err.x < err.y;
-    r.c0 = pick4 ? c40 : c60;
-    r.c1 = pick4 ? c41 : c61;
-    r.sf = pick4 ? (bytes >> 8) : (bytes & 0xffu);
-    s2 = pick4 ? __high2half2(h2) : __low2half2(h2);
+    if constexpr (SR) {
+      uint32_t byte = pick4 ? (bytes >> 8) : (bytes & 0xffu);
+      __half s = pick4 ? __high2half(h2) : __low2half(h2);
+      float os = pick4 ? os4 : os6;
+      sr_codes(xp, amax, rg, byte, s, os, rb, r);
+      r.sf = byte;
+      s2 = __half2half2(s);
+    } else {
+      r.c0 = pick4 ? c40 : c60;
+      r.c1 = pick4 ? c41 : c61;
+      r.sf = pick4 ? (bytes >> 8) : (bytes & 0xffu);
+      s2 = pick4 ? __high2half2(h2) : __low2half2(h2);
+    }
   }
   s2 = decode_scale2(r.sf, s2);
   decode8(r.c0, s2, r.v);
@@ -350,12 +432,14 @@ __global__ void __launch_bounds__(kThreads) expert_amax_kernel(const uint8_t* __
 // Pass 2: the round trip / pack. grid (chunks, E). partial: (E, pchunks) bf16-bit maxima from pass 1, or, with
 // spec != nullptr, the speculative amax (E,) bf16 bits; then this pass also records its own maxima into
 // partial (E, chunks) for the check pass.
-template <bool FOUR_SIX>
+// SR: Philox keyed by `seed`, counter (block within the expert, streams[e]).
+template <bool FOUR_SIX, bool SR>
 __global__ void __launch_bounds__(kThreads) expert_rt_kernel(
     const uint8_t* __restrict__ x, int64_t nb, int kb, const uint32_t* __restrict__ partial_in, int pchunks,
     const uint32_t* __restrict__ spec, uint32_t* __restrict__ partial_out, float* __restrict__ gs_out,
     float* __restrict__ alpha_out, uint8_t* __restrict__ out, uint8_t* __restrict__ codes,
-    uint8_t* __restrict__ sf_lin, uint8_t* __restrict__ sf_swz, int n_rows, const uint32_t* __restrict__ skip) {
+    uint8_t* __restrict__ sf_lin, uint8_t* __restrict__ sf_swz, int n_rows, const uint32_t* __restrict__ skip,
+    uint64_t seed, const uint64_t* __restrict__ streams) {
   int const e = blockIdx.y, chunk = blockIdx.x, chunks = gridDim.x;
   int const lane = threadIdx.x & 31;
   uint32_t abits;
@@ -378,6 +462,7 @@ __global__ void __launch_bounds__(kThreads) expert_rt_kernel(
   int64_t const b0 = (int64_t)chunk * per, b1 = min(nb, b0 + per);
   int64_t const eb = (int64_t)e * nb;
   int const kTiles = (kb + 3) >> 2;
+  uint64_t const stream = SR ? streams[e] : 0;
   uint32_t mx = 0;
   for (int64_t b = b0 + threadIdx.x; b < b1; b += RT_UNROLL * kThreads) {
     V8 xv[RT_UNROLL];
@@ -393,7 +478,8 @@ __global__ void __launch_bounds__(kThreads) expert_rt_kernel(
       uint32_t ab_row, ab_blk;
       amax_flashinfer(xv[u], ab, ab_row, ab_blk);
       BlockResult r;
-      quant_block<FOUR_SIX>(xv[u], ab_blk, gs, rg, rcp6, r);
+      uint4 const rb = SR ? philox_bits((uint64_t)bb, stream, seed) : make_uint4(0, 0, 0, 0);
+      quant_block<FOUR_SIX, SR>(xv[u], ab_blk, gs, rg, rcp6, rb, r);
       int64_t const gb = eb + bb;
       if (out) st_v8(out + gb * 32, dequant_out(r, alpha));
       if (codes) *reinterpret_cast<uint2*>(codes + gb * 8) = make_uint2(r.c0, r.c1);
@@ -416,11 +502,12 @@ __global__ void __launch_bounds__(kThreads) expert_rt_kernel(
 // (may alias x), and the packed operand at row dst[row] (identity without dst): codes, linear and/or 128x4
 // swizzled scales, decode scale t.
 // x may alias out (in place): each 32-byte block is read once, by the thread that later stores it.
-template <bool FOUR_SIX, int WPR, int BPL, int RPC>
+// SR: Philox keyed by *seed, counter (row * kb + block).
+template <bool FOUR_SIX, bool SR, int WPR, int BPL, int RPC>
 __global__ void __launch_bounds__(32 * WPR * RPC) per_token_kernel(
     const uint8_t* x, int64_t m_rows, int kb, int64_t x_stride, float inv_scale, uint8_t* out,
     int64_t out_stride, const int64_t* __restrict__ dst, uint8_t* __restrict__ codes, uint8_t* __restrict__ sf_lin,
-    uint8_t* __restrict__ sf_swz, float* __restrict__ t_out) {
+    uint8_t* __restrict__ sf_swz, float* __restrict__ t_out, const uint64_t* __restrict__ seed) {
   int const warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   int const rloc = warp / WPR, wr = warp % WPR;
   int64_t const row = (int64_t)blockIdx.x * RPC + rloc;
@@ -471,12 +558,14 @@ __global__ void __launch_bounds__(32 * WPR * RPC) per_token_kernel(
   if (t_out != nullptr && wr == 0 && lane == 0) t_out[drow] = t;
   uint8_t* orow = out ? out + row * out_stride * 2 : nullptr;
   int const kTiles = (kb + 3) >> 2;
+  uint64_t const key = SR ? *seed : 0;
 #pragma unroll
   for (int i = 0; i < BPL; i++) {
     int const j = (wr * 32 + lane) + i * (32 * WPR);
     if (j < kb) {
       BlockResult r;
-      quant_block<FOUR_SIX>(v[i], ab[i], g, rg, rcp6, r);
+      uint4 const rb = SR ? philox_bits((uint64_t)(row * kb + j), 0, key) : make_uint4(0, 0, 0, 0);
+      quant_block<FOUR_SIX, SR>(v[i], ab[i], g, rg, rcp6, rb, r);
       if (orow) st_v8(orow + (int64_t)j * 32, dequant_out(r, t));
       if (codes) *reinterpret_cast<uint2*>(codes + (drow * kb + j) * 8) = make_uint2(r.c0, r.c1);
       if (sf_lin) sf_lin[drow * kb + j] = (uint8_t)r.sf;
@@ -496,32 +585,37 @@ int nvfp4rt_expert_amax(const void* x, int64_t e, int64_t nb, int chunks, void* 
   return (int)cudaGetLastError();
 }
 
-int nvfp4rt_expert_rt(int four_six, const void* x, int64_t e, int64_t nb, int kb, const void* partial_in,
+// sr: stochastic rounding with Philox key `seed` and the per-expert `streams` (E,) (memory order).
+int nvfp4rt_expert_rt(int four_six, int sr, const void* x, int64_t e, int64_t nb, int kb, const void* partial_in,
                       int pchunks, const void* spec, void* partial_out, int chunks, void* gs, void* alpha, void* out,
-                      void* codes, void* sf_lin, void* sf_swz, int n_rows, const void* skip, void* stream) {
+                      void* codes, void* sf_lin, void* sf_swz, int n_rows, const void* skip, uint64_t seed,
+                      const void* streams, void* stream) {
   dim3 grid(chunks, (unsigned)e);
-  auto k = four_six ? expert_rt_kernel<true> : expert_rt_kernel<false>;
+  auto k = four_six ? (sr ? expert_rt_kernel<true, true> : expert_rt_kernel<true, false>)
+                    : (sr ? expert_rt_kernel<false, true> : expert_rt_kernel<false, false>);
   k<<<grid, kThreads, 0, (cudaStream_t)stream>>>(
       (const uint8_t*)x, nb, kb, (const uint32_t*)partial_in, pchunks, (const uint32_t*)spec, (uint32_t*)partial_out,
       (float*)gs, (float*)alpha, (uint8_t*)out, (uint8_t*)codes, (uint8_t*)sf_lin, (uint8_t*)sf_swz, n_rows,
-      (const uint32_t*)skip);
+      (const uint32_t*)skip, seed, (const uint64_t*)streams);
   return (int)cudaGetLastError();
 }
 
 #define PT_CASE(W, B, R)                                                                                    \
   if (wpr == W && bpl == B && rpc == R) {                                                                  \
-    auto k = four_six ? per_token_kernel<true, W, B, R> : per_token_kernel<false, W, B, R>;               \
+    auto k = four_six ? (sr ? per_token_kernel<true, true, W, B, R> : per_token_kernel<true, false, W, B, R>) \
+                      : (sr ? per_token_kernel<false, true, W, B, R> : per_token_kernel<false, false, W, B, R>); \
     dim3 grid((unsigned)((m + R - 1) / R));                                                                \
     k<<<grid, 32 * W * R, 0, (cudaStream_t)stream>>>((const uint8_t*)x, m, kb, x_stride, inv_scale,        \
                                                      (uint8_t*)out, out_stride, (const int64_t*)dst,       \
                                                      (uint8_t*)codes, (uint8_t*)sf_lin, (uint8_t*)sf_swz,  \
-                                                     (float*)t);                                           \
+                                                     (float*)t, (const uint64_t*)seed);                    \
     return (int)cudaGetLastError();                                                                        \
   }
 
-int nvfp4rt_per_token(int four_six, int wpr, int bpl, int rpc, const void* x, int64_t m, int kb, int64_t x_stride,
-                      float inv_scale, void* out, int64_t out_stride, const void* dst, void* codes, void* sf_lin,
-                      void* sf_swz, void* t, void* stream) {
+// sr: stochastic rounding with the Philox key at the device pointer `seed`.
+int nvfp4rt_per_token(int four_six, int sr, int wpr, int bpl, int rpc, const void* x, int64_t m, int kb,
+                      int64_t x_stride, float inv_scale, void* out, int64_t out_stride, const void* dst, void* codes,
+                      void* sf_lin, void* sf_swz, void* t, const void* seed, void* stream) {
   PT_CASE(1, 1, 4)
   PT_CASE(1, 2, 4)
   PT_CASE(1, 4, 4)

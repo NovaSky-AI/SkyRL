@@ -18,7 +18,8 @@ swizzled scales.
 On sm_100 both run as one fused kernel (:mod:`.fused_rt`: FlashInfer's quantizer arithmetic and the decode in
 registers, bit-identical to the FlashInfer bytes and their decode), after a per-expert amax pre-pass, or in a
 single pass when the experts' amax is unchanged since their last round trip (speculative amax, verified in the same
-pass). FlashInfer ``fp4_quantize`` + the decode is the fallback (``SKYRL_QAT_NVFP4_FUSED=0``, other GPUs).
+pass). FlashInfer ``fp4_quantize`` + the decode is the fallback (``SKYRL_QAT_NVFP4_FUSED=0``, other GPUs). Stochastic
+rounding runs in the same kernel (hardware ``cvt.rs``); the fallback is :mod:`.stochastic`'s torch reference.
 
 The experts are read as one ``(E, N, K)`` tensor (:func:`stack_experts`). Megatron's DDP maps every parameter into
 one contiguous buffer when it owns the params (bf16 params with the distributed optimizer), laid out in reverse
@@ -204,9 +205,12 @@ def fake_quantize_expert_weights(
     stack = stack_experts(weights)
     w3 = stack.data
     e, n, k = w3.shape
-    if draw is None and fused_rt.supports(w3):
+    if fused_rt.supports(w3):
         y = torch.empty((e, n, k), dtype=torch.bfloat16, device=w3.device)
-        fused_rt.expert_quantize(w3, block_scale == BLOCK_SCALE_FOUR_OVER_SIX, out=y, speculate=not stack.copied)
+        fused_rt.expert_quantize(
+            w3, block_scale == BLOCK_SCALE_FOUR_OVER_SIX, out=y, speculate=not stack.copied, draw=draw,
+            reversed_experts=stack.reversed,
+        )  # fmt: skip
         return stack.in_expert_order(y.unbind(0))
     gs, alpha = global_scales(w3)
     if draw is None:
@@ -230,7 +234,7 @@ def pack_expert_weights(
     stack = stack_experts(weights)
     w3 = stack.data
     e, n, k = w3.shape
-    if draw is None and fused_rt.supports(w3):
+    if fused_rt.supports(w3):
         if n % 128 or k % 64:
             raise ValueError(f"swizzled NVFP4 expert scales need N % 128 == 0 and K % 64 == 0, got {(n, k)}")
         dev = w3.device
@@ -244,6 +248,8 @@ def pack_expert_weights(
             sf_linear=lin,
             sf_swizzled=sf,
             speculate=not stack.copied,
+            draw=draw,
+            reversed_experts=stack.reversed,
         )
         return PackedExperts(q, sf, alpha, stack.reversed, lin)
     gs, alpha = global_scales(w3)

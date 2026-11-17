@@ -6,9 +6,14 @@ absmax or 4/6 with the MSE fast error path), so codes, scales, the 4/6 choice an
 FlashInfer's bytes decoded by :func:`.decode.dequantize_rows` (tested). Expert weights take a small amax pre-pass
 (the per-expert global scale needs the whole expert) unless the speculative amax applies (:class:`AmaxCache`).
 
+Stochastic rounding (:mod:`.stochastic`) runs in the same kernels with the hardware's ``cvt.rs.satfinite.e2m1x4.f32``
+and Philox4x32-10 random bits: weights keyed by their :class:`.stochastic.WeightDraw` (the version seed and one stream
+per expert), activations by a seed drawn from the current CUDA generator.
+
 The kernel library is compiled with ``nvcc`` on first use (cached per source hash under ``SKYRL_QAT_NVFP4_KERNEL_DIR``,
 default ``$TMPDIR/skyrl_nvfp4_kernels``) and loaded with ctypes. :func:`available` is False, and callers keep the
-FlashInfer path, when ``SKYRL_QAT_NVFP4_FUSED=0``, the device is not sm_100 / sm_103, or the build fails.
+FlashInfer path, when ``SKYRL_QAT_NVFP4_FUSED=0``, the device is not sm_100 / sm_103, or the build fails. It is built
+for ``sm_100a`` and ``sm_103a``: the stochastic ``cvt.rs`` conversion is arch-specific (no ``sm_100f`` family form).
 """
 
 from __future__ import annotations
@@ -27,6 +32,8 @@ from pathlib import Path
 
 import torch
 
+from skyrl.backends.skyrl_train.kernels.nvfp4_quant.stochastic import WeightDraw
+
 logger = logging.getLogger(__name__)
 
 _SRC = Path(__file__).parent / "csrc" / "nvfp4_roundtrip.cu"
@@ -43,6 +50,9 @@ _PT_CONFIGS = ((1, 1, 4), (1, 2, 4), (1, 4, 4), (6, 2, 1), (4, 3, 1), (12, 1, 1)
 _P = ctypes.c_void_p
 _I64 = ctypes.c_int64
 _I32 = ctypes.c_int
+_U64 = ctypes.c_uint64
+# Devices with kernels in the library (the arch-specific sm_100a / sm_103a builds).
+_CAPABILITIES = ((10, 0), (10, 3))
 
 
 def _nvcc() -> str | None:
@@ -60,7 +70,8 @@ def _build() -> ctypes.CDLL:
     src = _SRC.read_bytes()
     ver = subprocess.run([nvcc, "--version"], capture_output=True, text=True, check=True).stdout
     # -ftz=true: FlashInfer's quantizers are built with -use_fast_math, so their fp32 arithmetic flushes subnormals.
-    flags = ["-O3", "-std=c++17", "-ftz=true", "-gencode", "arch=compute_100f,code=sm_100f", "--shared", "-Xcompiler", "-fPIC"]  # fmt: skip
+    flags = ["-O3", "-std=c++17", "-ftz=true", "-gencode", "arch=compute_100a,code=sm_100a", "-gencode",
+             "arch=compute_103a,code=sm_103a", "--shared", "-Xcompiler", "-fPIC"]  # fmt: skip
     key = hashlib.sha256(src + ver.encode() + " ".join(flags).encode()).hexdigest()[:16]
     root = Path(os.environ.get("SKYRL_QAT_NVFP4_KERNEL_DIR") or Path(tempfile.gettempdir()) / "skyrl_nvfp4_kernels")
     root.mkdir(parents=True, exist_ok=True)
@@ -80,10 +91,10 @@ def _build() -> ctypes.CDLL:
 def _load(so: Path | str) -> ctypes.CDLL:
     lib = ctypes.CDLL(str(so))
     lib.nvfp4rt_expert_amax.argtypes = [_P, _I64, _I64, _I32, _P, _P]
-    lib.nvfp4rt_expert_rt.argtypes = [_I32, _P, _I64, _I64, _I32, _P, _I32, _P, _P, _I32, _P, _P, _P, _P, _P, _P,
-                                      _I32, _P, _P]  # fmt: skip
-    lib.nvfp4rt_per_token.argtypes = [_I32, _I32, _I32, _I32, _P, _I64, _I32, _I64, ctypes.c_float, _P, _I64, _P, _P,
-                                      _P, _P, _P, _P]  # fmt: skip
+    lib.nvfp4rt_expert_rt.argtypes = [_I32, _I32, _P, _I64, _I64, _I32, _P, _I32, _P, _P, _I32, _P, _P, _P, _P, _P,
+                                      _P, _I32, _P, _U64, _P, _P]  # fmt: skip
+    lib.nvfp4rt_per_token.argtypes = [_I32, _I32, _I32, _I32, _I32, _P, _I64, _I32, _I64, ctypes.c_float, _P, _I64,
+                                      _P, _P, _P, _P, _P, _P, _P]  # fmt: skip
     for f in (lib.nvfp4rt_expert_amax, lib.nvfp4rt_expert_rt, lib.nvfp4rt_per_token):
         f.restype = _I32
     return lib
@@ -108,7 +119,7 @@ def available(device: torch.device | None = None) -> bool:
     if os.environ.get("SKYRL_QAT_NVFP4_FUSED", "1") == "0" or not torch.cuda.is_available():
         return False
     dev = torch.device("cuda") if device is None else torch.device(device)
-    if dev.type != "cuda" or torch.cuda.get_device_capability(dev)[0] != 10:
+    if dev.type != "cuda" or torch.cuda.get_device_capability(dev) not in _CAPABILITIES:
         return False
     return _lib() is not None
 
@@ -172,6 +183,25 @@ class AmaxCache:
 
 
 AMAX_CACHE = AmaxCache()
+# Per-expert stochastic-rounding streams as device uint64 tensors, by (streams, device): a grouped GEMM's experts
+# keep their streams for the whole run.
+_STREAMS: dict[tuple, torch.Tensor] = {}
+
+
+def _streams_tensor(streams: tuple[int, ...], device: torch.device) -> torch.Tensor:
+    key = (streams, device)
+    t = _STREAMS.get(key)
+    if t is None:
+        # uint64 bits in an int64 tensor
+        t = torch.tensor([s - (1 << 64) if s >= 1 << 63 else s for s in streams], dtype=torch.int64, device=device)
+        _STREAMS[key] = t
+    return t
+
+
+def activation_seed(device: torch.device) -> torch.Tensor:
+    """A 64-bit stochastic-rounding seed on ``device``, drawn from its current CUDA generator (whose state
+    activation checkpointing saves and restores, so a recompute draws the same)."""
+    return torch.randint(-(1 << 63), (1 << 63) - 1, (1,), dtype=torch.int64, device=device)
 
 
 def expert_quantize(
@@ -183,11 +213,15 @@ def expert_quantize(
     sf_swizzled: torch.Tensor | None = None,
     speculate: bool = False,
     chunks: int | None = None,
+    draw: WeightDraw | None = None,
+    reversed_experts: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize contiguous bf16 ``(E, N, K)`` expert weights on FlashInfer's ``fp4_quantize`` grid (per-expert
     ``gs = 2688 / amax``) into any of: the bf16 round trip ``out (E, N, K)``, ``codes (E, N, K/2)`` uint8,
     ``sf_linear (E, N, K/16)`` / ``sf_swizzled (E, N*K/16)`` (128x4) E4M3 bytes. Returns ``(gs, alpha)`` fp32 ``(E,)``.
-    ``speculate``: use and refresh :data:`AMAX_CACHE` (one pass over the weights when their amax is unchanged)."""
+    ``speculate``: use and refresh :data:`AMAX_CACHE` (one pass over the weights when their amax is unchanged).
+    ``draw``: round the values stochastically with this draw (its streams are in expert order; the stack holds the
+    experts highest first when ``reversed_experts``)."""
     lib = _lib()
     e, n, k = w3.shape
     if w3.dtype != torch.bfloat16 or not w3.is_contiguous() or k % 16 or w3.data_ptr() % 32:
@@ -206,14 +240,20 @@ def expert_quantize(
     ch = chunks or _chunks(e, nb, dev)
     stream = _stream(dev)
     outs = [_ptr(out), _ptr(codes), _ptr(sf_linear), _ptr(sf_swizzled)]
+    sr = int(draw is not None)
+    seed = 0 if draw is None else draw.seed
+    streams = None if draw is None else _streams_tensor(draw.in_memory_order(reversed_experts), dev).data_ptr()
+    if draw is not None and len(draw.streams) != e:
+        raise ValueError(f"stochastic rounding needs one stream per expert: got {len(draw.streams)} for {e}")
     key = (w3.data_ptr(), e, n, k, dev.index)
     spec = AMAX_CACHE.get(key) if speculate else None
     with torch.cuda.device(dev):
         if spec is None:
             partial = torch.empty((e, ch), dtype=torch.int32, device=dev)
             _check(lib.nvfp4rt_expert_amax(w3.data_ptr(), e, nb, ch, partial.data_ptr(), stream), "amax")
-            _check(lib.nvfp4rt_expert_rt(int(four_over_six), w3.data_ptr(), e, nb, kb, partial.data_ptr(), ch, None,
-                                         None, ch, gs.data_ptr(), alpha.data_ptr(), *outs, n, None, stream), "quantize")  # fmt: skip
+            _check(lib.nvfp4rt_expert_rt(int(four_over_six), sr, w3.data_ptr(), e, nb, kb, partial.data_ptr(), ch,
+                                         None, None, ch, gs.data_ptr(), alpha.data_ptr(), *outs, n, None, seed,
+                                         streams, stream), "quantize")  # fmt: skip
             if speculate:
                 bits = torch.empty(e, dtype=torch.int32, device=dev)
                 # the amax as the kernel reduced it: max over the partials
@@ -221,13 +261,13 @@ def expert_quantize(
                 AMAX_CACHE.put(key, bits)
         else:
             partial = torch.empty((e, ch), dtype=torch.int32, device=dev)
-            _check(lib.nvfp4rt_expert_rt(int(four_over_six), w3.data_ptr(), e, nb, kb, None, 0, spec.data_ptr(),
+            _check(lib.nvfp4rt_expert_rt(int(four_over_six), sr, w3.data_ptr(), e, nb, kb, None, 0, spec.data_ptr(),
                                          partial.data_ptr(), ch, gs.data_ptr(), alpha.data_ptr(), *outs, n, None,
-                                         stream), "speculative quantize")  # fmt: skip
+                                         seed, streams, stream), "speculative quantize")  # fmt: skip
             # Check pass: experts whose measured amax equals the speculation exit at once; the others are redone.
-            _check(lib.nvfp4rt_expert_rt(int(four_over_six), w3.data_ptr(), e, nb, kb, partial.data_ptr(), ch, None,
-                                         None, ch, gs.data_ptr(), alpha.data_ptr(), *outs, n, spec.data_ptr(),
-                                         stream), "check")  # fmt: skip
+            _check(lib.nvfp4rt_expert_rt(int(four_over_six), sr, w3.data_ptr(), e, nb, kb, partial.data_ptr(), ch,
+                                         None, None, ch, gs.data_ptr(), alpha.data_ptr(), *outs, n, spec.data_ptr(),
+                                         seed, streams, stream), "check")  # fmt: skip
             torch.amax(partial, dim=1, out=spec)
     return gs, alpha
 
@@ -252,12 +292,14 @@ def per_token_quantize(
     t: torch.Tensor | None = None,
     dst: torch.Tensor | None = None,
     config: tuple[int, int, int] | None = None,
+    stochastic: bool = False,
 ) -> bool:
     """Per-token NVFP4 of bf16 rows ``x [M, K]`` (unit column stride) on FlashInfer's
     ``nvfp4_quantize(per_token_activation=True)`` grid, into any of: the bf16 round trip ``out [M, K]`` (may be
     ``x``); and, at row ``dst[r]`` (``r`` without ``dst``), ``codes [Mp, K/2]``, ``sf_linear [Mp, K/16]``,
     ``sf_swizzled [Mp * K/16]`` (128x4; rows the kernel does not write are left as they are), decode scales
-    ``t [Mp]``. False if ``K`` is too wide for the kernel (:func:`per_token_fits`); the caller then uses FlashInfer."""
+    ``t [Mp]``. ``stochastic``: round the values stochastically, seeded by :func:`activation_seed`. False if ``K`` is
+    too wide for the kernel (:func:`per_token_fits`); the caller then uses FlashInfer."""
     lib = _lib()
     m, k = x.shape
     if not supports(x):
@@ -277,9 +319,10 @@ def per_token_quantize(
         return True
     if dst is not None:
         dst = dst.to(torch.int64).contiguous()
+    seed = activation_seed(x.device) if stochastic else None
     with torch.cuda.device(x.device):
-        _check(lib.nvfp4rt_per_token(int(four_over_six), *cfg, x.data_ptr(), m, kb, x.stride(0), _PER_TOKEN_INV,
-                                     _ptr(out), 0 if out is None else out.stride(0), _ptr(dst), _ptr(codes),
-                                     _ptr(sf_linear), _ptr(sf_swizzled), _ptr(t), _stream(x.device)),
-               "per-token quantize")  # fmt: skip
+        _check(lib.nvfp4rt_per_token(int(four_over_six), int(stochastic), *cfg, x.data_ptr(), m, kb, x.stride(0),
+                                     _PER_TOKEN_INV, _ptr(out), 0 if out is None else out.stride(0), _ptr(dst),
+                                     _ptr(codes), _ptr(sf_linear), _ptr(sf_swizzled), _ptr(t), _ptr(seed),
+                                     _stream(x.device)), "per-token quantize")  # fmt: skip
     return True
