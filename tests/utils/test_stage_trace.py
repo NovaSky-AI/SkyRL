@@ -78,16 +78,6 @@ def test_the_trace_directory_comes_from_the_environment(tmp_path, monkeypatch):
     assert os.listdir(tmp_path) == [f"{stage_trace._host}-{os.getpid()}.jsonl"]
 
 
-def test_timer_records_its_phase():
-    from skyrl.train.utils.utils import Timer
-
-    timings = {}
-    with Timer("check_payloads", timings):
-        pass
-    assert stage_trace.take_totals("t.")["t.check_payloads"][0] == 1
-    assert "check_payloads" in timings
-
-
 def test_an_unwritable_trace_directory_stops_tracing_not_the_work(tmp_path, monkeypatch):
     blocker = tmp_path / "file"
     blocker.write_text("")

@@ -15,6 +15,7 @@ from skyrl.train.utils import Timer, deadline
 from skyrl.train.utils.async_utils import cleanup_preserving_primary
 from skyrl.train.utils.deadline import StepTimeoutError, WeightSyncTimeoutError
 from skyrl.train.utils.trainer_utils import ResumeMode
+from skyrl.utils import stage_trace
 
 
 def test_ray_get_with_timeout_raises_requested_exception(monkeypatch):
@@ -120,6 +121,15 @@ async def test_actor_group_backload_times_out():
         ray.kill(actor)
     assert (exc_info.value.stage, exc_info.value.operation) == ("sync_weights", "backload_to_gpu")
     assert 0.15 <= exc_info.value.elapsed_s < 10
+
+
+def test_timer_records_its_phase():
+    stage_trace.take_totals("t.")
+    timings = {}
+    with Timer("check_payloads", timings):
+        pass
+    assert stage_trace.take_totals("t.")["t.check_payloads"][0] == 1
+    assert "check_payloads" in timings
 
 
 @pytest.mark.parametrize("error_cls", [StepTimeoutError, WeightSyncTimeoutError])
