@@ -197,7 +197,7 @@ class FakeTrial:
         env = self.config["agent"].get("env") or {}
         from harbor.agents.installed.codex import Codex
 
-        from examples.train_integrations.harbor_skycap.harbor_generator import (
+        from skyrl.integration.harbor_skycap.harbor_generator import (
             agent_class,
         )
 

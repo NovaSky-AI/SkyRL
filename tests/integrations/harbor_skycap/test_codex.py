@@ -25,7 +25,7 @@ from examples.train_integrations.harbor_skycap.codex import (  # noqa: E402
     base_instructions,
     without_update_plan_instructions,
 )
-from examples.train_integrations.harbor_skycap.harbor_generator import (  # noqa: E402
+from skyrl.integration.harbor_skycap.harbor_generator import (  # noqa: E402
     HarborSkycapGenerator,
     agent_class,
 )
