@@ -11,6 +11,9 @@ different nodes line up to NTP accuracy. ``python -m skyrl.utils.stage_trace <di
 merges a run's files into one trace for https://ui.perfetto.dev.
 
 ``Timer`` records each phase it times as ``t.<name>``, so the trainer's phases frame the timeline.
+
+Tracing never fails the traced work: a process whose trace can't be written or serialized logs a
+warning and stops tracing; its totals keep counting.
 """
 
 import atexit
@@ -26,6 +29,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 import orjson
 
 from skyrl.env_vars import SKYRL_STAGE_TRACE_DIR
+from skyrl.utils.log import logger
 
 _lock = threading.Lock()
 # Span name -> [count, total seconds, slowest seconds], since the last ``take_totals``.
@@ -36,6 +40,7 @@ _pid: Optional[int] = None
 _component = ""
 _host = socket.gethostname()
 _flusher: Optional[threading.Thread] = None
+_failed = False  # This process stopped tracing after an error (``_stop``).
 
 
 def configure(trace_dir: Optional[str] = None, component: Optional[str] = None) -> bool:
@@ -47,19 +52,23 @@ def configure(trace_dir: Optional[str] = None, component: Optional[str] = None) 
     if component:
         _component = component
     trace_dir = trace_dir or SKYRL_STAGE_TRACE_DIR
-    if not trace_dir:
+    if not trace_dir or _failed:
         return False
     if _path is not None and _pid == os.getpid():
         return True
     _pid = os.getpid()
-    os.makedirs(trace_dir, exist_ok=True)
+    try:
+        os.makedirs(trace_dir, exist_ok=True)
+    except OSError as error:
+        _stop(error)
+        return False
     _path = os.path.join(trace_dir, f"{_host}-{_pid}.jsonl")
     _emit({"ph": "M", "name": "process_name", "args": {"name": f"{_component or 'skyrl'} {_host}:{_pid}"}})
     if _flusher is None or not _flusher.is_alive():
         _flusher = threading.Thread(target=_flush_loop, name="stage-trace-flush", daemon=True)
         _flusher.start()
         atexit.register(flush)
-    return True
+    return not _failed
 
 
 def enabled() -> bool:
@@ -72,9 +81,25 @@ def enabled() -> bool:
 def _emit(event: Dict[str, Any]) -> None:
     event["pid"] = _pid
     event["tid"] = threading.get_ident() & 0xFFFFFF
-    line = orjson.dumps(event, option=orjson.OPT_SERIALIZE_NUMPY, default=str)
+    try:
+        line = orjson.dumps(event, option=orjson.OPT_SERIALIZE_NUMPY, default=str)
+    except TypeError as error:  # orjson.JSONEncodeError, e.g. an int past 64 bits
+        _stop(error)
+        return
     with _lock:
         _events.append(line)
+
+
+def _stop(error: Exception) -> None:
+    """Stop this process's tracing after ``error``, dropping its unwritten events."""
+    global _path, _events, _failed
+    with _lock:
+        if _failed:
+            return
+        _failed = True
+        _path = None
+        _events = []
+    logger.warning("stage_trace: stopped tracing this process after %r", error)
 
 
 def record(name: str, t0: float, t1: float, **attrs: Any) -> None:
@@ -115,13 +140,15 @@ def take_totals(prefix: str = "") -> Dict[str, Tuple[int, float, float]]:
 
 def flush() -> None:
     global _events
-    if _path is None:
-        return
     with _lock:
-        events, _events = _events, []
-    if events:
-        with open(_path, "ab") as f:
+        path, events, _events = _path, _events, []
+    if path is None or not events:
+        return
+    try:
+        with open(path, "ab") as f:
             f.write(b"\n".join(events) + b"\n")
+    except OSError as error:
+        _stop(error)
 
 
 def _flush_loop() -> None:
@@ -129,8 +156,8 @@ def _flush_loop() -> None:
         time.sleep(1.0)
         try:
             flush()
-        except Exception:  # noqa: BLE001 - tracing must never take the process down
-            pass
+        except Exception as error:  # noqa: BLE001 - tracing must never take the process down
+            _stop(error)
 
 
 def merge(trace_dir: str, out_path: str) -> int:

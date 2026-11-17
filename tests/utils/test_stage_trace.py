@@ -16,6 +16,7 @@ def fresh(monkeypatch):
     monkeypatch.setattr(stage_trace, "_pid", None)
     monkeypatch.setattr(stage_trace, "_events", [])
     monkeypatch.setattr(stage_trace, "_totals", {})
+    monkeypatch.setattr(stage_trace, "_failed", False)
     monkeypatch.setattr(stage_trace, "SKYRL_STAGE_TRACE_DIR", "")
 
 
@@ -85,3 +86,42 @@ def test_timer_records_its_phase():
         pass
     assert stage_trace.take_totals("t.")["t.check_payloads"][0] == 1
     assert "check_payloads" in timings
+
+
+def test_an_unwritable_trace_directory_stops_tracing_not_the_work(tmp_path, monkeypatch):
+    blocker = tmp_path / "file"
+    blocker.write_text("")
+    monkeypatch.setattr(stage_trace, "SKYRL_STAGE_TRACE_DIR", str(blocker / "traces"))
+
+    assert not stage_trace.configure(component="policy_worker")
+    with stage_trace.span("mb.fetch"):
+        pass
+
+    assert stage_trace.take_totals()["mb.fetch"][0] == 1
+    assert not stage_trace.enabled()
+
+
+def test_an_unserializable_event_stops_tracing_not_the_work(tmp_path):
+    assert stage_trace.configure(str(tmp_path))
+    stage_trace.record("mb.fetch", 0.0, 1.0)
+    with stage_trace.span("mb.collate", rows=2**70):  # past orjson's 64-bit ints
+        pass
+    stage_trace.instant("trainer.group_buffered")
+
+    assert stage_trace.take_totals()["mb.collate"][0] == 1
+    assert not stage_trace.enabled()
+    assert stage_trace._events == []  # Its unwritten events are dropped.
+    assert not stage_trace.configure(str(tmp_path))  # Stopped for good in this process.
+
+
+def test_a_failed_write_stops_tracing_not_the_work(tmp_path, monkeypatch):
+    assert stage_trace.configure(str(tmp_path))
+    monkeypatch.setattr(stage_trace, "_path", str(tmp_path / "gone" / "trace.jsonl"))
+    stage_trace.record("mb.fetch", 0.0, 1.0)
+
+    stage_trace.flush()
+
+    assert not stage_trace.enabled()
+    stage_trace.record("mb.fetch", 1.0, 2.0)
+    assert stage_trace._events == []
+    assert stage_trace.take_totals()["mb.fetch"][0] == 2
