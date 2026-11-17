@@ -1269,6 +1269,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                     f"MTP: draft head clipped separately from the policy "
                     f"({n_local} head main params on rank {self._rank}; 0 is normal under DP sharding)"
                 )
+                if self.enable_router_replay:
+                    from skyrl.backends.skyrl_train.mtp.router_replay import (
+                        detach_mtp_routers_from_replay,
+                    )
+
+                    n_routers = detach_mtp_routers_from_replay(self.actor_module)
+                    if n_routers:
+                        logger.info(f"MTP: {n_routers} head router(s) route on their own (no rollout routes for them)")
 
         # create worker model
         self.model = MegatronModelWrapper(
