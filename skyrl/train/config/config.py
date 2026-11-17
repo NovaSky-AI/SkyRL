@@ -776,9 +776,15 @@ class MegatronConfig(BaseConfig):
             {"rope_parameters", "rope_scaling", "rope_theta", "q_lora_rank"} & set(model_config_overrides)
         )
         if unapplied:
+            rope_hint = (
+                " RoPE overrides go in megatron_config.transformer_config_kwargs.rope_parameters."
+                if set(unapplied) - {"q_lora_rank"}
+                else ""
+            )
             raise ValueError(
                 f"megatron_config.model_config_kwargs.model_config sets {unapplied}, which the Megatron backend does "
                 "not apply: Megatron-Bridge builds the model from the checkpoint's own config. Remove the override."
+                + rope_hint
             )
         # The top-level FP8 fields fold into the TransformerConfig kwargs; explicitly
         # configured kwargs take precedence.

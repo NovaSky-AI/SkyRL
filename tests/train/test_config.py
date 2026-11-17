@@ -563,8 +563,10 @@ def test_megatron_empty_cuda_cache_from_cli_override():
 @pytest.mark.parametrize("key", ["rope_theta", "rope_parameters.rope_theta", "rope_scaling.factor", "q_lora_rank"])
 def test_megatron_config_rejects_unapplied_overrides_in_model_config(config_cls, prefix, key):
     # Every entrypoint builds a MegatronConfig, including SFT and Tinker, which never call validate_cfg.
-    with pytest.raises(ValueError, match="megatron_config.model_config_kwargs.model_config sets"):
+    with pytest.raises(ValueError, match="megatron_config.model_config_kwargs.model_config sets") as exc_info:
         config_cls.from_cli_overrides([f"{prefix}.model_config_kwargs.model_config.{key}=500000.0"])
+    # RoPE keys are pointed at the path that works; q_lora_rank has none to point at.
+    assert ("transformer_config_kwargs.rope_parameters" in str(exc_info.value)) == (key != "q_lora_rank")
 
 
 @pytest.mark.parametrize(
