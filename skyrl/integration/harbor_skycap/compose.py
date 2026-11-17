@@ -18,7 +18,9 @@ rest the model sampled.
 
 The masking policy is the sibling's: an instance with any rollout that timed
 out or failed is masked whole, and a trial that hit the context limit trains
-with its reward unless overlong filtering is on.
+with its reward unless overlong filtering is on. In eval (``mask_groups=False``)
+there is no group baseline to protect, so a trial that timed out or failed
+scores 0 on its own and the other trials of its instance keep their rewards.
 
 With ``include_images``, each row carries its path's ``pixel_values`` and ``image_grid_thw``, its images in
 placeholder order. A row without images (a masked rollout's placeholder) carries zero-row tensors, as the
@@ -126,6 +128,7 @@ def compose(
     outcomes: List[TrialOutcome],
     *,
     overlong_filtering: bool,
+    mask_groups: bool = True,
     top_k: int = -1,
     sample_support: bool = False,
     routed_experts: bool = False,
@@ -133,17 +136,26 @@ def compose(
 ) -> GeneratorOutput:
     """``top_k`` bounds sampler-support rows, as SkyRL's own capture does.
 
+    ``mask_groups`` masks every trial of an instance when one of them timed out or failed, so GRPO never
+    computes a baseline from a group with holes in it; eval turns it off and scores each failed trial 0 alone.
     ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
     still carries (empty) support rows, as every other batch will. ``routed_experts`` says the same
     of routes (R3); every trained row must then have them. ``include_images`` adds each row's vision features.
     """
-    masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
+    masked_instances = (
+        {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
+        if mask_groups
+        else set()
+    )
+
+    def is_masked(outcome: TrialOutcome) -> bool:
+        return outcome.trajectory_id.instance_id in masked_instances or outcome.stop_reason in MASKED_STOP_REASONS
 
     groups: List[List[_Row]] = []
     trained: List[TrialOutcome] = []
     for outcome in outcomes:
         rows: List[_Row] = []
-        if outcome.trajectory_id.instance_id not in masked_instances:
+        if not is_masked(outcome):
             rows = [row for row in map(split, outcome.samples) if row is not None]
             if rows:
                 trained.append(outcome)
@@ -176,14 +188,14 @@ def compose(
     }
     times: List[Optional[float]] = []
     for outcome, rows in zip(outcomes, groups):
-        masked = outcome.trajectory_id.instance_id in masked_instances
+        masked = is_masked(outcome)
         for position, row in enumerate(rows):
             last = position == len(rows) - 1
             out["prompt_token_ids"].append(row.prompt)
             out["response_ids"].append(row.response)
             out["rewards"].append(0.0 if masked else outcome.reward)
             out["loss_masks"].append(row.loss_mask)
-            out["stop_reasons"].append("error" if masked else outcome.stop_reason)
+            out["stop_reasons"].append("error" if masked and mask_groups else outcome.stop_reason)
             out["rollout_logprobs"].append(row.logprobs)
             out["trajectory_ids"].append(outcome.trajectory_id)
             out["is_last_step"].append(last)
