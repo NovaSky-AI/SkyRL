@@ -134,6 +134,9 @@ class RaySandboxEnvironment(BaseEnvironment):
             )
 
     def _workdir(self) -> str | None:
+        # The Dockerfile's WORKDIR applies with an `image` override too: it is the
+        # directory the task's tests expect. Ray never builds the Dockerfile, but
+        # runsc creates a missing workdir in the sandbox's writable overlay.
         return self.task_env_config.workdir or self._dockerfile_workdir
 
     async def start(self, force_build: bool) -> None:
@@ -218,7 +221,8 @@ class RaySandboxEnvironment(BaseEnvironment):
                 user=str(user) if user is not None else None,
             )
         except SandboxTimeoutError as e:
-            return ExecResult(stdout=None, stderr=str(e), return_code=_TIMEOUT_EXIT_CODE)
+            # Empty stdout, not None: agents treat stdout as text.
+            return ExecResult(stdout="", stderr=str(e), return_code=_TIMEOUT_EXIT_CODE)
         return ExecResult(stdout=result.stdout, stderr=result.stderr, return_code=result.exit_code)
 
     # File transfer: bytes are shipped through Ray, since the actor runs on
