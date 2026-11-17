@@ -13,6 +13,7 @@ import torch
 from skyrl.backends.skyrl_train.gpu_platform import (
     check_driver_device_masks,
     is_rocm,
+    ray_masks_amd_gpus,
     rocm_unsupported,
 )
 
@@ -32,6 +33,28 @@ def test_is_rocm_follows_the_torch_build(monkeypatch):
     assert not is_rocm()
     monkeypatch.setattr(torch.version, "hip", "7.15.26333", raising=False)
     assert is_rocm()
+
+
+@pytest.mark.parametrize(
+    "env, masks",
+    [
+        ({}, True),
+        ({"RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1"}, False),
+        ({"RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "True"}, False),
+        ({"RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "0"}, True),
+        # Ray reads the HIP variable alone on an AMD node.
+        ({"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"}, True),
+    ],
+)
+def test_ray_masks_amd_gpus_follows_rays_own_variable(env, masks):
+    assert ray_masks_amd_gpus(env) is masks
+
+
+def test_ray_masks_amd_gpus_defaults_to_the_live_process_environment(monkeypatch):
+    monkeypatch.delenv("RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES", raising=False)
+    assert ray_masks_amd_gpus()
+    monkeypatch.setenv("RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES", "1")
+    assert not ray_masks_amd_gpus()
 
 
 def test_check_driver_device_masks_rejects_a_cuda_only_mask_on_rocm(rocm):
@@ -64,12 +87,16 @@ def test_rocm_unsupported_names_the_platform(feature):
 def test_unregistered_bridges_warn_unless_megatron_itself_is_missing(caplog):
     from skyrl.backends.skyrl_train.workers.megatron import model_bridges
 
+    def levels():
+        # A set: another handler on the way to the root logger can deliver the same record twice.
+        return {r.levelno for r in caplog.records if r.name == model_bridges.__name__}
+
     with caplog.at_level(logging.DEBUG, logger=model_bridges.__name__):
         model_bridges._report_unregistered_bridges(ModuleNotFoundError("No module named 'megatron'", name="megatron"))
-        assert [r.levelno for r in caplog.records] == [logging.DEBUG]
+        assert levels() == {logging.DEBUG}
         caplog.clear()
         model_bridges._report_unregistered_bridges(
             ImportError("cannot import name 'Qwen35Bridge'", name="megatron.bridge.models.qwen.qwen35_bridge")
         )
-        assert [r.levelno for r in caplog.records] == [logging.WARNING]
+        assert levels() == {logging.WARNING}
         assert "extra Megatron bridges are not registered" in caplog.records[0].getMessage()

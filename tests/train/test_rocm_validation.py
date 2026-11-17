@@ -84,6 +84,15 @@ def test_rocm_rejects_megatron_fp8_before_a_recipe_is_resolved(rocm, monkeypatch
         validate_megatron_cfg(cfg)
 
 
+def test_rocm_rejects_a_per_module_precision_file(rocm):
+    """The file selects quantization recipes per module without the global FP8 switches."""
+    cfg = _megatron_cfg()
+    cfg.trainer.policy.megatron_config.te_precision_config_file = "/path/to/precision.yaml"
+
+    with pytest.raises(ValueError, match="te_precision_config_file"):
+        validate_megatron_cfg(cfg)
+
+
 def test_rocm_rejects_nccl_to_a_non_colocated_multi_gpu_engine_under_ray_masks(rocm, ray_masks_gpus):
     cfg = _non_colocated_multi_gpu_engine_cfg()
 
@@ -91,11 +100,29 @@ def test_rocm_rejects_nccl_to_a_non_colocated_multi_gpu_engine_under_ray_masks(r
         validate_megatron_cfg(cfg)
 
 
-@pytest.mark.parametrize("noset_env_var", _NOSET_ENV_VARS)
-def test_rocm_accepts_that_engine_when_ray_does_not_mask_gpus(rocm, ray_masks_gpus, monkeypatch, noset_env_var):
-    monkeypatch.setenv(noset_env_var, "1")
+def test_rocm_rejects_nccl_to_a_non_colocated_pipeline_parallel_engine_under_ray_masks(rocm, ray_masks_gpus):
+    """Pipeline parallelism spreads an engine over several GPUs just as tensor parallelism does."""
+    cfg = _non_colocated_multi_gpu_engine_cfg()
+    cfg.generator.inference_engine.tensor_parallel_size = 1
+    cfg.generator.inference_engine.pipeline_parallel_size = 2
+
+    with pytest.raises(ValueError, match="RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1"):
+        validate_megatron_cfg(cfg)
+
+
+@pytest.mark.parametrize("value", ["1", "true", "True"])
+def test_rocm_accepts_that_engine_when_ray_does_not_mask_amd_gpus(rocm, ray_masks_gpus, monkeypatch, value):
+    monkeypatch.setenv("RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES", value)
 
     validate_megatron_cfg(_non_colocated_multi_gpu_engine_cfg())
+
+
+def test_rocm_still_rejects_that_engine_with_only_the_cuda_noset_variable(rocm, ray_masks_gpus, monkeypatch):
+    """On an AMD node Ray honours the HIP variable alone, so the CUDA one leaves the masks in place."""
+    monkeypatch.setenv("RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES", "1")
+
+    with pytest.raises(ValueError, match="RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1"):
+        validate_megatron_cfg(_non_colocated_multi_gpu_engine_cfg())
 
 
 @pytest.mark.parametrize(

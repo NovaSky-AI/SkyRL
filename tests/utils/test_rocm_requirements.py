@@ -93,3 +93,14 @@ def test_git_pins_reads_name_and_commit(rocm_requirements):
         "megatron-core": "ed9c2c8c1cf4a5438922ae8d215181e7c8b9e0fe",
         "megatron-bridge": "7171584bd7452caf2adfa6afd12fb89cc37fbc64",
     }
+
+
+def test_commit_matches_requires_the_whole_pinned_commit(rocm_requirements):
+    pinned = "ed9c2c8c1cf4a5438922ae8d215181e7c8b9e0fe"
+
+    assert rocm_requirements.commit_matches(pinned, pinned)
+    # Same first seven characters, another commit.
+    assert not rocm_requirements.commit_matches(pinned, "ed9c2c8" + "0" * 33)
+    # A PyPI release has no commit recorded.
+    assert not rocm_requirements.commit_matches(pinned, None)
+    assert rocm_requirements.commit_matches("ed9c2c8", pinned)

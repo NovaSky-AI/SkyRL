@@ -7,12 +7,13 @@ handling. Every function here does nothing on a torch build without ROCm.
 """
 
 import os
-from typing import Mapping
+from typing import Mapping, Optional
 
 import torch
 
 HIP_VISIBLE_DEVICES = "HIP_VISIBLE_DEVICES"
 CUDA_VISIBLE_DEVICES = "CUDA_VISIBLE_DEVICES"
+RAY_NOSET_HIP_VISIBLE_DEVICES = "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES"
 
 
 def is_rocm() -> bool:
@@ -23,7 +24,20 @@ def is_rocm() -> bool:
     return getattr(torch.version, "hip", None) is not None
 
 
-def check_driver_device_masks(env: Mapping[str, str] = os.environ) -> None:
+def ray_masks_amd_gpus(env: Optional[Mapping[str, str]] = None) -> bool:
+    """Returns True when Ray writes a per-process ``HIP_VISIBLE_DEVICES`` for GPU actors on an AMD node.
+
+    That is Ray's default. Ray skips the write only when ``RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES`` is
+    ``1`` or ``true``; the CUDA variant of that variable has no effect on an AMD node.
+
+    Args:
+        env: Environment to read. Defaults to this process's environment.
+    """
+    env = os.environ if env is None else env
+    return env.get(RAY_NOSET_HIP_VISIBLE_DEVICES, "").lower() not in ("1", "true")
+
+
+def check_driver_device_masks(env: Optional[Mapping[str, str]] = None) -> None:
     """On ROCm, refuses a GPU restriction that Ray would silently ignore.
 
     Call in the process that starts Ray, before it does. Ray detects and assigns AMD GPUs through
@@ -36,6 +50,7 @@ def check_driver_device_masks(env: Mapping[str, str] = os.environ) -> None:
         RuntimeError: ``CUDA_VISIBLE_DEVICES`` is set, ``HIP_VISIBLE_DEVICES`` is not, and torch is a
             ROCm build.
     """
+    env = os.environ if env is None else env
     cuda = env.get(CUDA_VISIBLE_DEVICES)
     if cuda and not env.get(HIP_VISIBLE_DEVICES) and is_rocm():
         raise RuntimeError(
@@ -52,8 +67,9 @@ _ROCM_UNSUPPORTED = {
         "CUDA_VISIBLE_DEVICES. Use 'nccl' or 'delta'."
     ),
     "fp8": (
-        "FP8 training and FP8 weight sync are not supported: SkyRL picks FP8 recipes and the block-scale "
-        "contract from NVIDIA compute capability, which means nothing on an AMD GPU."
+        "FP8 training (fp8, fp8_param, or per-module recipes from te_precision_config_file) and FP8 weight "
+        "sync are not supported: SkyRL picks FP8 recipes and the block-scale contract from NVIDIA compute "
+        "capability, which means nothing on an AMD GPU."
     ),
     "mp_executor": (
         "generator.inference_engine.distributed_executor_backend='mp' is not supported with the Megatron "
@@ -62,11 +78,11 @@ _ROCM_UNSUPPORTED = {
         "engine never connects. Use the default 'ray'."
     ),
     "nccl_multi_gpu_engine": (
-        "weight_sync_backend='nccl' cannot reach a non-colocated inference engine with tensor_parallel_size > 1 "
-        "while Ray masks GPUs per process: the trainer then sees one GPU and the engine's workers see several, "
-        "and RCCL never finishes connecting them. Turn Ray's masking off for the whole run by exporting "
-        "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1 and RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1 before "
-        "launching (SkyRL's AMD image sets both), or use tensor_parallel_size=1."
+        "weight_sync_backend='nccl' cannot reach a non-colocated inference engine that spans several GPUs "
+        "(tensor_parallel_size * pipeline_parallel_size > 1) while Ray masks GPUs per process: the trainer then "
+        "sees one GPU and the engine's workers see several, and RCCL never finishes connecting them. Turn Ray's "
+        "masking off for the whole run by exporting RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1 before "
+        "launching (SkyRL's AMD image sets it), or keep the engine on one GPU."
     ),
 }
 

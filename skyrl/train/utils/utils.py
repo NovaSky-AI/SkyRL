@@ -34,6 +34,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
 from skyrl.backends.skyrl_train.gpu_platform import (
     check_driver_device_masks,
     is_rocm,
+    ray_masks_amd_gpus,
     rocm_unsupported,
 )
 from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
@@ -242,7 +243,12 @@ def _validate_megatron_cfg_on_rocm(cfg: SkyRLTrainConfig):
     for worker_cfg in (cfg.trainer.policy, cfg.trainer.ref):
         megatron_config = getattr(worker_cfg, "megatron_config", None)
         transformer_kwargs = getattr(megatron_config, "transformer_config_kwargs", None) or {}
-        if is_fp8_enabled(transformer_kwargs.get("fp8")) or is_fp8_enabled(transformer_kwargs.get("fp8_param")):
+        if (
+            is_fp8_enabled(transformer_kwargs.get("fp8"))
+            or is_fp8_enabled(transformer_kwargs.get("fp8_param"))
+            # A per-module precision file selects quantization recipes without the two switches above.
+            or getattr(megatron_config, "te_precision_config_file", None)
+        ):
             raise ValueError(rocm_unsupported("fp8"))
 
     # The weights of a non-colocated engine travel over one RCCL group made of the trainer's first process
@@ -254,12 +260,13 @@ def _validate_megatron_cfg_on_rocm(cfg: SkyRLTrainConfig):
     #    (VLLMServerActor._setup_mp_gpu_visibility), whatever Ray's masking is.
     if ie_cfg.distributed_executor_backend == "mp":
         raise ValueError(rocm_unsupported("mp_executor"))
-    # 2. Ray's per-process GPU masks: the trainer sees one GPU and the workers of a multi-GPU engine see
-    #    several. With Ray's masking off every process sees every GPU and the group connects.
+    # 2. Ray's per-process GPU masks: the trainer sees one GPU and the workers of an engine that spans
+    #    several GPUs, by tensor or pipeline parallelism, see several. With Ray's masking off every process
+    #    sees every GPU and the group connects.
     if (
         get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all) == "nccl"
-        and ie_cfg.tensor_parallel_size > 1
-        and not ray_noset_visible_devices(os.environ)
+        and ie_cfg.tensor_parallel_size * ie_cfg.pipeline_parallel_size > 1
+        and ray_masks_amd_gpus()
     ):
         raise ValueError(rocm_unsupported("nccl_multi_gpu_engine"))
 

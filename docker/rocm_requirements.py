@@ -82,13 +82,13 @@ def filter_requirements(export_lines, excluded_names) -> tuple:
 
 def read_excluded(path: str) -> list:
     """Reads the excluded-packages file: one name per line, ``#`` comments and blank lines ignored."""
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip() and not line.startswith("#")]
 
 
 def cmd_filter(export_path: str, excluded_path: str) -> None:
     excluded = read_excluded(excluded_path)
-    with open(export_path) as f:
+    with open(export_path, encoding="utf-8") as f:
         try:
             kept, dropped = filter_requirements(f, excluded)
         except ValueError as e:
@@ -130,6 +130,14 @@ def installed_commit(name: str) -> Optional[str]:
     return json.loads(text).get("vcs_info", {}).get("commit_id") if text else None
 
 
+def commit_matches(pinned: str, installed: Optional[str]) -> bool:
+    """Returns True when a distribution was installed from the pinned commit.
+
+    The lock pins full hashes, so this is an exact match; an abbreviated pin matches as a prefix.
+    """
+    return installed is not None and installed.startswith(pinned)
+
+
 def _installed_version(name: str) -> Optional[str]:
     try:
         return md.version(name)
@@ -138,25 +146,26 @@ def _installed_version(name: str) -> Optional[str]:
 
 
 def cmd_verify(snapshot_path: str, req_path: Optional[str] = None) -> None:
-    with open(snapshot_path) as f:
+    with open(snapshot_path, encoding="utf-8") as f:
         before = json.load(f)
     after = versions()
-    changed = {k: (before.get(k), after[k]) for k in after if before.get(k) is not None and before.get(k) != after[k]}
+    # A protected package that was absent before and is present now came from the lock, so it counts.
+    changed = {k: (before.get(k), after[k]) for k in after if before.get(k) != after[k]}
     cuda = sorted(
-        f"{d.metadata['Name']}=={d.version}"
+        f"{d.name}=={d.version}"
         for d in md.distributions()
-        if "+cu" in d.version or re.search(r"-cu1[23]$", norm(d.metadata["Name"] or ""))
+        if "+cu" in d.version or re.search(r"-cu1[23]$", norm(d.name or ""))
     )
     print("protected versions:", after)
     # A check by package name or version does not catch a PyPI release standing in for a git pin.
     wrong_git = {}
     pins = {}
     if req_path:
-        with open(req_path) as f:
+        with open(req_path, encoding="utf-8") as f:
             pins = git_pins(f)
     for name, commit in pins.items():
         got = installed_commit(name)
-        if got is None or not got.startswith(commit[:7]):
+        if not commit_matches(commit, got):
             wrong_git[name] = {
                 "pinned": commit,
                 "installed_commit": got,
