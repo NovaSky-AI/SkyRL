@@ -305,3 +305,52 @@ class TestRayGpuMonitorFlush:
         non_empty = [r for r in results if r]
         assert len(non_empty) == 1
         assert non_empty[0]["ray/node.0.gpu.0.util"] == pytest.approx(90.0)
+
+
+_STORE_TEXT = """\
+ray_object_store_used_memory{{NodeAddress="10.0.0.1"}} {used}
+ray_object_store_available_memory{{NodeAddress="10.0.0.1"}} {available}
+ray_spill_manager_objects_bytes{{State="Spilled"}} {spilled}
+ray_spill_manager_objects_bytes{{State="Restored"}} 7.0
+ray_spill_manager_request_total{{Type="Spilled"}} {spills}
+ray_spill_manager_request_total{{Type="Restored"}} {restores}
+ray_spill_manager_request_total{{Type="FailedDeletion"}} 0.0
+ray_skyrl_skycap_loop_stall_seconds_total{{WorkerId="a"}} {stall_a}
+ray_skyrl_skycap_loop_stall_seconds_total{{WorkerId="b"}} 1.0
+"""
+
+_GB = 1024**3
+
+
+def _store_snapshot(monitor, **values):
+    text = _STORE_TEXT.format(**{"used": 30 * _GB, "available": 90 * _GB, "stall_a": 0.0, **values})
+    client = MagicMock()
+    client.get.return_value = MagicMock(text=text)
+    return monitor._collect(client)
+
+
+class TestRayGpuMonitorObjectStore:
+    def test_store_use_is_averaged_and_cumulative_counters_reported_per_flush(self):
+        monitor = RayGpuMonitor()
+        monitor._urls = ["http://10.0.0.1:8080/metrics"]
+        monitor._buffer = [
+            _store_snapshot(monitor, spilled=2 * _GB, spills=4.0, restores=1.0),
+            _store_snapshot(monitor, used=90 * _GB, available=30 * _GB, spilled=5 * _GB, spills=10.0, restores=3.0),
+        ]
+        first = monitor.flush()
+        assert first["ray/node.0.object_store_used_gb"] == pytest.approx(60.0)
+        assert first["ray/object_store.used_frac"] == pytest.approx(0.5)
+        # Counters start at zero, so the first flush reports their latest readings.
+        assert first["ray/object_store.spilled_gb"] == pytest.approx(5.0)
+        assert first["ray/object_store.spills"] == pytest.approx(10.0)
+        assert first["ray/object_store.restores"] == pytest.approx(3.0)
+        assert first["ray/skycap.loop_stall_s"] == pytest.approx(1.0)
+        assert not any(key.startswith("ray/cumulative.") for key in first)
+
+        monitor._buffer = [_store_snapshot(monitor, spilled=8 * _GB, spills=10.0, restores=6.0, stall_a=2.5)]
+        second = monitor.flush()
+        assert second["ray/object_store.spilled_gb"] == pytest.approx(3.0)
+        assert second["ray/object_store.spills"] == pytest.approx(0.0)
+        assert second["ray/object_store.restores"] == pytest.approx(3.0)
+        # Both servers' series on the node are summed.
+        assert second["ray/skycap.loop_stall_s"] == pytest.approx(2.5)

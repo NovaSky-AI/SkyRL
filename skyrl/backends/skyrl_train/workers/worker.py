@@ -89,6 +89,7 @@ from skyrl.train.utils.utils import (
     get_ray_pg_ready_with_timeout,
     ray_noset_visible_devices,
 )
+from skyrl.utils import stage_trace
 
 _SET_AFFINITY = False
 
@@ -1506,16 +1507,48 @@ class PolicyWorkerBase(Worker):
         Each microbatch is collated from its stored payloads only when it is built, so nothing holds
         the shard collated whole. The shard's rows carry their advantages with the loss reduction
         applied. When the loss reads the pre-update logprobs, a forward pass over the same
-        microbatches computes them first, so only metrics go back to the trainer.
+        microbatches computes them first, so only metrics go back to the trainer, with this call's
+        data-path metrics (``_data_path_metrics``).
         """
+        stage_trace.configure(component="policy_worker")
+        stage_trace.take_totals("mb.")  # This call's microbatch spans only.
         rows = ShardRows(shard)
-        if compute_old_logprobs:
-            rows.old_logprobs = self._old_logprobs(self._shard_microbatches(rows, select=select_forward_inputs))
-        # The trainer of a streamed step reads only metrics: build no per-token outputs.
-        output = self._forward_backward_microbatches(
-            self._shard_microbatches(rows), loss_normalization, return_per_token_outputs=False
-        )
-        return WorkerOutput(metrics=output.metrics)
+        with stage_trace.span("worker.fb_shard", rows=rows.num_rows):
+            if compute_old_logprobs:
+                with stage_trace.span("worker.old_logprobs"):
+                    rows.old_logprobs = self._old_logprobs(self._shard_microbatches(rows, select=select_forward_inputs))
+            # The trainer of a streamed step reads only metrics: build no per-token outputs.
+            output = self._forward_backward_microbatches(
+                self._shard_microbatches(rows), loss_normalization, return_per_token_outputs=False
+            )
+        return WorkerOutput(metrics={**output.metrics, **self._data_path_metrics()})
+
+    def _data_path_metrics(self) -> Dict[str, float]:
+        """Whether this call's microbatches waited on their data, each the max over every rank.
+
+        Each is this rank's figure for the call, then the max over ranks (the ``_max`` suffix is that
+        reduction). A rank on any pipeline stage that waits holds up the others, so they are reduced
+        over the whole world, not just the DP group the trainer's metrics come from:
+
+        - ``mb_fetch_total_s``: seconds blocked fetching payloads the pull-ahead hadn't brought yet,
+          summed over the call's microbatches;
+        - ``mb_fetch_slowest_s``: the slowest single fetch;
+        - ``mb_stage_exposed_total_s``/``_count``: microbatches built and uploaded while the
+          computation waited, e.g. each pass's first; the rest overlap the previous one's compute;
+        - ``mb_stage_slowest_s``: the slowest overlapped staging, the headroom against compute.
+        """
+        totals = stage_trace.take_totals("mb.")
+        _, fetch_s, fetch_slowest = totals.get("mb.fetch", (0, 0.0, 0.0))
+        exposed_count, exposed_s, _ = totals.get("mb.stage_exposed", (0, 0.0, 0.0))
+        _, _, stage_slowest = totals.get("mb.stage", (0, 0.0, 0.0))
+        local = {
+            "data_path/mb_fetch_total_s_max": fetch_s,
+            "data_path/mb_fetch_slowest_s_max": fetch_slowest,
+            "data_path/mb_stage_exposed_total_s_max": exposed_s,
+            "data_path/mb_stage_exposed_count_max": float(exposed_count),
+            "data_path/mb_stage_slowest_s_max": stage_slowest,
+        }
+        return self.strategy.all_reduce(local, op="max", group=None)
 
     def _shard_microbatches(self, rows: ShardRows, select=None) -> StoredShardBatchIterator:
         """``rows`` as token-batched microbatches, planned as ``forward_backward`` plans a batch."""
