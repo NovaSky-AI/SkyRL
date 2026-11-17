@@ -38,8 +38,8 @@ import hashlib
 import json
 import os
 import queue
-import sys
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -742,7 +742,7 @@ def _digest(path: Path) -> str:
 
 
 def main(argv: Optional[List[str]] = None, *, api: Any = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m examples.train_integrations.harbor_skycap.record_index")
+    parser = argparse.ArgumentParser(prog="python -m skyrl.integration.harbor_skycap.record_index")
     commands = parser.add_subparsers(dest="command", required=True)
     pull_parser = commands.add_parser(
         "pull", help="pull a run's records and step index from W&B into a record directory"

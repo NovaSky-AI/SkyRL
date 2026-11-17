@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import fsspec
 import pytest
 
-from examples.train_integrations.harbor_skycap import record_index
-from examples.train_integrations.harbor_skycap.record_index import (
+from skyrl.integration.harbor_skycap import record_index
+from skyrl.integration.harbor_skycap.record_index import (
     build_version,
     main,
     parse_ref,
