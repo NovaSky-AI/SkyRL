@@ -17,7 +17,9 @@
 #   AGENT=terminus-2|codex     the harness (default terminus-2); codex runs SkycapCodex in its sandbox,
 #                              reaching skycap through a Cloudflare quick tunnel (development scale:
 #                              override skycap.exposure.* for more); needs GENERATOR=skycap, and
-#                              defaults to STRATEGY=megatron and 2400 s per trial
+#                              defaults to STRATEGY=megatron and 2400 s per trial; trains with the
+#                              prompt-mean loss, and gives Codex codecontests_codex_instructions.md
+#                              as its AGENTS.md
 #   NUM_PROMPTS, GROUP_SIZE    prompts per step and samples per prompt (default 32 x 8)
 #   TASKS=a,b                  task names to run instead of the first NUM_PROMPTS
 #   EPOCHS, LR                 passes over the tasks, learning rate (default 1, 1e-6)
@@ -126,6 +128,12 @@ case "$AGENT" in
       harbor_trial_config.agent.kwargs.context_window="$MAX_MODEL_LEN"
       # Codex's slowest trials on CodeContests run past the 1200 s default (up to ~1750 s with Qwen3-8B).
       harbor_trial_config.agent.override_timeout_sec=2400
+      # How to write a new file with apply_patch, to test the solution and to act through tools: the
+      # most common ways Codex's trials fail on CodeContests.
+      harbor_trial_config.agent.kwargs.agents_md="$REPO/examples/train_integrations/harbor_skycap/codecontests_codex_instructions.md"
+      # Each task weighs the same in the loss. With token_mean a task whose trials loop for a hundred
+      # turns takes most of the update.
+      trainer.algorithm.loss_reduction=prompt_mean
       skycap.exposure.type=cloudflare
     )
     ;;

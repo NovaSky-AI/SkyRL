@@ -133,6 +133,16 @@ guidance out of its own instructions, but it sends a catalog's instructions
 unedited. `SkycapCodex` therefore makes the same edit before writing the entry,
 so the model gets the instructions it gets without a catalog, plus `apply_patch`.
 
+`harbor_trial_config.agent.kwargs.agents_md=<a local file>` gives Codex that
+file as its global `AGENTS.md` (in `CODEX_HOME`, outside the task's workspace),
+which Codex sends the model as a user message ahead of the task.
+`run_codecontests.sh` passes [`codecontests_codex_instructions.md`](codecontests_codex_instructions.md):
+how to create a file with `apply_patch`, to run the solution on the example,
+and to act through tool calls, the most common ways Codex's trials failed on
+CodeContests. With `AGENT=codex` it also trains with
+`trainer.algorithm.loss_reduction=prompt_mean`, so a task whose trials loop
+for a hundred turns doesn't take most of the update.
+
 ## Sharing a sandbox provider
 
 A remote sandbox counts against the provider account's quota, which other runs
