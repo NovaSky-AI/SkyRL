@@ -140,7 +140,7 @@ def attempt_at(tmp_path, name: str, trajectory: Any) -> TrialAttempts:
             # called a tool; one with no trajectory and one whose trajectory doesn't parse, both left out.
             [CODEX, [agent_step()], None, "{not json"],
             {
-                "avg_agent_turns": 2.0,
+                "avg_agent_steps": 2.0,
                 "avg_tool_calls": 1.5,
                 "frac_attempts_without_tool_calls": 0.5,
                 "avg_patches_applied": 0.5,
@@ -149,7 +149,7 @@ def attempt_at(tmp_path, name: str, trajectory: Any) -> TrialAttempts:
             },
         ),
         # No apply_patch call (Terminus-2): no patch counts at all.
-        ([TERMINUS], {"avg_agent_turns": 1.0, "avg_tool_calls": 1.0, "frac_attempts_without_tool_calls": 0.0}),
+        ([TERMINUS], {"avg_agent_steps": 1.0, "avg_tool_calls": 1.0, "frac_attempts_without_tool_calls": 0.0}),
         # Nothing readable: no tool metrics.
         ([None], {}),
     ],

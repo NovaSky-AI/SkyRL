@@ -1,6 +1,6 @@
 """Per-attempt metrics of Harbor trials: how long each attempt spent in each of Harbor's phases
 (sandbox start, agent, verifier), how many attempts were retries, how many failed, by
-exception type, and what the agent did: its turns and tool calls, and for Codex's ``apply_patch``
+exception type, and what the agent did: its steps and tool calls, and for Codex's ``apply_patch``
 how many patches went through, read from the trajectory Harbor writes for the attempt.
 
 They describe the environment run, not how its tokens were collected, so every generator that
@@ -31,7 +31,7 @@ PATCH_APPLIED = "Success. Updated the following files"
 class ToolUse:
     """What the agent did in one attempt, from its trajectory."""
 
-    agent_turns: int = 0
+    agent_steps: int = 0
     tool_calls: int = 0
     patches_applied: int = 0
     patches_rejected: int = 0
@@ -115,7 +115,7 @@ def _tool_use_metrics(uses: List[ToolUse]) -> Dict[str, float]:
     if not uses:
         return {}
     metrics = {
-        f"{PREFIX}/avg_agent_turns": float(np.mean([u.agent_turns for u in uses])),
+        f"{PREFIX}/avg_agent_steps": float(np.mean([u.agent_steps for u in uses])),
         f"{PREFIX}/avg_tool_calls": float(np.mean([u.tool_calls for u in uses])),
         f"{PREFIX}/frac_attempts_without_tool_calls": float(np.mean([u.tool_calls == 0 for u in uses])),
     }
@@ -129,13 +129,14 @@ def _tool_use_metrics(uses: List[ToolUse]) -> Dict[str, float]:
 
 
 def tool_use(trajectory: Mapping[str, Any]) -> ToolUse:
-    """The turns and tool calls of an ATIF trajectory: each agent step is a turn, and an ``apply_patch`` call
-    whose output doesn't report the patch applied counts as rejected."""
+    """The agent steps and tool calls of an ATIF trajectory, and an ``apply_patch`` call whose output doesn't report
+    the patch applied as rejected. Harbor's Codex trajectories hold at most one tool call per step, so steps count
+    messages and tool calls, not model calls."""
     use = ToolUse()
     for step in trajectory["steps"]:
         if step.get("source") != "agent":
             continue
-        use.agent_turns += 1
+        use.agent_steps += 1
         outputs = {
             result.get("source_call_id"): str(result.get("content") or "")
             for result in (step.get("observation") or {}).get("results") or ()
