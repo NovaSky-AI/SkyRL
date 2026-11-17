@@ -29,6 +29,16 @@ def _resolve_mtp_host(model):
     return model
 
 
+def stage_needs_input_ids(mtp_enabled: bool) -> bool:
+    """Whether this pipeline stage lays out the packed token and position ids: the first stage embeds them, and
+    under MTP the last stage too, whose MTP block re-embeds the (rolled) token ids."""
+    import megatron.core.parallel_state as mpu
+
+    return mpu.is_pipeline_first_stage(ignore_virtual=True) or (
+        mtp_enabled and mpu.is_pipeline_last_stage(ignore_virtual=True)
+    )
+
+
 def _mtp_layer_offset(mtp_block) -> int:
     """Number of passthrough chunks ahead of this stage's MTP-depth chunks.
 

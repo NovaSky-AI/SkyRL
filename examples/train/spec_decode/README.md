@@ -10,6 +10,7 @@ Requires the `megatron` backend and the `vllm` inference engine, plus an MTP-cap
 trainer.mtp.enabled=true \
 trainer.mtp.num_speculative_tokens=3 \      # vLLM draft depth
 trainer.mtp.loss_weight=0.2 \               # weight of the draft loss
+trainer.mtp.loss_type=distribution \        # distill the policy's distribution (default: hard_label)
 trainer.policy.megatron_config.mtp_loss_topk=256   # top-k soft CE (memory-efficient)
 ```
 

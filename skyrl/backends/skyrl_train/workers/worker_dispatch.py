@@ -475,6 +475,16 @@ class WorkerDispatch:
         self._save_memory_snapshot(model, "optim_step")
         return grad_norms[0]
 
+    def mtp_grad_norm(self, model: str) -> Optional[float]:
+        """The MTP heads' own pre-clip grad norm from the last ``optim_step``, for the ``mtp_grad_norm`` metric.
+
+        The separate grad clip (``mtp/grad_clip.py``) stores it on each worker's optimizer, and every rank holds
+        the same value (a collective reduction), so rank 0's is returned; ``optim_step`` itself returns the
+        policy's norm. None after a step skipped on inf/nan grads.
+        """
+        refs = self._actor_groups[model].async_run_ray_method("pass_through", "mtp_grad_norm")
+        return deadline.ray_get(refs, "mtp_grad_norm")[0]
+
     def set_optimizer_hparams(self, model: str, adam_params, model_id: Optional[str] = None) -> None:
         """Apply the request's AdamParams to the model's optimizer on all workers.
 

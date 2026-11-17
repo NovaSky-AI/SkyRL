@@ -29,6 +29,12 @@ def test_single_role_does_not_create_colocated_gpu_pool(runtime_role):
     assert config.trainer.placement.colocate_all is False
 
 
+def test_build_config_rejects_mtp():
+    overrides = MegatronBackendOverrides(**{"trainer.mtp.enabled": True})
+    with pytest.raises(ValueError, match="trainer.mtp.enabled=true is not supported on the Tinker backend yet"):
+        _build_skyrl_train_config("Qwen/Qwen3-0.6B", overrides)
+
+
 def test_inference_runtime_starts_without_trainer_dispatch():
     backend = object.__new__(SkyRLTrainBackend)
     backend.base_model = "Qwen/Qwen3-0.6B"
