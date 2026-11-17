@@ -340,7 +340,8 @@ class MegatronWorker:
         if not attentions:
             raise ValueError("kv_cache_qat needs absorbed-MLA (DSA) attention; this model has none")
         check_kv_cache_qat_config(attentions[0].config)
-        install_kv_cache_qat(mc.kv_cache_qat_format)
+        rounding = mc.kv_cache_qat_rounding
+        install_kv_cache_qat(mc.kv_cache_qat_format, bool(rounding.four_over_six), rounding.stochastic_rounding)
         logger.info(f"KV cache QAT: rank {self._rank}, {len(attentions)} attention layers, {mc.kv_cache_qat_format}.")
 
     def init_configs(

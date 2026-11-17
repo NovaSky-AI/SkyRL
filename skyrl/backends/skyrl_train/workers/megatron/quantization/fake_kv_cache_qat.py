@@ -20,6 +20,11 @@ megatron's own norm and RoPE backward unchanged. Nothing extra is saved for back
 
 Formats: ``nvfp4_ds_mla`` (E2M1 latent with E4M3 scales per 16, E4M3 RoPE) and ``fp8_ds_mla`` (E4M3 latent with fp32
 scales per 128, bf16 RoPE).
+
+Trainer-side rounding (``kv_cache_qat_rounding``; the rollouts' cache is unchanged): 4/6 block scales
+(``nvfp4_ds_mla``) and stochastic rounding, as described in ``kernels.kv_cache_round_trip``. Stochastic rows draw a
+fresh seed from the CUDA generator in each forward; activation checkpointing restores the generator, so the recompute
+redraws the same rows.
 """
 
 from __future__ import annotations
@@ -50,7 +55,8 @@ MAX_POSITIONS = 1 << 20
 # and vLLM's bf16 cos/sin vs megatron's fp32 ones move it by ~3e-2 (GLM-5.3).
 _POSITION_CHECK_TOL = 0.1
 
-_installed_format: Optional[KvCacheFormat] = None
+# (format, four_over_six, stochastic) once installed.
+_installed: Optional[tuple[KvCacheFormat, bool, bool]] = None
 _position_check_pending = True
 
 
@@ -201,13 +207,18 @@ def _check_positions(key: torch.Tensor, rows: torch.Tensor) -> None:
     logger.info(f"KV cache QAT: trainer vs cache-row RoPE'd k_pe agree at the derived positions (rel {rel:.2e}).")
 
 
-def _wrap_get_query_key_value_tensors(orig: Callable, fmt: KvCacheFormat) -> Callable:
+def _wrap_get_query_key_value_tensors(
+    orig: Callable, fmt: KvCacheFormat, four_over_six: bool = False, stochastic: bool = False
+) -> Callable:
     from megatron.core.tensor_parallel.mappings import (
         gather_from_sequence_parallel_region,
     )
 
     from skyrl.backends.skyrl_train.kernels.kv_cache_round_trip import (
         kv_cache_round_trip,
+    )
+    from skyrl.backends.skyrl_train.kernels.nvfp4_quant.fused_rt import (
+        activation_seed,
     )
 
     @functools.wraps(orig)
@@ -248,8 +259,12 @@ def _wrap_get_query_key_value_tensors(orig: Callable, fmt: KvCacheFormat) -> Cal
         norm_weight = self.kv_layernorm.weight.detach()
         cos_sin = _cos_sin_cache(kv.device, cfg.rotary_base)
         nvfp4 = fmt == KvCacheFormat.NVFP4_DS_MLA
+        seed = activation_seed(kv.device) if stochastic else None
         rows = _CacheRowStraightThrough.apply(
-            key, lambda: kv_cache_round_trip(kv, positions, norm_weight, cfg.layernorm_epsilon, cos_sin, nvfp4)
+            key,
+            lambda: kv_cache_round_trip(
+                kv, positions, norm_weight, cfg.layernorm_epsilon, cos_sin, nvfp4, four_over_six, seed
+            ),
         )
         if _position_check_pending:
             _check_positions(key.detach(), rows.detach())
@@ -274,23 +289,31 @@ def check_kv_cache_qat_config(config: Any) -> None:
         raise ValueError(f"KV cache QAT does not support this attention: {', '.join(problems)}")
 
 
-def install_kv_cache_qat(fmt: KvCacheFormat | str) -> None:
-    """Make every ``AbsorbedMLASelfAttention`` in this process attend over ``fmt`` cache rows, once per process."""
-    global _installed_format
+def install_kv_cache_qat(fmt: KvCacheFormat | str, four_over_six: bool = False, stochastic: bool = False) -> None:
+    """Make every ``AbsorbedMLASelfAttention`` in this process attend over ``fmt`` cache rows, once per process;
+    ``four_over_six`` / ``stochastic``: the trainer-side rounding variants (module docstring)."""
+    global _installed
     fmt = KvCacheFormat(fmt)
-    if _installed_format is not None:
-        if _installed_format != fmt:
-            raise ValueError(f"KV cache QAT already installed for {_installed_format}")
+    if four_over_six and fmt != KvCacheFormat.NVFP4_DS_MLA:
+        raise ValueError(f"KV cache QAT: 4/6 block scales apply to nvfp4_ds_mla only, got {fmt.value}")
+    setting = (fmt, four_over_six, stochastic)
+    if _installed is not None:
+        if _installed != setting:
+            raise ValueError(f"KV cache QAT already installed as (format, four_over_six, stochastic)={_installed}")
         return
     from megatron.core.transformer.experimental_attention_variant.absorbed_mla import (
         AbsorbedMLASelfAttention,
     )
 
     AbsorbedMLASelfAttention.get_query_key_value_tensors = _wrap_get_query_key_value_tensors(
-        AbsorbedMLASelfAttention.get_query_key_value_tensors, fmt
+        AbsorbedMLASelfAttention.get_query_key_value_tensors, fmt, four_over_six, stochastic
     )
-    _installed_format = fmt
-    logger.info(f"KV cache QAT: absorbed-MLA keys are the dequantized vLLM {fmt.value} cache rows.")
+    _installed = setting
+    variant = ", ".join(v for v, on in (("4/6 block scales", four_over_six), ("stochastic rounding", stochastic)) if on)
+    logger.info(
+        f"KV cache QAT: absorbed-MLA keys are the dequantized vLLM {fmt.value} cache rows"
+        + (f", with the trainer's {variant}." if variant else ".")
+    )
 
 
 def absorbed_mla_attentions(model: Any) -> list:

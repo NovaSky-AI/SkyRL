@@ -488,9 +488,12 @@ def _apply_kv_cache_qat_cfg(cfg: SkyRLTrainConfig) -> None:
 
     mc = cfg.trainer.policy.megatron_config
     name = "trainer.policy.megatron_config.kv_cache_qat"
+    rounding = mc.kv_cache_qat_rounding
     if not mc.kv_cache_qat:
         if mc.kv_cache_qat_format is not None:
             raise ValueError(f"{name}_format is set but {name} is off")
+        if rounding.four_over_six or rounding.stochastic_rounding:
+            raise ValueError(f"{name}_rounding is set but {name} is off")
         return
     if cfg.trainer.strategy != "megatron":
         raise ValueError(f"{name} needs trainer.strategy=megatron")
@@ -512,6 +515,15 @@ def _apply_kv_cache_qat_cfg(cfg: SkyRLTrainConfig) -> None:
             f"{name}_format={mc.kv_cache_qat_format!r} disagrees with the engines' kv_cache_dtype {kv_dtype!r}"
         )
     mc.kv_cache_qat_format = kv_dtype
+    if rounding.four_over_six is None:
+        rounding.four_over_six = False  # vLLM's cache writer: absmax
+    elif rounding.four_over_six:
+        if kv_dtype != KvCacheFormat.NVFP4_DS_MLA:
+            raise ValueError(f"{name}_rounding.four_over_six applies to nvfp4_ds_mla only, got {kv_dtype!r}")
+        logger.warning(
+            f"{name}_rounding.four_over_six=true: the trainer rounds its cache rows with 4/6 block scales, the rollouts' "
+            "vLLM cache with absmax"
+        )
 
 
 def validate_step_timeouts(step_timeout_s: Optional[float], weight_sync_timeout_s: Optional[float]) -> None:

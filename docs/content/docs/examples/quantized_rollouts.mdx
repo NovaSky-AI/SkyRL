@@ -86,6 +86,8 @@ On a 7-layer slice of GLM-5.3 (3 dense and 4 MoE layers, real weights, routing r
 
 For reference, a BF16 trainer against BF16 rollouts with a BF16 cache gives 0.0095 (1.0e-4). The slice has relatively more attention than MoE layers than the full model, which overstates the cache's share.
 
+`kv_cache_qat_rounding` gives the cache rows the same trainer-side knobs as the experts: `four_over_six` (`nvfp4_ds_mla` only; default off, as vLLM's cache writer is absmax) and `stochastic_rounding` (default off; the E2M1 latent and E4M3 RoPE, or the `fp8_ds_mla` E4M3 latent, on the round-to-nearest scales). Either makes the trainer's rows differ from the cache the rollouts attend over; the default reproduces it exactly. On Blackwell the hardware's `cvt.rs` rounds.
+
 ## Enabling off-policy correction (TIS)
 
 To apply TIS, we need the inference engine to return the rollout logprobs for the generated tokens, and we configure the correction on the policy loss:

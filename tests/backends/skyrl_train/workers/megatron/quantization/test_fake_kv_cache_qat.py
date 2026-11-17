@@ -118,3 +118,32 @@ def test_attention_geometry_check():
         kvq.check_kv_cache_qat_config(SimpleNamespace(**{**vars(good), "kv_lora_rank": 448}))
     with pytest.raises(ValueError, match="rotary_scaling_factor"):
         kvq.check_kv_cache_qat_config(SimpleNamespace(**{**vars(good), "rotary_scaling_factor": 40.0}))
+
+
+def test_rounding_defaults_to_the_rollouts_cache():
+    cfg = _cfg("nvfp4_ds_mla")
+    _apply_kv_cache_qat_cfg(cfg)
+    rounding = cfg.trainer.policy.megatron_config.kv_cache_qat_rounding
+    assert rounding.four_over_six is False and rounding.stochastic_rounding is False
+
+
+@pytest.mark.parametrize("fmt", ["nvfp4_ds_mla", "fp8_ds_mla"])
+@pytest.mark.parametrize("four_over_six", [False, True])
+def test_trainer_rounding_variants(fmt, four_over_six):
+    """4/6 block scales are NVFP4-only; stochastic rounding applies to both formats."""
+    cfg = _cfg(fmt)
+    rounding = cfg.trainer.policy.megatron_config.kv_cache_qat_rounding
+    rounding.four_over_six, rounding.stochastic_rounding = four_over_six, True
+    if four_over_six and fmt == "fp8_ds_mla":
+        with pytest.raises(ValueError, match="nvfp4_ds_mla only"):
+            _apply_kv_cache_qat_cfg(cfg)
+    else:
+        _apply_kv_cache_qat_cfg(cfg)
+        assert rounding.four_over_six is four_over_six and rounding.stochastic_rounding
+
+
+def test_off_rejects_rounding():
+    cfg = SkyRLTrainConfig()
+    cfg.trainer.policy.megatron_config.kv_cache_qat_rounding.stochastic_rounding = True
+    with pytest.raises(ValueError, match="rounding is set but"):
+        _apply_kv_cache_qat_cfg(cfg)
