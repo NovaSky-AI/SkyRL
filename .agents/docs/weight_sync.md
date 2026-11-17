@@ -561,7 +561,7 @@ receive path needs no SkyRL wrapper.
 vLLM's MTP drafter is a separate model that the main model's load never touches, and
 colocated sleep at level 2 discards its weights. Every supported speculative method (MTP)
 drafts from the policy checkpoint, so under `speculative_config` each sync runs **two
-sessions**: the main model, then the drafter.
+sessions**: the main model, then the drafter. `sharded_rdt` is the exception (below).
 
 - `/start_draft_weight_update` retargets the worker's receive engine at the drafter
   (`set_weight_update_target`) for one session; `/finish_weight_update` restores it. The
@@ -573,8 +573,13 @@ sessions**: the main model, then the drafter.
   `self.source` swapped for `skyrl_draft_source`, over the same transport.
 - `delta`: the published checkpoint already carries the MTP head, so the trainer re-applies
   the same version inside the pause.
-- `sharded_rdt`: unsupported. Its pull plan targets one model, so `build_trainer_engine`
-  and config validation refuse it.
+- `sharded_rdt`: no draft session; the drafter syncs in the target's. The trainer's plan
+  carries the MTP layer as one more group (`MegatronStackedWeightSource` keys its experts by
+  the HF layer the bridge maps it to). At server start each worker hands its drafter to the
+  receive engine (`inference_servers/draft_model.attach_draft_model`, over `collective_rpc`, ->
+  `skyrl_set_draft_model`); the bake gives the
+  names the target's `load_weights` skipped to the drafter's, and the drafter's own modules
+  reload and finalize alongside the target's.
 
 The draft source is `MegatronPolicyWorkerBase._build_draft_weight_source`: a
 `MegatronWeightSource` filtered to the MTP block plus the embedding and output layer. The
@@ -655,6 +660,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | `register.py` (either factory) | `test_registration.py` (CPU) — it *resolves* each entry, not just membership |
 | `weight_receivers.py` (receive side) | GPU `test_weight_sync.py` — it runs inside the vLLM worker. The LoRA staging branch is also covered on CPU by `test_lora_receive.py` against a stand-in engine |
 | Draft session (`draft_session`, `SkyrlDraftSessionMixin`, `_build_draft_weight_source`) | `test_draft_session.py` (CPU) **and** GPU `megatron/test_mtp_weight_sync.py` |
+| The `sharded_rdt` drafter (`draft_model.attach_draft_model`, `skyrl_set_draft_model`, the drafter pass of the bake) | `test_sharded_rdt_draft.py` (CPU only) |
 | The LoRA target (`lora_target.py`, the LoRA source, `patch_lora_in_memory.py`) | `test_lora_target.py` + `test_lora_receive.py` + `test_sources.py::TestLoraAdapterWeightSource` (CPU), then GPU `test_lora.py -k megatron_adapter` (disk and memory, colocated and not; the memory rows assert nothing was written to `lora_sync_path`) |
 | `NewInferenceWorkerWrap` | GPU `test_weight_sync.py` (CPU tests will not catch regressions) |
 | Delta publish / manifest / payload format | `test_delta_checkpoint.py` **and** GPU `test_delta_weight_sync_e2e.py` |

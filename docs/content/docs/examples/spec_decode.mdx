@@ -24,7 +24,7 @@ Since the policy distribution changes in RL, the drafter must be co-trained to s
 There are two pieces:
 
 1. **Training the head** — a decoupled draft loss trains the MTP head on the policy's own outputs on the Megatron backend.
-2. **Drafting with it** — the trained head is handed to vLLM as an MTP drafter. Every weight sync reloads it in vLLM's native draft session, right after the policy.
+2. **Drafting with it** — the trained head is handed to vLLM as an MTP drafter. Every weight sync reloads it: in vLLM's native draft session right after the policy under `nccl` and `delta`, or in the policy's own session under `sharded_rdt`.
 
 ### How does it work?
 
@@ -51,7 +51,7 @@ The draft loss is `megatron` backend only. `trainer.mtp.enabled=true` under `tra
 </Callout>
 
 <Callout type="warn">
-Syncing the drafter requires the `megatron` backend and the `nccl` (default) or `delta` weight sync backend. Sharded RDT, serialized FP8 weight sync, and adapter-only LoRA (`merge_lora=false`) are rejected at config validation.
+Syncing the drafter requires the `megatron` backend and the `nccl` (default), `delta` or `sharded_rdt` weight sync backend. Serialized FP8 weight sync and adapter-only LoRA (`merge_lora=false`) are rejected at config validation.
 </Callout>
 
 ## Configuration

@@ -405,13 +405,6 @@ def _validate_draft_weight_sync_cfg(cfg: SkyRLTrainConfig):
             f"speculative_config={spec} syncs the drafter from the policy's MTP head, which requires "
             f"trainer.strategy='megatron' (got {cfg.trainer.strategy!r}): the FSDP model carries no MTP head"
         )
-    from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
-
-    if get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all) == "sharded_rdt":
-        raise ValueError(
-            f"speculative_config={spec} is not supported with weight_sync_backend={ie_cfg.weight_sync_backend!r}: "
-            "its pull plan targets one model. Use 'nccl' or 'delta'."
-        )
     if ie_cfg.fp8_weight_sync_mode is not None:
         raise ValueError(
             f"speculative_config={spec} is not supported with fp8_weight_sync_mode={ie_cfg.fp8_weight_sync_mode!r}: "

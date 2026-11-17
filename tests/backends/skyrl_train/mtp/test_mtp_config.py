@@ -133,7 +133,7 @@ def _spec_cfg(strategy="megatron", weight_sync_backend="nccl", colocate_all=Fals
 
 @pytest.mark.parametrize(
     ("weight_sync_backend", "colocate_all"),
-    [("nccl", False), ("nccl", True), ("delta", False)],
+    [("nccl", False), ("nccl", True), ("delta", False), ("sharded_rdt", False), ("rdt", False)],
 )
 def test_draft_weight_sync_cfg_accepts_megatron_full_weight_backends(weight_sync_backend, colocate_all):
     _validate_draft_weight_sync_cfg(_spec_cfg(weight_sync_backend=weight_sync_backend, colocate_all=colocate_all))
@@ -149,12 +149,6 @@ def test_draft_weight_sync_cfg_noop_without_spec_decode():
 def test_draft_weight_sync_cfg_rejects_fsdp():
     with pytest.raises(ValueError, match="requires trainer.strategy='megatron'"):
         _validate_draft_weight_sync_cfg(_spec_cfg(strategy="fsdp"))
-
-
-@pytest.mark.parametrize("backend", ["sharded_rdt", "rdt"])
-def test_draft_weight_sync_cfg_rejects_sharded_rdt(backend):
-    with pytest.raises(ValueError, match=f"weight_sync_backend={backend!r}"):
-        _validate_draft_weight_sync_cfg(_spec_cfg(weight_sync_backend=backend))
 
 
 def test_draft_weight_sync_cfg_rejects_fp8_weight_sync():

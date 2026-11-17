@@ -39,6 +39,7 @@ from skyrl.backends.skyrl_train.inference_servers.common import (
     format_http_url,
     get_node_ip,
 )
+from skyrl.backends.skyrl_train.inference_servers.draft_model import attach_draft_model
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     CLAMPED_LOGPROB,
     PackedField,
@@ -53,6 +54,7 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     CompactSampleSupport,
 )
 from skyrl.backends.skyrl_train.weight_sync.lora_target import in_memory_lora_path
+from skyrl.backends.skyrl_train.weight_sync.register import RDT_BACKEND
 from skyrl.env_vars import (
     SKYRL_HTTP_CONNECTION_LIMIT,
     SKYRL_VLLM_DP_PORT_OFFSET,
@@ -248,7 +250,8 @@ class VLLMServerActor(ServerActorProtocol):
         os.environ["VLLM_SERVER_DEV_MODE"] = "1"
         # Enable runtime LoRA loading/unloading via /v1/load_lora_adapter endpoint
         os.environ["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "1"
-        # TODO (aaron): once native ipc stops needing this, remove
+        # TODO (aaron): once native ipc stops needing this, remove. Also needed to send a function over
+        # collective_rpc (draft_model.attach_draft_model).
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
         # Configure the distributed executor backend
@@ -741,6 +744,11 @@ async def _build_and_serve_vllm_server(
         stat_loggers=stat_loggers,
     )
     logger.info(f"Engine initialized on {cli_args.host}:{cli_args.port}, adding custom endpoints...")
+    wtc = engine_args.weight_transfer_config
+    if engine_args.speculative_config is not None and wtc is not None and wtc.backend == RDT_BACKEND:
+        # sharded_rdt syncs the drafter in the target's sessions, so its receive engine needs it before init.
+        if not any(await engine.collective_rpc(attach_draft_model)):
+            raise RuntimeError("sharded_rdt + speculative decoding: no worker holds a drafter to sync")
 
     # Add custom SkyRL endpoints
     metrics_info = None
