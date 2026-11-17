@@ -923,8 +923,8 @@ class WorkerDispatch:
                     #   all-reduce forever (and the sync never completes).
                     # - disk sync: each DP rank swaps the adapter whenever its own load_lora_adapter lands, so with
                     #   expert parallelism a single forward can mix old and new adapter weights across ranks.
-                    # TODO: this pauses every adapter's generation on each tenant's sync. Revisit with multi-LoRA
-                    # users (e.g. an engine-side swap at a common DP step instead of a global pause).
+                    # TODO: this pauses every adapter's generation on each tenant's sync; consider an engine-side
+                    # swap at a common DP step instead of a global pause.
                     await self._inference_engine_client.pause_generation()
                     async with cleanup_preserving_primary(
                         self._inference_engine_client.resume_generation, "resume_generation"
