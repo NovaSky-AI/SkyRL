@@ -18,10 +18,14 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     split_for_dp,
 )
 from skyrl.backends.skyrl_train.training_batch import (
+    DP_BATCH_SIZE_KEY,
     MICROBATCH_SIZES_KEY,
     TrainingInputBatch,
 )
-from skyrl.backends.skyrl_train.workers.worker_utils import TokenBasedBatchIterator
+from skyrl.backends.skyrl_train.workers.worker_utils import (
+    TokenBasedBatchIterator,
+    mean_samples_per_rank,
+)
 from skyrl.train.dataset.bin_packing import balanced_dp_assignment, make_seq_packer
 
 CAP, DP = 10752, 16
@@ -79,6 +83,17 @@ def test_assignment_needs_fewer_slots_and_balances_ranks_and_slots():
 
 def test_assignment_edge_cases():
     assert balanced_dp_assignment([10, 20], 4, 100) is None  # fewer samples than ranks
+    # Not a multiple of dp_size: 2 micro-batches cannot hold three 90-token samples under the cap,
+    # and 4 micro-batches are more than the samples. The caller uses the default split (which
+    # rejects such a batch).
+    assert balanced_dp_assignment([90, 90, 90], 2, 100) is None
+    with pytest.raises(AssertionError):
+        split_for_dp(_batch([60, 60, 60]), dp_size=2, balance_max_tokens=64)
+    # A multiple of dp_size: no micro-batch with more than one sample is above the cap.
+    for lengths in ([90] * 6, [90, 90, 90, 5, 5, 5], [70, 60, 50, 40, 30, 20, 10, 5]):
+        for slots in balanced_dp_assignment(lengths, 2, 100):
+            for mb in slots:
+                assert len(mb) == 1 or sum(lengths[i] for i in mb) <= 100
     # A sample longer than the cap gets a micro-batch of its own.
     assignment = balanced_dp_assignment([500, 10, 10, 10], 2, 100)
     assert sorted(len(mb) for slots in assignment for mb in slots) == [1, 3]
@@ -132,6 +147,30 @@ def test_split_for_dp_balanced_chunks_and_order_restore():
     assert restore_sample_order([], order) == []
     with pytest.raises(ValueError):
         restore_sample_order(["x"], order)
+
+
+def test_sample_mean_weights_are_equal_for_every_sample():
+    """A sample-mean loss term (KL, entropy, critic) weights each sample by 1 / batch size."""
+    lengths = [60, 58, 55, 50, 6, 5, 4, 4, 3, 3, 2, 2]
+    dp_size = 2
+    infos = [
+        ActorInfo(None, MeshRank(dp=i, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size, pp_size=1))
+        for i in range(dp_size)
+    ]
+    for balance_max_tokens in (0, 64):
+        chunks, _ = split_for_dp(_batch(lengths), dp_size=dp_size, balance_max_tokens=balance_max_tokens)
+        if balance_max_tokens:
+            assert len({len(chunk) for chunk in chunks}) > 1  # ranks hold different numbers of samples
+            assert all(chunk.metadata[DP_BATCH_SIZE_KEY] == len(lengths) for chunk in chunks)
+        per_sample_weights = []
+        for chunk in chunks:
+            for microbatch in TokenBasedBatchIterator(chunk, max_tokens_per_microbatch=64):
+                # The worker scales a micro-batch mean by this weight; the DP average divides by dp_size.
+                weight = len(microbatch) / mean_samples_per_rank(chunk, infos[0].rank)
+                per_sample_weights += [weight / len(microbatch) / dp_size] * len(microbatch)
+        assert per_sample_weights == pytest.approx([1 / len(lengths)] * len(lengths))
+    # A slice of a chunk carries the chunk metadata, but it is weighted by its own size.
+    assert mean_samples_per_rank(chunks[0][0:2], None) == 2
 
 
 def test_worker_iterator_keeps_the_driver_packing():

@@ -10,6 +10,7 @@ from ray import ObjectRef
 from ray.actor import ActorHandle
 
 from skyrl.backends.skyrl_train.training_batch import (
+    DP_BATCH_SIZE_KEY,
     MICROBATCH_SIZES_KEY,
     TrainingInputBatch,
     TrainingOutputBatch,
@@ -57,6 +58,7 @@ def split_for_dp(
         chunk = data.__class__({key: (None if value is None else value[index]) for key, value in data.items()})
         chunk.metadata = dict(data.metadata or {})
         chunk.metadata[MICROBATCH_SIZES_KEY] = [len(microbatch) for microbatch in microbatches]
+        chunk.metadata[DP_BATCH_SIZE_KEY] = len(data)
         chunks.append(chunk)
         sample_order.extend(indices)
     return chunks, sample_order

@@ -268,10 +268,14 @@ def balanced_dp_assignment(
     micro-batch within ``bin_capacity`` (a sequence longer than the capacity still gets a
     micro-batch of its own, as in :class:`Balanced`).
 
-    Returns ``None`` when there are fewer sequences than ranks.
+    Returns ``None`` when there are fewer sequences than ranks, or when the number of sequences
+    is not a multiple of ``dp_size``. The micro-batch count is a multiple of ``dp_size`` and
+    cannot be larger than the number of sequences. With a multiple of ``dp_size`` sequences, the
+    count can grow until every sequence has a micro-batch of its own, so no micro-batch with
+    more than one sequence is above the capacity.
     """
     num_sequences = len(sequence_lengths)
-    if dp_size < 1 or num_sequences < dp_size:
+    if dp_size < 1 or num_sequences < dp_size or num_sequences % dp_size != 0:
         return None
     order = sorted(range(num_sequences), key=lambda i: sequence_lengths[i], reverse=True)
 

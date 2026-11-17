@@ -67,6 +67,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     all_reduce_metrics,
     compute_minibatch_rollout_logprob_diff_metrics,
     get_microbatch_iterator,
+    mean_samples_per_rank,
     reduce_metrics,
 )
 from skyrl.env_vars import (
@@ -1099,7 +1100,9 @@ class PolicyWorkerBase(Worker):
 
         for microbatch in microbatch_iterator:
             experience = BaseBatchIterator.batch_to_experience(microbatch)
-            microbatch_weight = len(microbatch) / len(data)
+            # Weight of this micro-batch in a mean over the samples of the whole batch, after the
+            # DP gradient average (the ranks can hold different numbers of samples).
+            microbatch_weight = len(microbatch) / mean_samples_per_rank(data, getattr(self, "mesh_rank", None))
             metrics = self._forward_backward_micro(
                 experience,
                 microbatch_weight,
@@ -1702,7 +1705,7 @@ class CriticWorkerBase(Worker):
             if use_token_batching:
                 # With token-based batching, microbatches may have different sizes.
                 # Scale loss by microbatch_weight so gradients are correctly weighted.
-                microbatch_weight = len(microbatch) / len(data)
+                microbatch_weight = len(microbatch) / mean_samples_per_rank(data, getattr(self, "mesh_rank", None))
                 metrics = self._forward_backward_micro(experience, microbatch_weight=microbatch_weight)
             else:
                 metrics = self._forward_backward_micro(experience)

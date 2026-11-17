@@ -2,7 +2,8 @@
 The token-balanced DP split (``trainer.balance_dp_tokens``) gives the same update as the default split.
 
 One fixed batch goes through a fresh policy twice: with the default split, and with the
-token-balanced split. The two runs must agree on the per-sample log-probs (in batch order), the
+token-balanced split. Each run is a test of its own (a fresh Ray cluster from the fixture), and a
+third test compares them. The two runs must agree on the per-sample log-probs (in batch order), the
 gradient norm of the optimizer step, and the per-sample log-probs after that step. Samples have
 different lengths and different advantages, so a wrong sample order or a split-dependent loss
 scale changes these values.
@@ -34,10 +35,7 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
 from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
 from skyrl.train.config import SkyRLTrainConfig
 from skyrl.train.utils.utils import validate_cfg
-from tests.backends.skyrl_train.gpu.utils import (
-    init_worker_with_type,
-    ray_init_for_tests,
-)
+from tests.backends.skyrl_train.gpu.utils import init_worker_with_type
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 SEQ_LENS = [60, 58, 55, 50, 40, 30, 22, 20, 12, 10, 8, 8, 6, 6, 5, 5]
@@ -140,17 +138,32 @@ def _run(strategy: str, balance_max_tokens: int) -> dict:
     }
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("strategy", ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)])
-async def test_balanced_split_gives_the_same_update(ray_init_fixture, strategy):
-    default = _run(strategy, balance_max_tokens=0)
-    ray.shutdown()
-    ray_init_for_tests()
-    balanced = _run(strategy, balance_max_tokens=MAX_TOKENS)
+STRATEGIES = ["fsdp2", pytest.param("megatron", marks=pytest.mark.megatron)]
+# Results of the two arms, by (strategy, arm). Each arm is a test of its own, so each one gets a
+# fresh Ray cluster and fresh GPUs from ``ray_init_fixture``. The comparison test reads both.
+_RESULTS: dict = {}
 
-    assert default["order"] is None
-    assert balanced["order"] is not None and balanced["order"] != sorted(balanced["order"])
-    assert balanced["num_padding_microbatches"] == 0
+
+@pytest.mark.parametrize("strategy", STRATEGIES)
+def test_default_split_arm(ray_init_fixture, strategy):
+    result = _run(strategy, balance_max_tokens=0)
+    assert result["order"] is None
+    _RESULTS[(strategy, "default")] = result
+
+
+@pytest.mark.parametrize("strategy", STRATEGIES)
+def test_balanced_split_arm(ray_init_fixture, strategy):
+    result = _run(strategy, balance_max_tokens=MAX_TOKENS)
+    assert result["order"] is not None and result["order"] != sorted(result["order"])
+    assert result["num_padding_microbatches"] == 0
+    _RESULTS[(strategy, "balanced")] = result
+
+
+@pytest.mark.parametrize("strategy", STRATEGIES)
+def test_balanced_split_gives_the_same_update(strategy):
+    if (strategy, "default") not in _RESULTS or (strategy, "balanced") not in _RESULTS:
+        pytest.fail("this test needs the two arm tests of the same strategy to run first and pass")
+    default, balanced = _RESULTS[(strategy, "default")], _RESULTS[(strategy, "balanced")]
 
     logprobs_diff = (default["logprobs"] - balanced["logprobs"]).abs()
     after_diff = (default["logprobs_after"] - balanced["logprobs_after"]).abs()

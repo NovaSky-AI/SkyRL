@@ -6,6 +6,7 @@ import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.training_batch import (
+    DP_BATCH_SIZE_KEY,
     MICROBATCH_SIZES_KEY,
     PACKED_FIELD_PADDING,
     TensorBatch,
@@ -145,6 +146,26 @@ def all_reduce_metrics(
     status_mean.update(status_max)
     status_mean.update(status_sum)
     return status_mean
+
+
+def mean_samples_per_rank(data: TrainingInputBatch, mesh_rank) -> float:
+    """The number of samples of the whole batch divided by the data-parallel size.
+
+    A loss term that is a mean over samples is weighted per micro-batch by
+    ``len(microbatch) / mean_samples_per_rank``. The data-parallel gradient average over the ranks
+    then gives every sample of the batch the same weight.
+
+    With the default split every rank holds the same number of samples, so this is ``len(data)``
+    and ``mesh_rank`` is not read. With the token-balanced split the ranks can hold different
+    numbers of samples, and the driver puts the batch size in the chunk metadata
+    (``DP_BATCH_SIZE_KEY``). A slice of a chunk still carries the metadata of the whole chunk; it
+    is used only when it covers ``data``.
+    """
+    metadata = data.metadata or {}
+    sizes, batch_size = metadata.get(MICROBATCH_SIZES_KEY), metadata.get(DP_BATCH_SIZE_KEY)
+    if sizes and batch_size and sum(sizes) == len(data):
+        return batch_size / mesh_rank.dp_size
+    return len(data)
 
 
 class BaseBatchIterator:
