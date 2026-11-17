@@ -1712,10 +1712,17 @@ class MTPConfig(BaseConfig):
     the whole mini-batch. See ``MegatronConfig.mtp_loss_weight``."""
     loss_type: str = MTPLossType.HARD_LABEL.value
     """Draft loss for the MTP heads: ``"distribution"`` or ``"hard_label"``; see ``MTPLossType``."""
+    lr: Optional[float] = None
+    """Peak learning rate of the MTP heads, in their own Megatron optimizer parameter group; ``None`` uses the
+    policy's ``optimizer_config.lr``. The group follows the policy's schedule, with ``min_lr`` at the policy's
+    ``min_lr / lr`` ratio. At an RL lr such as 1e-6 a pretrained head barely moves (Adam moves each weight by
+    about the lr per step), so a head that should track the policy usually needs a larger one."""
 
     def __post_init__(self) -> None:
         if self.loss_type not in MTP_LOSS_TYPES:
             raise ValueError(f"trainer.mtp.loss_type must be one of {MTP_LOSS_TYPES}, got {self.loss_type!r}.")
+        if self.lr is not None and self.lr <= 0:
+            raise ValueError(f"trainer.mtp.lr must be > 0, got {self.lr}")
 
 
 # ---------------------------------------------------------------------------

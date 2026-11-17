@@ -352,9 +352,17 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
     mtp = cfg.trainer.mtp
     mcfg = cfg.trainer.policy.megatron_config
     if not mtp.enabled:
+        if mtp.lr is not None:
+            logger.warning("trainer.mtp.lr is ignored: trainer.mtp.enabled=false, so no MTP heads are trained.")
         # Explicit 0 force-disables MTP even on MTP-capable models.
         mcfg.mtp_num_layers = 0
         return
+    if mtp.lr is None:
+        logger.warning(
+            "trainer.mtp.lr is not set, so the MTP heads train at the policy's learning rate "
+            f"({cfg.trainer.policy.optimizer_config.lr}). A pretrained head barely moves at an RL learning rate; "
+            "set trainer.mtp.lr to give the heads their own."
+        )
 
     assert mtp.num_speculative_tokens >= 1, "trainer.mtp.num_speculative_tokens must be >= 1 when enabled"
     if mcfg.mtp_num_layers == 0:

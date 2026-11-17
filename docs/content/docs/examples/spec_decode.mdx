@@ -64,6 +64,7 @@ The high-level knob:
 | `trainer.mtp.num_speculative_tokens` | `1` | vLLM draft depth per step. |
 | `trainer.mtp.loss_weight` | `0.1` | Weight `w` of the draft loss in `policy_loss + w * draft_loss`. The draft loss is a token mean over the whole mini-batch (every microbatch and DP rank), so each token weighs the same however the mini-batch is split. |
 | `trainer.mtp.loss_type` | `hard_label` | Draft loss. `distribution` distills the policy's full next-token distribution, so it needs CP=1, PP=1 and `trainer.fused_lm_head_logprob=false`. `hard_label` is cross-entropy on the generated tokens and also runs with CP, PP and the fused LM head. |
+| `trainer.mtp.lr` | `null` | Peak learning rate of the MTP heads, in their own optimizer param group on the policy's schedule. `null` uses the policy's `optimizer_config.lr`. A pretrained head barely moves at an RL lr such as `1e-6`, so a head that should track the policy usually needs a larger one. |
 
 Megatron-side fields tune the draft loss; most `distribution` runs only need `mtp_loss_topk`. The `hard_label` loss ignores `mtp_loss_topk`:
 

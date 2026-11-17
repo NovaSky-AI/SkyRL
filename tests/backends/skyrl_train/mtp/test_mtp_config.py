@@ -280,3 +280,27 @@ def test_validate_cfg_accepts_hard_label_mtp_with_cp():
     cfg.generator.inference_engine.weight_sync_backend = "nccl"
     validate_cfg(cfg)
     assert cfg.trainer.policy.megatron_config.mtp_loss_type == MTPLossType.HARD_LABEL
+
+
+def test_mtp_lr_validation():
+    def apply(enabled, lr):
+        cfg = SkyRLTrainConfig()
+        cfg.trainer.mtp.enabled, cfg.trainer.mtp.lr = enabled, lr
+        cfg.trainer.mtp.loss_type = "hard_label"
+        messages = []
+        handler_id = logger.add(messages.append, level="WARNING")
+        try:
+            _apply_mtp_config(cfg)
+        finally:
+            logger.remove(handler_id)
+        return messages
+
+    # MTP off: the lr is ignored, with a warning.
+    assert any("ignored" in m for m in apply(False, 1e-5))
+    # No lr: the heads train at the policy's, with a warning.
+    assert any("policy's learning rate" in m for m in apply(True, None))
+    assert not apply(True, 1e-5)
+    # A non-positive lr is rejected when the config is built, whether or not MTP is enabled.
+    for enabled in (True, False):
+        with pytest.raises(ValueError, match="must be > 0"):
+            MTPConfig(enabled=enabled, lr=0.0)
