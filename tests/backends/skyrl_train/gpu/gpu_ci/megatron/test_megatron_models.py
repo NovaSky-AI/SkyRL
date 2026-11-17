@@ -971,6 +971,7 @@ async def test_logprobs_matching_roundtrip(
         or "kimi-k2.5" in model_name.lower()
         or "kimi-k3" in model_name.lower()
         or "qwen3.8-flash-next" in model_name.lower()
+        or "qwen3-moe-tiny-random" in model_name.lower()
         or _is_beam(model_name)
     )
     if _is_beam(model_name):
@@ -1191,6 +1192,11 @@ async def test_logprobs_matching_roundtrip(
             # (~0.93 positional vs ~0.008 on prefixes). So does the 4-of-48-layer
             # Qwen3.8-Flash-Next slice, whose greedy output differs between two
             # unsynced runs of the same engine. The Kimi K3 slice is the same story.
+            # The tiny random Qwen3 MoE has near-tied top tokens too: with vLLM's prefix
+            # cache on, the 8 greedy copies of a prompt split into two continuations
+            # inside one generation, and which copy takes which changes after the sync
+            # empties the cache (on AMD MI355X: 0.13-0.16 positional vs ~0.002 on
+            # prefixes, and exactly 0 with prefix caching off).
             if compare_common_prefix:
                 ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
                 ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]

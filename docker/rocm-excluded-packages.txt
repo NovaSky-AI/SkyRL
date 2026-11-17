@@ -1,0 +1,70 @@
+# Packages in SkyRL's uv.lock that must not be installed on AMD ROCm. Read by docker/rocm_requirements.py.
+# One name per line. An export that contains a CUDA-looking name (nvidia-*, cuda-*, *-cu12, *-cu13,
+# flashinfer*, nixl*) that is neither listed here nor kept by that script fails the image build, so a
+# lock bump that adds one has to be looked at.
+
+# The parent image provides ROCm builds of these
+torch
+torchvision
+torchaudio
+triton
+vllm
+flash-attn
+
+# CUDA-only kernels and transports. TransformerEngine is replaced by AMD's fork, built in the image
+causal-conv1d
+mamba-ssm
+flash-mla
+fast-hadamard-transform
+flashinfer-python
+flashinfer-cubin
+flashinfer-jit-cache
+flashinfer-jit-cache-sm80
+flashinfer-jit-cache-sm89
+flashinfer-jit-cache-sm90a
+flashinfer-jit-cache-sm100a
+flashinfer-jit-cache-sm103a
+flashinfer-jit-cache-sm110a
+flashinfer-jit-cache-sm120f
+flashinfer-jit-cache-sm121a
+nixl
+nixl-cu13
+tilelang
+quack-kernels
+apache-tvm-ffi
+transformer-engine
+transformer-engine-cu13
+transformer-engine-torch
+
+# CUDA runtime wheels
+cuda-bindings
+cuda-core
+cuda-pathfinder
+cuda-python
+cuda-tile
+cuda-toolkit
+nvidia-cublas
+nvidia-cuda-cccl
+nvidia-cuda-crt
+nvidia-cuda-cupti
+nvidia-cuda-nvcc
+nvidia-cuda-nvrtc
+nvidia-cuda-runtime
+nvidia-cudnn-cu13
+nvidia-cudnn-frontend
+nvidia-cufft
+nvidia-cufile
+nvidia-curand
+nvidia-cusolver
+nvidia-cusparse
+nvidia-cusparselt-cu13
+nvidia-cutlass-dsl
+nvidia-cutlass-dsl-libs-base
+nvidia-cutlass-dsl-libs-core
+nvidia-cutlass-dsl-libs-cu12
+nvidia-cutlass-dsl-libs-cu13
+nvidia-nccl-cu13
+nvidia-nvjitlink
+nvidia-nvshmem-cu13
+nvidia-nvtx
+nvidia-nvvm

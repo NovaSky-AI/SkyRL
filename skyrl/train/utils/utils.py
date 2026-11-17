@@ -31,6 +31,11 @@ from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
     resolve_auto_wire_format,
     validate_concrete_fp8_recipe,
 )
+from skyrl.backends.skyrl_train.gpu_platform import (
+    check_driver_device_masks,
+    is_rocm,
+    rocm_unsupported,
+)
 from skyrl.backends.skyrl_train.utils.io.io import is_cloud_path
 from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     AUTO_FP8,
@@ -226,6 +231,39 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     )
 
 
+def _validate_megatron_cfg_on_rocm(cfg: SkyRLTrainConfig):
+    """Rejects the Megatron settings that cannot work on AMD ROCm, before anything resolves from them.
+
+    Runs ahead of the FP8 handling in :func:`validate_megatron_cfg`, which picks a recipe from NVIDIA
+    compute capability: an AMD GPU reports a capability too, and it would be read as an NVIDIA generation.
+    """
+    from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+
+    for worker_cfg in (cfg.trainer.policy, cfg.trainer.ref):
+        megatron_config = getattr(worker_cfg, "megatron_config", None)
+        transformer_kwargs = getattr(megatron_config, "transformer_config_kwargs", None) or {}
+        if is_fp8_enabled(transformer_kwargs.get("fp8")) or is_fp8_enabled(transformer_kwargs.get("fp8_param")):
+            raise ValueError(rocm_unsupported("fp8"))
+
+    # The weights of a non-colocated engine travel over one RCCL group made of the trainer's first process
+    # and the engine's workers. RCCL never finishes connecting that group when its members see different
+    # GPUs: the run hangs and leaves vLLM workers holding GPU memory. Two things make the views differ.
+    # Measured on RCCL 2.30.4 (ROCm 10.0); re-test both when the image's ROCm changes.
+    ie_cfg = cfg.generator.inference_engine
+    # 1. vLLM's `mp` executor: SkyRL then confines each engine to its own GPUs through CUDA_VISIBLE_DEVICES
+    #    (VLLMServerActor._setup_mp_gpu_visibility), whatever Ray's masking is.
+    if ie_cfg.distributed_executor_backend == "mp":
+        raise ValueError(rocm_unsupported("mp_executor"))
+    # 2. Ray's per-process GPU masks: the trainer sees one GPU and the workers of a multi-GPU engine see
+    #    several. With Ray's masking off every process sees every GPU and the group connects.
+    if (
+        get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all) == "nccl"
+        and ie_cfg.tensor_parallel_size > 1
+        and not ray_noset_visible_devices(os.environ)
+    ):
+        raise ValueError(rocm_unsupported("nccl_multi_gpu_engine"))
+
+
 def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     # not yet supported + tested features
     ie_cfg = cfg.generator.inference_engine
@@ -236,6 +274,9 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
     }, "only nccl, delta and sharded_rdt are supported for megatron weight sync"
     assert ie_cfg.backend == "vllm", "only vllm is supported for with megatron"
     assert cfg.trainer.critic.model.path is None, "only GRPO training is currently supported for megatron"
+
+    if is_rocm():
+        _validate_megatron_cfg_on_rocm(cfg)
 
     policy_cfg = cfg.trainer.policy
     policy_fp8_param = is_fp8_enabled(policy_cfg.megatron_config.transformer_config_kwargs.get("fp8_param"))
@@ -724,6 +765,14 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
         ValueError / NotImplementedError / AssertionError: on invalid combinations.
     """
     ie_cfg = cfg.generator.inference_engine
+
+    if is_rocm():
+        from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+
+        if get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all) == "sharded_rdt":
+            raise ValueError(rocm_unsupported("sharded_rdt"))
+        if ie_cfg.fp8_weight_sync_mode is not None:
+            raise ValueError(rocm_unsupported("fp8"))
 
     # "auto" resolves from the trainer recipe in validate_megatron_cfg; a
     # config path that never runs it (the serve entrypoint, non-megatron
@@ -1371,6 +1420,9 @@ def initialize_ray(cfg: SkyRLTrainConfig):
         os.environ["SKYRL_LOG_FILE"] = log_file
         # Pass log file path to workers so they can redirect their output
         env_vars["SKYRL_LOG_FILE"] = log_file
+
+    # On AMD nodes Ray reads GPU restrictions from HIP_VISIBLE_DEVICES only; refuse one it would ignore.
+    check_driver_device_masks()
 
     # log_to_driver=True allows training progress from skyrl_entrypoint to reach stdout.
     # Infrastructure logs (vLLM, workers) are redirected to log file via os.dup2 in their init.

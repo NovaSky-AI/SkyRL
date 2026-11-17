@@ -12,6 +12,19 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _report_unregistered_bridges(error: ImportError) -> None:
+    """Logs that none of the bridges in this module were registered, and why.
+
+    The ``try`` block below imports megatron-bridge and three vendored model packages. If any one of them
+    fails to import, every bridge here is skipped, and a Qwen3.5 model with ``language_model_only=true`` is
+    then built through upstream's vision-language bridge. Without megatron itself, as on a CPU-only install,
+    that is expected and logged at debug level; any other failure is a broken Megatron environment.
+    """
+    log = logger.debug if getattr(error, "name", None) == "megatron" else logger.warning
+    log("SkyRL's extra Megatron bridges are not registered: %s", error)
+
+
 try:
     from megatron.bridge.models.conversion.mapping_registry import (
         MegatronMappingRegistry,
@@ -327,7 +340,8 @@ try:
         bridge.hf_pretrained.config.architectures = [sentinel]
         return True
 
-except ImportError:
+except ImportError as e:
+    _report_unregistered_bridges(e)
 
     def maybe_force_qwen35_text_bridge(bridge, hf_config) -> bool:  # noqa: D103
         # megatron-bridge not installed (e.g. CPU-only environment): nothing to force.
