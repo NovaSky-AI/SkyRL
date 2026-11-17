@@ -592,6 +592,24 @@ def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(m
     assert len(started) == 2
 
 
+@pytest.mark.parametrize(
+    "tokenizer, rendered_with",
+    [(None, "/exports/step-16"), ("Qwen/Qwen3-8B", "Qwen/Qwen3-8B")],
+    ids=["the policy path by default", "skycap.tokenizer when set"],
+)
+def test_the_servers_render_with_skycap_tokenizer_over_the_policy_path(monkeypatch, tokenizer, rendered_with) -> None:
+    from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
+
+    started = []
+    monkeypatch.setattr(main_harbor_skycap, "start_servers", lambda settings, **_: started.append(settings))
+    cfg = main_harbor_skycap.HarborSkycapConfig()
+    cfg.trainer.algorithm.max_seq_len = 1024
+    cfg.trainer.policy.model.path = "/exports/step-16"
+    cfg.skycap.tokenizer = tokenizer
+    main_harbor_skycap.start_skycap(cfg, "http://router")
+    assert [settings["tokenizer"] for settings in started] == [rendered_with]
+
+
 def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None:
     support = pack_sample_support(csr(np.zeros((1, TOP_K), dtype=np.int32)))
     body = {

@@ -75,6 +75,10 @@ class SkycapConfig:
     """CPUs reserved per server, for rendering and HTTP."""
     placement_strategy: str = "SPREAD"
     """Ray placement-group strategy for the servers: SPREAD (default, for availability), STRICT_SPREAD, PACK."""
+    tokenizer: Optional[str] = None
+    """The Hugging Face model name the servers render prompts with. Defaults to ``trainer.policy.model.path``.
+    Set it when that is a local directory (e.g. a merged export to resume from): ``renderers`` picks the
+    renderer by exact model name, and a path falls back to its default renderer."""
     record_dir: Optional[str] = None
     """Where ended trajectories are written. Defaults to ``{trainer.export_path}/skycap``; each server writes
     on its own node, so point it at a shared filesystem to have one directory for the run."""
@@ -142,7 +146,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     load_rule(train_paths)
     settings = {
         "upstream_url": engine_url,
-        "tokenizer": cfg.trainer.policy.model.path,
+        "tokenizer": cfg.skycap.tokenizer or cfg.trainer.policy.model.path,
         "renderer_pool_size": cfg.skycap.renderer_pool_size,
         "model": ie.served_model_name,
         "max_model_len": engine_init.get("max_model_len") or cfg.trainer.algorithm.max_seq_len,
