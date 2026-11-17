@@ -308,8 +308,7 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             raise ValueError(
                 "trainer.mtp.loss_type='distribution' does not support trainer.fused_lm_head_logprob=true: the fused "
                 "path skips the output-layer matmul, so there are no main logits to use as the draft teacher. Use "
-                "trainer.mtp.loss_type='hard_label' on a GPTModel, or disable fused_lm_head_logprob: HybridModel "
-                "does not support it with MTP."
+                "trainer.mtp.loss_type='hard_label', or disable fused_lm_head_logprob."
             )
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]

@@ -28,6 +28,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_dsa_head_full.py` | `patch_dsa_head_full.py` all-to-alls vs megatron-core's and an all-gather reference (TP 2 and 4) |
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
+| `patches/megatron/test_hybrid_output_processor.py` (CPU) | `patch_hybrid_output_processor.py` hook placement and kwargs vs `GPTModel`'s, wrappers installed first stay installed, refusal when the hunks don't apply, no-op once landed |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
 | `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
@@ -286,6 +287,17 @@ Per-forward DSA index-share carrier under activation recompute.
   `_dsa_index_share_carrier_scope`, and applying the patch logs a warning telling you to delete it.
 - **Remove:** the `patch_dsa_index_share()` call in `MegatronWorker.make_megatron_module`, both
   files here, and the `*.patch` package-data entry in `pyproject.toml` if nothing else uses it.
+
+### `patch_hybrid_output_processor.py`: NVIDIA/Megatron-LM#7054
+
+Upstream 57103cf063's three `HybridModel.forward` hunks, inlined and inserted at load time: they add `GPTModel`'s
+`output_processor` hook, so the fused LM head runs on HybridModel with MTP (GLM-5 under megatron-bridge 0.8).
+- **Wrappers:** the patched code goes into megatron-core's own function object, in place, so `functools.wraps`
+  wrappers installed before it stay installed, as over upstream's forward. DeepSeek-V4.1's per-forward state
+  (`deepseek_v41/model.py`) installs one when `megatron_worker.py` imports `model_bridges`.
+- **Landed?** The patch checks for itself: once megatron-core's `HybridModel.forward` takes `output_processor`, it is a
+  no-op that logs that it can be deleted.
+- **Remove:** the module, its call and import in `megatron_worker.py`, and its CPU test.
 
 ### `patch_sparse_mla_nope.py`: NVIDIA/Megatron-LM#7617
 

@@ -561,7 +561,7 @@ class MTPLossType(StrEnum):
     ``HARD_LABEL``: the token the policy actually generated at that position (one hard label per generated token,
     the heads' pretraining objective), a sample from the same sampler that verifies the drafts. It is scored
     through the detached output layer on the policy's packed / CP-aware / fused-LM-head log-prob path, so it also
-    runs with CP, PP and, on a GPTModel, the fused LM head (HybridModel does not support it with MTP).
+    runs with CP, PP and the fused LM head (on HybridModel through the backported ``output_processor`` hook).
 
     Both are a token mean over the whole mini-batch (see ``MegatronConfig.mtp_loss_weight``). For now both train
     only the MTP heads, as Megatron's ``process_mtp_loss`` does with ``mtp_detach_heads=True``: the trunk,

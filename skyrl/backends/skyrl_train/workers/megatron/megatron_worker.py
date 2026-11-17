@@ -87,6 +87,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_hybrid_output_processor import (
+    apply_hybrid_output_processor_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_mtp_roll_allgather import (
     apply_mtp_roll_allgather_patch,
 )
@@ -188,6 +191,8 @@ apply_triton_kernels_int64_offsets_patch()
 # Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_distopt_mixed_dtype_group_index_patch()
+# TODO: remove once the pinned megatron-core includes NVIDIA/Megatron-LM#7054 (see patches/megatron/README.md).
+apply_hybrid_output_processor_patch()
 # Grad norm / clip over mixed fp32/bf16 decoupled grads (precision-aware optimizer on mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#7279 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_clip_grads_mixed_dtype_patch()
