@@ -159,6 +159,46 @@ def _build_active_mask(loss_mask: torch.Tensor, num_actions: int, sequence_lengt
     return active_mask
 
 
+def _pack_microbatch_inputs(
+    sequences: torch.Tensor,
+    attention_mask: torch.Tensor,
+    position_ids: Optional[torch.Tensor],
+    *,
+    pre_process: bool,
+    position_ids_pre_process: bool,
+    sub_seq_lengths: Optional[list[list[int]]],
+    fp8_enabled: bool,
+    fp8_recipe: Optional[str],
+    shard_for_cp: bool,
+) -> tuple:
+    """Pack a training micro-batch's token ids and, if ``position_ids`` is given (MTP), its position ids, in ONE layout.
+
+    Both go through ``preprocess_packed_seqs`` with the same layout arguments, so the position ids land where
+    ``packed_seq_params`` (built for the token ids) says each segment is. megatron-core's MTP roll relies on that under
+    CP: it finds every segment's CP-local boundaries from ``cu_seqlens_q_padded`` and ``index_select``s /
+    ``index_copy_``s the rolled position ids there. Packed with any other layout (no FP8 aggregate alignment, no
+    controller-packed ``sub_seq_lengths``, no CP-split choice), the final segment's boundaries run past the shorter
+    position-id shard: a device-side assert in ``indexSelectSmallIndex`` or ``index_copy_``.
+
+    Returns ``(sequences, packed_seq_params, position_ids)``; ``position_ids`` is None if not given.
+    """
+    layout = dict(
+        sub_seq_lengths=sub_seq_lengths,
+        fp8_enabled=fp8_enabled,
+        fp8_recipe=fp8_recipe,
+        shard_for_cp=shard_for_cp,
+    )
+    new_sequences, packed_seq_params = preprocess_packed_seqs(
+        sequences, attention_mask, pre_process=pre_process, **layout
+    )
+    new_position_ids = None
+    if position_ids is not None:
+        new_position_ids = preprocess_packed_seqs(
+            position_ids, attention_mask, pre_process=position_ids_pre_process, **layout
+        )[0]
+    return new_sequences, packed_seq_params, new_position_ids
+
+
 def _copy_tensor_tree_to_device(value: Any, device: int) -> Any:
     """Move all tensors in a nested microbatch to a CUDA device."""
     if torch.is_tensor(value) or isinstance(value, (TensorList, *PACKED_BATCH_FIELD_TYPES)):
@@ -1320,10 +1360,16 @@ class MegatronModelWrapper:
 
             needs_input_ids = stage_needs_input_ids(mtp_enabled)
             if self.remove_microbatch_padding:
-                new_sequences, packed_seq_params = preprocess_packed_seqs(
+                # The trunk ignores position_ids for RoPE + THD packing (rotary comes from
+                # packed_seq_params), so SkyRL normally passes None. But the native MTP block rolls
+                # and re-embeds position_ids per depth, so when MTP is active they are packed too,
+                # in the sequences' layout. This is harmless to the main logits.
+                new_sequences, packed_seq_params, new_position_ids = _pack_microbatch_inputs(
                     sequences,
                     attention_mask,
+                    position_ids if mtp_enabled else None,
                     pre_process=needs_input_ids or self.is_vlm,
+                    position_ids_pre_process=needs_input_ids,
                     sub_seq_lengths=sub_seq_lengths,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
@@ -1337,18 +1383,6 @@ class MegatronModelWrapper:
                     sequences, attention_mask, packed_seq_params, sub_seq_lengths=sub_seq_lengths
                 )
                 new_attention_mask = None
-                # The trunk ignores position_ids for RoPE + THD packing (rotary comes from
-                # packed_seq_params), so SkyRL normally passes None. But the native MTP block rolls
-                # and re-embeds position_ids per depth, so when MTP is active we must supply them in
-                # the packed layout. This is harmless to the main logits.
-                if mtp_enabled:
-                    new_position_ids = preprocess_packed_seqs(
-                        position_ids,
-                        attention_mask,
-                        pre_process=needs_input_ids,
-                    )[0]
-                else:
-                    new_position_ids = None
             else:
                 new_sequences, new_attention_mask, new_position_ids = remove_left_padding(
                     sequences,
