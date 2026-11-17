@@ -240,12 +240,12 @@ class TestSaveWeights:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "sync_mode, data_parallel_size, pauses",
-        [("memory", 4, True), ("memory", 1, False), ("disk", 4, False)],
+        [("memory", 4, True), ("disk", 4, True), ("memory", 1, False), ("disk", 1, False)],
     )
-    async def test_inplace_lora_memory_sync_pauses_under_data_parallel(self, sync_mode, data_parallel_size, pauses):
-        """The in-memory LoRA sync is a collective RPC on every vLLM worker; under data parallelism a rank that is
-        still generating deadlocks it (the DP ranks step in lockstep), so the engines are paused around it. The disk
-        sync and single-rank engines keep the no-pause in-place swap."""
+    async def test_inplace_lora_sync_pauses_under_data_parallel(self, sync_mode, data_parallel_size, pauses):
+        """Under data parallelism the engines are paused around the in-place LoRA sync: the in-memory sync is a
+        collective RPC that a still-generating rank deadlocks (the DP ranks step in lockstep), and the disk sync would
+        otherwise swap the adapter on each rank at a different step. Single-rank engines keep the no-pause swap."""
         from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 
         cfg = _fft_dispatch_cfg()
