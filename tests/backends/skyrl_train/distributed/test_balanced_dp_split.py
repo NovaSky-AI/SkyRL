@@ -122,6 +122,48 @@ def test_split_for_dp_default_is_the_contiguous_split():
     assert MICROBATCH_SIZES_KEY not in chunks[0].metadata
 
 
+def test_without_a_token_cap_the_split_and_the_worker_path_are_unchanged():
+    """``balance_max_tokens=None`` is the split before the token-balanced split existed."""
+    lengths = [5, 60, 7, 50, 9, 40, 11, 30]
+    dp_size = 4
+    data = _batch(lengths)
+    expected = _batch(lengths).chunk(len(lengths) // dp_size)  # the old code: ``data.chunk(len(data) // dp_size)``
+    for kwargs in ({}, {"balance_max_tokens": None}):
+        chunks, order = split_for_dp(data, dp_size=dp_size, **kwargs)
+        assert order is None
+        assert len(chunks) == len(expected)
+        for chunk, old_chunk in zip(chunks, expected):
+            assert chunk.keys() == old_chunk.keys()
+            for key in chunk.keys():
+                assert torch.equal(chunk[key], old_chunk[key])
+            assert chunk.metadata == old_chunk.metadata == {"response_length": 4}
+            # The worker packs the chunk itself, and weights a micro-batch by the chunk size.
+            iterator = TokenBasedBatchIterator(chunk, max_tokens_per_microbatch=64)
+            old_packing = make_seq_packer("balanced", bin_capacity=64).pack(chunk["attention_mask"].sum(dim=1).tolist())
+            assert iterator._microbatches == old_packing
+            assert mean_samples_per_rank(chunk, None) == len(chunk)
+    with pytest.raises(AssertionError):  # the old check on the batch size is kept
+        split_for_dp(_batch([5, 60, 7]), dp_size=2)
+
+
+@pytest.mark.parametrize(
+    "balance_dp_tokens, max_tokens, expected",
+    [(False, 64, None), (False, -1, None), (True, -1, None), (True, 0, None), (True, 64, 64)],
+)
+def test_worker_dispatch_passes_a_cap_only_when_the_option_is_on(balance_dp_tokens, max_tokens, expected):
+    from types import SimpleNamespace
+
+    from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+    dispatch = WorkerDispatch.__new__(WorkerDispatch)
+    dispatch.cfg = SimpleNamespace(
+        trainer=SimpleNamespace(balance_dp_tokens=balance_dp_tokens, max_tokens_per_microbatch=max_tokens)
+    )
+    assert dispatch._dp_balance_max_tokens == expected
+    del dispatch.cfg  # a dispatch without a config (as some tests build it) uses the default split
+    assert dispatch._dp_balance_max_tokens is None
+
+
 def test_split_for_dp_balanced_chunks_and_order_restore():
     lengths = [60, 58, 55, 50, 6, 5, 4, 4, 3, 3, 2, 2]
     data = _batch(lengths)

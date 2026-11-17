@@ -34,10 +34,14 @@ def split_for_dp(
 ) -> Tuple[List[TrainingInputBatch], Optional[List[int]]]:
     """Split ``data`` into one chunk per DP rank.
 
-    Default: ``dp_size`` chunks with the same number of samples, in batch order.
+    ``balance_max_tokens=None`` (the default): ``dp_size`` chunks with the same number of samples,
+    in batch order. This is exactly the split before the token-balanced split existed: the same
+    ``data.chunk`` call, no added metadata, and no sample order. The workers then pack and weight
+    their chunks as before.
 
-    With ``balance_max_tokens`` set (a token cap per micro-batch): token-balanced chunks from :func:`balanced_dp_assignment`.
-    Each chunk lists its micro-batches in its metadata (``MICROBATCH_SIZES_KEY``). The second
+    ``balance_max_tokens`` set (a token cap per micro-batch): token-balanced chunks from
+    :func:`balanced_dp_assignment`. If the batch cannot be balanced (sub-sequence rows, no
+    attention mask, or no valid assignment), the default split is used. Each chunk lists its micro-batches in its metadata (``MICROBATCH_SIZES_KEY``). The second
     return value is the sample order of the concatenated chunks (``None`` for the default split).
     """
     assignment = None

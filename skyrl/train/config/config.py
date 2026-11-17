@@ -1808,7 +1808,7 @@ class TrainerConfig(BaseConfig):
     balance_dp_tokens: bool = False
     """Balance tokens across data-parallel ranks. Needs ``max_tokens_per_microbatch > 0``.
 
-    When False, a batch is cut into ``dp_size`` chunks with the same number of samples, in batch
+    When False (the default), the behavior is the same as before this option existed. A batch is cut into ``dp_size`` chunks with the same number of samples, in batch
     order, and each rank packs its chunk into micro-batches. Ranks with short samples then pad with
     empty micro-batches and wait for the busiest rank in every collective.
 

@@ -87,7 +87,12 @@ class WorkerDispatch:
 
     @property
     def _dp_balance_max_tokens(self) -> Optional[int]:
-        """Token cap for the token-balanced DP split, or None when the split is off."""
+        """Token cap for the token-balanced DP split, or None when the split is off.
+
+        None when ``trainer.balance_dp_tokens`` is not True, or when
+        ``trainer.max_tokens_per_microbatch`` is not positive. With None, dispatch, staging and
+        output collection behave exactly as they did before the token-balanced split existed.
+        """
         trainer_cfg = getattr(getattr(self, "cfg", None), "trainer", None)
         if getattr(trainer_cfg, "balance_dp_tokens", False) is not True:
             return None
