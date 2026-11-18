@@ -29,9 +29,13 @@ class OrderedRefs(List[ObjectRef]):
 def balanced_dp_indices(token_counts: List[int], dp_size: int) -> List[List[int]]:
     """Deal samples to DP ranks: the same number of samples on every rank, and similar token totals.
 
-    ``result[rank]`` is the list of sample indices of ``rank``, longest sample first. The samples
-    are dealt in order of length, ``dp_size`` at a time. In each round the longest sample goes to
-    the rank with the fewest tokens so far. The token totals are close, not equal.
+    Example, ``token_counts=[90, 80, 20, 10]`` and ``dp_size=2``::
+
+        round 1: sample 0 (90) -> rank 0, sample 1 (80) -> rank 1
+        round 2: sample 2 (20) -> rank 1 (fewest tokens), sample 3 (10) -> rank 0
+        result:  [[0, 3], [1, 2]], 100 tokens on each rank
+
+    The default split gives ``[[0, 1], [2, 3]]``: 170 and 30 tokens.
     """
     assert len(token_counts) % dp_size == 0
     by_length = sorted(range(len(token_counts)), key=lambda i: token_counts[i], reverse=True)
@@ -78,7 +82,11 @@ def split_for_dp(
 
 
 def restore_sample_order(items: List[Any], sample_order: Optional[List[int]]) -> List[Any]:
-    """Undo the driver's permutation on a per-sample list (no-op without one, or on an empty list)."""
+    """Undo the driver's permutation on a per-sample list (no-op without one, or on an empty list).
+
+    Example: the split ``[[0, 3], [1, 2]]`` gives ``sample_order=[0, 3, 1, 2]``. The outputs come back
+    in that order, ``[out0, out3, out1, out2]``. The result is ``[out0, out1, out2, out3]``.
+    """
     if sample_order is None or not items:
         return items
     if len(items) != len(sample_order):
