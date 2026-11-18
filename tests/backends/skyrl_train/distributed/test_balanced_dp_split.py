@@ -1,9 +1,10 @@
-"""Token-balanced data-parallel split (``trainer.balance_dp_tokens``): packer, dispatch, worker iterator.
+"""Token-balanced data-parallel split (``trainer.balance_dp_tokens``): the deal, dispatch, and order restore.
 
 uv run --isolated --extra skyrl-train --extra dev pytest tests/backends/skyrl_train/distributed/test_balanced_dp_split.py
 """
 
 import random
+from types import SimpleNamespace
 
 import pytest
 import ray
@@ -14,21 +15,14 @@ from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshDispatch,
     MeshRank,
     WorkerOutput,
+    balanced_dp_indices,
     restore_sample_order,
     split_for_dp,
 )
-from skyrl.backends.skyrl_train.training_batch import (
-    DP_BATCH_SIZE_KEY,
-    MICROBATCH_SIZES_KEY,
-    TrainingInputBatch,
-)
-from skyrl.backends.skyrl_train.workers.worker_utils import (
-    TokenBasedBatchIterator,
-    mean_samples_per_rank,
-)
-from skyrl.train.dataset.bin_packing import balanced_dp_assignment, make_seq_packer
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
 
-CAP, DP = 10752, 16
+DP = 16
 
 
 def _prompt_grouped_lengths(seed: int = 0, prompts: int = 32, samples_per_prompt: int = 8):
@@ -41,65 +35,30 @@ def _prompt_grouped_lengths(seed: int = 0, prompts: int = 32, samples_per_prompt
     return lengths
 
 
-def _contiguous_split_stats(lengths, dp, cap):
-    """Today's split: equal sample counts in batch order, each rank packs for itself."""
-    per_rank = len(lengths) // dp
-    packer = make_seq_packer("balanced", bin_capacity=cap)
-    slot_tokens = []
-    for r in range(dp):
-        chunk = lengths[r * per_rank : (r + 1) * per_rank]
-        slot_tokens.append(sorted((sum(chunk[i] for i in b) for b in packer.pack(chunk)), reverse=True))
-    num_slots = max(len(s) for s in slot_tokens)
-    return num_slots, [sum(s) for s in slot_tokens]
-
-
-def test_assignment_covers_every_sample_once_and_respects_the_cap():
+def test_deal_gives_every_rank_the_same_number_of_samples_and_similar_tokens():
     lengths = _prompt_grouped_lengths()
-    assignment = balanced_dp_assignment(lengths, DP, CAP)
-    assert len(assignment) == DP
-    assert len({len(slots) for slots in assignment}) == 1  # same number of micro-batches on every rank
-    seen = sorted(i for slots in assignment for mb in slots for i in mb)
-    assert seen == list(range(len(lengths)))
-    for slots in assignment:
-        for mb in slots:
-            assert mb and sum(lengths[i] for i in mb) <= CAP
+    per_rank = len(lengths) // DP
+    indices = balanced_dp_indices(lengths, DP)
+
+    assert [len(rank) for rank in indices] == [per_rank] * DP
+    assert sorted(i for rank in indices for i in rank) == list(range(len(lengths)))
+    for rank in indices:  # longest sample first
+        assert [lengths[i] for i in rank] == sorted((lengths[i] for i in rank), reverse=True)
+
+    mean = sum(lengths) / DP
+    contiguous = [sum(lengths[r * per_rank : (r + 1) * per_rank]) for r in range(DP)]
+    balanced = [sum(lengths[i] for i in rank) for rank in indices]
+    assert max(contiguous) / mean > 1.3  # the default split is uneven on this batch
+    assert max(balanced) / mean < 1.1
+    assert min(balanced) / mean > 0.9
 
 
-def test_assignment_needs_fewer_slots_and_balances_ranks_and_slots():
-    lengths = _prompt_grouped_lengths()
-    assignment = balanced_dp_assignment(lengths, DP, CAP)
-    old_slots, old_rank_tokens = _contiguous_split_stats(lengths, DP, CAP)
-    num_slots = len(assignment[0])
-    rank_tokens = [sum(lengths[i] for mb in slots for i in mb) for slots in assignment]
-    mean = sum(rank_tokens) / DP
-
-    assert num_slots < old_slots
-    assert max(old_rank_tokens) / mean > 1.3  # the contiguous split is uneven on this batch
-    assert max(rank_tokens) / mean < 1.1
-    for slot in range(num_slots):
-        tokens = [sum(lengths[i] for i in slots[slot]) for slots in assignment]
-        assert max(tokens) - min(tokens) <= 8192  # at most one sample apart
-
-
-def test_assignment_edge_cases():
-    assert balanced_dp_assignment([10, 20], 4, 100) is None  # fewer samples than ranks
-    # Not a multiple of dp_size: 2 micro-batches cannot hold three 90-token samples under the cap,
-    # and 4 micro-batches are more than the samples. The caller uses the default split (which
-    # rejects such a batch).
-    assert balanced_dp_assignment([90, 90, 90], 2, 100) is None
+def test_deal_edge_cases():
+    assert balanced_dp_indices([], 4) == [[], [], [], []]
+    assert balanced_dp_indices([7, 9], 2) == [[1], [0]]
+    assert balanced_dp_indices([5, 5, 5, 5], 1) == [[0, 1, 2, 3]]
     with pytest.raises(AssertionError):
-        split_for_dp(_batch([60, 60, 60]), dp_size=2, balance_max_tokens=64)
-    # A multiple of dp_size: no micro-batch with more than one sample is above the cap.
-    for lengths in ([90] * 6, [90, 90, 90, 5, 5, 5], [70, 60, 50, 40, 30, 20, 10, 5]):
-        for slots in balanced_dp_assignment(lengths, 2, 100):
-            for mb in slots:
-                assert len(mb) == 1 or sum(lengths[i] for i in mb) <= 100
-    # A sample longer than the cap gets a micro-batch of its own.
-    assignment = balanced_dp_assignment([500, 10, 10, 10], 2, 100)
-    assert sorted(len(mb) for slots in assignment for mb in slots) == [1, 3]
-    # As many micro-batches as samples: one sample each, no empty micro-batch.
-    assignment = balanced_dp_assignment([90, 90, 90, 90], 2, 100)
-    assert [[len(mb) for mb in slots] for slots in assignment] == [[1, 1], [1, 1]]
+        balanced_dp_indices([1, 2, 3], 2)
 
 
 def _batch(lengths, seq_len=64):
@@ -114,21 +73,13 @@ def _batch(lengths, seq_len=64):
     return batch
 
 
-def test_split_for_dp_default_is_the_contiguous_split():
-    data = _batch([5, 60, 7, 50, 9, 40, 11, 30])
-    chunks, order = split_for_dp(data, dp_size=4)
-    assert order is None
-    assert [c["sequences"][:, 0].tolist() for c in chunks] == [[0, 1], [2, 3], [4, 5], [6, 7]]
-    assert MICROBATCH_SIZES_KEY not in chunks[0].metadata
-
-
-def test_without_a_token_cap_the_split_and_the_worker_path_are_unchanged():
-    """``balance_max_tokens=None`` is the split before the token-balanced split existed."""
+def test_without_the_option_the_split_is_unchanged():
+    """``balance_tokens=False`` is the split before the option existed: ``data.chunk`` in batch order."""
     lengths = [5, 60, 7, 50, 9, 40, 11, 30]
     dp_size = 4
     data = _batch(lengths)
-    expected = _batch(lengths).chunk(len(lengths) // dp_size)  # the old code: ``data.chunk(len(data) // dp_size)``
-    for kwargs in ({}, {"balance_max_tokens": None}):
+    expected = _batch(lengths).chunk(len(lengths) // dp_size)  # the old code
+    for kwargs in ({}, {"balance_tokens": False}):
         chunks, order = split_for_dp(data, dp_size=dp_size, **kwargs)
         assert order is None
         assert len(chunks) == len(expected)
@@ -137,53 +88,27 @@ def test_without_a_token_cap_the_split_and_the_worker_path_are_unchanged():
             for key in chunk.keys():
                 assert torch.equal(chunk[key], old_chunk[key])
             assert chunk.metadata == old_chunk.metadata == {"response_length": 4}
-            # The worker packs the chunk itself, and weights a micro-batch by the chunk size.
-            iterator = TokenBasedBatchIterator(chunk, max_tokens_per_microbatch=64)
-            old_packing = make_seq_packer("balanced", bin_capacity=64).pack(chunk["attention_mask"].sum(dim=1).tolist())
-            assert iterator._microbatches == old_packing
-            assert mean_samples_per_rank(chunk, None) == len(chunk)
-    with pytest.raises(AssertionError):  # the old check on the batch size is kept
-        split_for_dp(_batch([5, 60, 7]), dp_size=2)
+    for balance_tokens in (False, True):  # the check on the batch size is kept in both modes
+        with pytest.raises(AssertionError):
+            split_for_dp(_batch([5, 60, 7]), dp_size=2, balance_tokens=balance_tokens)
 
 
-@pytest.mark.parametrize(
-    "balance_dp_tokens, max_tokens, expected",
-    [(False, 64, None), (False, -1, None), (True, -1, None), (True, 0, None), (True, 64, 64)],
-)
-def test_worker_dispatch_passes_a_cap_only_when_the_option_is_on(balance_dp_tokens, max_tokens, expected):
-    from types import SimpleNamespace
-
-    from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
-
-    dispatch = WorkerDispatch.__new__(WorkerDispatch)
-    dispatch.cfg = SimpleNamespace(
-        trainer=SimpleNamespace(balance_dp_tokens=balance_dp_tokens, max_tokens_per_microbatch=max_tokens)
-    )
-    assert dispatch._dp_balance_max_tokens == expected
-    del dispatch.cfg  # a dispatch without a config (as some tests build it) uses the default split
-    assert dispatch._dp_balance_max_tokens is None
-
-
-def test_split_for_dp_balanced_chunks_and_order_restore():
+def test_balanced_split_changes_only_the_assignment_of_samples_to_ranks():
     lengths = [60, 58, 55, 50, 6, 5, 4, 4, 3, 3, 2, 2]
     data = _batch(lengths)
-    chunks, order = split_for_dp(data, dp_size=2, balance_max_tokens=64)
+    chunks, order = split_for_dp(data, dp_size=2, balance_tokens=True)
+    default_chunks, _ = split_for_dp(data, dp_size=2)
+
     assert sorted(order) == list(range(len(lengths)))
-    assert MICROBATCH_SIZES_KEY not in data.metadata  # the input metadata is not changed
-    flat = []
-    for chunk in chunks:
-        ids = chunk["sequences"][:, 0].tolist()
-        sizes = chunk.metadata[MICROBATCH_SIZES_KEY]
-        assert sum(sizes) == len(ids)
-        start = 0
-        for size in sizes:
-            assert sum(lengths[i] for i in ids[start : start + size]) <= 64
-            start += size
-        flat += ids
-    assert flat == order
-    assert len({len(c.metadata[MICROBATCH_SIZES_KEY]) for c in chunks}) == 1
+    assert [len(c) for c in chunks] == [len(c) for c in default_chunks] == [6, 6]
+    assert [c["sequences"][:, 0].tolist() for c in chunks] == [order[:6], order[6:]]
+    for chunk, default_chunk in zip(chunks, default_chunks):
+        assert chunk.keys() == default_chunk.keys()
+        assert chunk.metadata == default_chunk.metadata  # nothing added for the worker
     tokens = [int(c["attention_mask"].sum()) for c in chunks]
-    assert abs(tokens[0] - tokens[1]) <= 8
+    default_tokens = [int(c["attention_mask"].sum()) for c in default_chunks]
+    assert abs(tokens[0] - tokens[1]) <= 8 < abs(default_tokens[0] - default_tokens[1])
+
     # Per-sample outputs come back in chunk order; the restore gives the batch order.
     assert restore_sample_order([f"out{i}" for i in order], order) == [f"out{i}" for i in range(len(lengths))]
     assert restore_sample_order([], order) == []
@@ -191,43 +116,22 @@ def test_split_for_dp_balanced_chunks_and_order_restore():
         restore_sample_order(["x"], order)
 
 
-def test_sample_mean_weights_are_equal_for_every_sample():
-    """A sample-mean loss term (KL, entropy, critic) weights each sample by 1 / batch size."""
-    lengths = [60, 58, 55, 50, 6, 5, 4, 4, 3, 3, 2, 2]
-    dp_size = 2
-    infos = [
-        ActorInfo(None, MeshRank(dp=i, sp=0, tp=0, pp=0, world_size=dp_size, dp_size=dp_size, pp_size=1))
-        for i in range(dp_size)
-    ]
-    for balance_max_tokens in (None, 64):
-        chunks, _ = split_for_dp(_batch(lengths), dp_size=dp_size, balance_max_tokens=balance_max_tokens)
-        if balance_max_tokens:
-            assert len({len(chunk) for chunk in chunks}) > 1  # ranks hold different numbers of samples
-            assert all(chunk.metadata[DP_BATCH_SIZE_KEY] == len(lengths) for chunk in chunks)
-        per_sample_weights = []
-        for chunk in chunks:
-            for microbatch in TokenBasedBatchIterator(chunk, max_tokens_per_microbatch=64):
-                # The worker scales a micro-batch mean by this weight; the DP average divides by dp_size.
-                weight = len(microbatch) / mean_samples_per_rank(chunk, infos[0].rank)
-                per_sample_weights += [weight / len(microbatch) / dp_size] * len(microbatch)
-        assert per_sample_weights == pytest.approx([1 / len(lengths)] * len(lengths))
-    # A slice of a chunk carries the chunk metadata, but it is weighted by its own size.
-    assert mean_samples_per_rank(chunks[0][0:2], None) == 2
+def test_batches_that_cannot_be_balanced_get_the_default_split():
+    data = _batch([60, 5, 50, 4])
+    del data["attention_mask"]
+    chunks, order = split_for_dp(data, dp_size=2, balance_tokens=True)
+    assert order is None
+    assert [c["sequences"][:, 0].tolist() for c in chunks] == [[0, 1], [2, 3]]
 
 
-def test_worker_iterator_keeps_the_driver_packing():
-    lengths = [60, 58, 55, 50, 6, 5, 4, 4, 3, 3, 2, 2]
-    chunks, _ = split_for_dp(_batch(lengths), dp_size=2, balance_max_tokens=64)
-    for chunk in chunks:
-        iterator = TokenBasedBatchIterator(chunk, max_tokens_per_microbatch=64)
-        sizes = chunk.metadata[MICROBATCH_SIZES_KEY]
-        assert iterator.num_padding_microbatches == 0
-        microbatches = list(iterator)
-        assert [len(mb) for mb in microbatches] == sizes
-        assert torch.cat([mb["sequences"][:, 0] for mb in microbatches]).tolist() == chunk["sequences"][:, 0].tolist()
-        # A slice of the chunk still carries the chunk's list; the iterator then packs for itself.
-        part = chunk[0:2]
-        assert sum(len(mb) for mb in TokenBasedBatchIterator(part, max_tokens_per_microbatch=64)) == 2
+@pytest.mark.parametrize("value, expected", [(False, False), (True, True), (None, False), ("true", False)])
+def test_worker_dispatch_reads_the_option_from_the_config(value, expected):
+    dispatch = WorkerDispatch.__new__(WorkerDispatch)
+    # The option does not depend on ``max_tokens_per_microbatch``.
+    dispatch.cfg = SimpleNamespace(trainer=SimpleNamespace(balance_dp_tokens=value, max_tokens_per_microbatch=-1))
+    assert dispatch._dp_balance_tokens is expected
+    del dispatch.cfg  # a dispatch without a config (as some tests build it) uses the default split
+    assert dispatch._dp_balance_tokens is False
 
 
 @ray.remote
@@ -249,15 +153,19 @@ def test_mesh_dispatch_balanced_round_trip():
     data = _batch(lengths)
     infos = _actor_infos(2)
 
-    refs = MeshDispatch.dispatch(infos, "echo", data, dp_balance_max_tokens=64)
+    refs = MeshDispatch.dispatch(infos, "echo", data, dp_balance_tokens=True)
+    shards = ray.get(refs)
+    assert [len(s.loss_fn_outputs) for s in shards] == [6, 6]
+    assert [x["id"] for s in shards for x in s.loss_fn_outputs] != list(range(len(lengths)))
+    out = WorkerOutput.cat(infos, shards, sample_order=refs.sample_order)
+    assert [x["id"] for x in out.loss_fn_outputs] == list(range(len(lengths)))
+
+    refs = MeshDispatch.dispatch(infos, "echo", data)  # default: batch order, no permutation
+    assert refs.sample_order is None
     out = WorkerOutput.cat(infos, ray.get(refs), sample_order=refs.sample_order)
     assert [x["id"] for x in out.loss_fn_outputs] == list(range(len(lengths)))
 
-    refs = MeshDispatch.dispatch(infos, "echo", data)  # default: contiguous, no permutation
-    assert refs.sample_order is None
-    assert [len(s.loss_fn_outputs) for s in ray.get(refs)] == [6, 6]
-
-    staged = MeshDispatch.stage_chunks(2, data, [(0, 6), (6, 12)], dp_balance_max_tokens=64)
+    staged = MeshDispatch.stage_chunks(2, data, [(0, 6), (6, 12)], dp_balance_tokens=True)
     for (start, end), chunk_refs in zip([(0, 6), (6, 12)], staged):
         refs = MeshDispatch.dispatch_from_staged(infos, "echo", chunk_refs=chunk_refs)
         out = WorkerOutput.cat(infos, ray.get(refs), sample_order=chunk_refs.sample_order)

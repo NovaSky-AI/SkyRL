@@ -6,8 +6,6 @@ import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.training_batch import (
-    DP_BATCH_SIZE_KEY,
-    MICROBATCH_SIZES_KEY,
     PACKED_FIELD_PADDING,
     TensorBatch,
     TrainingInputBatch,
@@ -146,26 +144,6 @@ def all_reduce_metrics(
     status_mean.update(status_max)
     status_mean.update(status_sum)
     return status_mean
-
-
-def mean_samples_per_rank(data: TrainingInputBatch, mesh_rank) -> float:
-    """The number of samples of the whole batch divided by the data-parallel size.
-
-    A loss term that is a mean over samples is weighted per micro-batch by
-    ``len(microbatch) / mean_samples_per_rank``. The data-parallel gradient average over the ranks
-    then gives every sample of the batch the same weight.
-
-    With the default split every rank holds the same number of samples, so this is ``len(data)``
-    and ``mesh_rank`` is not read. With the token-balanced split the ranks can hold different
-    numbers of samples, and the driver puts the batch size in the chunk metadata
-    (``DP_BATCH_SIZE_KEY``). A slice of a chunk still carries the metadata of the whole chunk; it
-    is used only when it covers ``data``.
-    """
-    metadata = data.metadata or {}
-    sizes, batch_size = metadata.get(MICROBATCH_SIZES_KEY), metadata.get(DP_BATCH_SIZE_KEY)
-    if sizes and batch_size and sum(sizes) == len(data):
-        return batch_size / mesh_rank.dp_size
-    return len(data)
 
 
 class BaseBatchIterator:
@@ -309,35 +287,15 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         attention_mask = data["attention_mask"]
         self._token_counts = attention_mask.sum(dim=1).cpu().tolist()  # [batch_size]
 
-        prepacked = self._prepacked_microbatches()
-        if prepacked is not None:
-            # The driver packed this chunk (token-balanced DP split): keep its micro-batches.
-            self._microbatches = prepacked
-        else:
-            # Create microbatches based on token count. The "balanced" packer treats
-            # the token budget as a soft cap: a sequence longer than the budget gets
-            # its own (over-budget) microbatch rather than raising.
-            packer = make_seq_packer("balanced", bin_capacity=self._max_tokens_per_microbatch)
-            self._microbatches = packer.pack(self._token_counts)
+        # Create microbatches based on token count. The "balanced" packer treats
+        # the token budget as a soft cap: a sequence longer than the budget gets
+        # its own (over-budget) microbatch rather than raising.
+        packer = make_seq_packer("balanced", bin_capacity=self._max_tokens_per_microbatch)
+        self._microbatches = packer.pack(self._token_counts)
 
         # Synchronize the number of microbatches across all DP workers
         max_num_microbatches = self._sync_num_microbatches()
         self._num_padding_microbatches = max_num_microbatches - len(self._microbatches)
-
-    def _prepacked_microbatches(self) -> Optional[List[List[int]]]:
-        """Micro-batches listed by the driver in the chunk metadata, as consecutive sample ranges.
-
-        ``None`` when the chunk has no list, or when the list does not cover this batch (a
-        slice of a dispatched chunk still carries the metadata of the whole chunk).
-        """
-        sizes = (self.data.metadata or {}).get(MICROBATCH_SIZES_KEY)
-        if not sizes or sum(sizes) != len(self._token_counts):
-            return None
-        microbatches, start = [], 0
-        for size in sizes:
-            microbatches.append(list(range(start, start + size)))
-            start += size
-        return microbatches
 
     def _create_microbatch_from_indices(self, indices: List[int]) -> TrainingInputBatch:
         """Create a TrainingInputBatch from a list of sample indices."""

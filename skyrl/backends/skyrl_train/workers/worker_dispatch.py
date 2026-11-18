@@ -86,18 +86,14 @@ class WorkerDispatch:
         }
 
     @property
-    def _dp_balance_max_tokens(self) -> Optional[int]:
-        """Token cap for the token-balanced DP split, or None when the split is off.
+    def _dp_balance_tokens(self) -> bool:
+        """True when ``trainer.balance_dp_tokens`` is on.
 
-        None when ``trainer.balance_dp_tokens`` is not True, or when
-        ``trainer.max_tokens_per_microbatch`` is not positive. With None, dispatch, staging and
-        output collection behave exactly as they did before the token-balanced split existed.
+        With False, dispatch, staging and output collection behave exactly as they did before
+        the token-balanced split existed.
         """
         trainer_cfg = getattr(getattr(self, "cfg", None), "trainer", None)
-        if getattr(trainer_cfg, "balance_dp_tokens", False) is not True:
-            return None
-        max_tokens = getattr(trainer_cfg, "max_tokens_per_microbatch", -1)
-        return max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else None
+        return getattr(trainer_cfg, "balance_dp_tokens", False) is True
 
     def register_actor_group(self, model: str, actor_group: PPORayActorGroup) -> None:
         self._actor_groups[model] = actor_group
@@ -306,7 +302,7 @@ class WorkerDispatch:
             kwargs["loss_fn_config"] = loss_fn_config
 
         refs = self._actor_groups[model].async_run_ray_method(
-            "mesh", "forward", data=data, dp_balance_max_tokens=self._dp_balance_max_tokens, **kwargs
+            "mesh", "forward", data=data, dp_balance_tokens=self._dp_balance_tokens, **kwargs
         )
         results = deadline.ray_get(refs, "forward")
 
@@ -387,7 +383,7 @@ class WorkerDispatch:
         """
         dp_size = self._actor_groups[model].actor_infos[0].rank.dp_size
         return MeshDispatch.stage_chunks(
-            dp_size, data, mini_batch_boundaries, dp_balance_max_tokens=self._dp_balance_max_tokens
+            dp_size, data, mini_batch_boundaries, dp_balance_tokens=self._dp_balance_tokens
         )
 
     def forward_backward(
@@ -430,7 +426,7 @@ class WorkerDispatch:
             kwargs["loss_fn_config"] = loss_fn_config
 
         refs = self._actor_groups[model].async_run_ray_method(
-            "mesh", "forward_backward", data, dp_balance_max_tokens=self._dp_balance_max_tokens, **kwargs
+            "mesh", "forward_backward", data, dp_balance_tokens=self._dp_balance_tokens, **kwargs
         )
         statuses = deadline.ray_get(refs, "forward_backward")
 

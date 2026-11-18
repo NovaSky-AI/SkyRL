@@ -151,15 +151,6 @@ class TensorList:
 # All batch field types index by batch position.
 PACKED_BATCH_FIELD_TYPES = (PackedTensor, PackedRaggedTensor)
 BATCH_FIELD_TYPES = (torch.Tensor, TensorList, *PACKED_BATCH_FIELD_TYPES)
-
-# Metadata key of a per-rank chunk: the number of samples in each micro-batch of the chunk, in
-# order. A chunk that carries it was packed by the driver (token-balanced DP split), and the
-# worker's token-based iterator keeps that packing.
-MICROBATCH_SIZES_KEY = "microbatch_sizes"
-# Metadata key of a per-rank chunk from the token-balanced DP split: the number of samples in the
-# batch that the driver split. The chunks can hold different numbers of samples, so a worker uses
-# this count (not its own chunk size) to weight a loss that is a mean over samples.
-DP_BATCH_SIZE_KEY = "dp_batch_size"
 BatchField = Union[torch.Tensor, TensorList, PackedTensor, PackedRaggedTensor]
 _BATCH_FIELD_ERROR = (
     f"must be a tensor, {TensorList.__name__}, {PackedTensor.__name__}, or {PackedRaggedTensor.__name__}"

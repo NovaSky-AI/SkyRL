@@ -10,13 +10,10 @@ from ray import ObjectRef
 from ray.actor import ActorHandle
 
 from skyrl.backends.skyrl_train.training_batch import (
-    DP_BATCH_SIZE_KEY,
-    MICROBATCH_SIZES_KEY,
     TrainingInputBatch,
     TrainingOutputBatch,
     pad_training_input_batch,
 )
-from skyrl.train.dataset.bin_packing import balanced_dp_assignment
 
 
 class OrderedRefs(List[ObjectRef]):
@@ -29,44 +26,52 @@ class OrderedRefs(List[ObjectRef]):
     sample_order: Optional[List[int]] = None
 
 
-def split_for_dp(
-    data: TrainingInputBatch, dp_size: int, balance_max_tokens: Optional[int] = None
-) -> Tuple[List[TrainingInputBatch], Optional[List[int]]]:
-    """Split ``data`` into one chunk per DP rank.
+def balanced_dp_indices(token_counts: List[int], dp_size: int) -> List[List[int]]:
+    """Deal samples to DP ranks: the same number of samples on every rank, and similar token totals.
 
-    ``balance_max_tokens=None`` (the default): ``dp_size`` chunks with the same number of samples,
-    in batch order. This is exactly the split before the token-balanced split existed: the same
-    ``data.chunk`` call, no added metadata, and no sample order. The workers then pack and weight
-    their chunks as before.
-
-    ``balance_max_tokens`` set (a token cap per micro-batch): token-balanced chunks from
-    :func:`balanced_dp_assignment`. If the batch cannot be balanced (sub-sequence rows, no
-    attention mask, or no valid assignment), the default split is used. Each chunk lists its micro-batches in its metadata (``MICROBATCH_SIZES_KEY``). The second
-    return value is the sample order of the concatenated chunks (``None`` for the default split).
+    ``result[rank]`` is the list of sample indices of ``rank``, longest sample first. The samples
+    are dealt in order of length, ``dp_size`` at a time. In each round the longest sample goes to
+    the rank with the fewest tokens so far. The token totals are close, not equal.
     """
-    assignment = None
+    assert len(token_counts) % dp_size == 0
+    by_length = sorted(range(len(token_counts)), key=lambda i: token_counts[i], reverse=True)
+    indices: List[List[int]] = [[] for _ in range(dp_size)]
+    rank_tokens = [0] * dp_size
+    for start in range(0, len(by_length), dp_size):
+        ranks = sorted(range(dp_size), key=lambda r: rank_tokens[r])
+        for rank, i in zip(ranks, by_length[start : start + dp_size]):
+            indices[rank].append(i)
+            rank_tokens[rank] += token_counts[i]
+    return indices
+
+
+def split_for_dp(
+    data: TrainingInputBatch, dp_size: int, balance_tokens: bool = False
+) -> Tuple[List[TrainingInputBatch], Optional[List[int]]]:
+    """Split ``data`` into ``dp_size`` chunks with the same number of samples, one per DP rank.
+
+    ``balance_tokens=False`` (the default): the chunks follow the batch order. This is exactly the
+    split before ``balance_tokens`` existed: the same ``data.chunk`` call and no sample order.
+
+    ``balance_tokens=True``: the samples are dealt by length (see :func:`balanced_dp_indices`), so
+    the chunks hold similar numbers of tokens. Only the assignment of samples to ranks changes:
+    the chunk size, the chunk metadata and the worker code path are the same as in the default
+    split. The second return value is the sample order of the concatenated chunks. A batch with
+    sub-sequence rows or without an attention mask gets the default split.
+    """
+    assert len(data) % dp_size == 0, "data batch size must be divisible by dp_size, got {} and {}".format(
+        len(data), dp_size
+    )
     # Rows with sub-sequences are already laid out per rank by the collator.
-    if (
-        balance_max_tokens is not None
-        and data.get("sub_seq_lengths") is None
-        and data.get("attention_mask") is not None
-    ):
-        token_counts = data["attention_mask"].sum(dim=1).cpu().tolist()
-        assignment = balanced_dp_assignment(token_counts, dp_size, balance_max_tokens)
-    if assignment is None:
-        assert len(data) % dp_size == 0, "data batch size must be divisible by dp_size, got {} and {}".format(
-            len(data), dp_size
-        )
+    if not balance_tokens or data.get("sub_seq_lengths") is not None or data.get("attention_mask") is None:
         return data.chunk(len(data) // dp_size), None
 
+    token_counts = data["attention_mask"].sum(dim=1).cpu().tolist()
     chunks, sample_order = [], []
-    for microbatches in assignment:
-        indices = [i for microbatch in microbatches for i in microbatch]
+    for indices in balanced_dp_indices(token_counts, dp_size):
         index = torch.tensor(indices, dtype=torch.long)
         chunk = data.__class__({key: (None if value is None else value[index]) for key, value in data.items()})
-        chunk.metadata = dict(data.metadata or {})
-        chunk.metadata[MICROBATCH_SIZES_KEY] = [len(microbatch) for microbatch in microbatches]
-        chunk.metadata[DP_BATCH_SIZE_KEY] = len(data)
+        chunk.metadata = data.metadata
         chunks.append(chunk)
         sample_order.extend(indices)
     return chunks, sample_order
@@ -175,15 +180,15 @@ class MeshDispatch(Dispatch):
         actor_infos: List[ActorInfo],
         method: str,
         data: TrainingInputBatch,
-        dp_balance_max_tokens: Optional[int] = None,
+        dp_balance_tokens: bool = False,
         **kwargs,
     ) -> OrderedRefs:
-        """A ``dp_balance_max_tokens`` value selects the token-balanced split (see :func:`split_for_dp`);
+        """``dp_balance_tokens=True`` selects the token-balanced split (see :func:`split_for_dp`);
         the returned list then carries the sample order."""
         assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
         object_refs = OrderedRefs()
         dp_size = actor_infos[0].rank.dp_size
-        data_chunks, object_refs.sample_order = split_for_dp(data, dp_size, dp_balance_max_tokens)
+        data_chunks, object_refs.sample_order = split_for_dp(data, dp_size, dp_balance_tokens)
 
         # Put each unique chunk in object store ONCE to avoid redundant serialization
         # when the same chunk is sent to multiple workers (e.g., SP/TP replicas)
@@ -201,7 +206,7 @@ class MeshDispatch(Dispatch):
         dp_size: int,
         data: TrainingInputBatch,
         mini_batch_boundaries: List[Tuple[int, int]],
-        dp_balance_max_tokens: Optional[int] = None,
+        dp_balance_tokens: bool = False,
     ) -> List[OrderedRefs]:
         """Pre-stage mini-batch chunks into the object store.
 
@@ -215,7 +220,7 @@ class MeshDispatch(Dispatch):
             mini_batch_boundaries: List of ``(start, end)`` index pairs.  The i-th mini-batch is
                 data[mini_batch_boundaries[i][0]:mini_batch_boundaries[i][1]].
 
-            dp_balance_max_tokens: When set, split each mini-batch with the token-balanced split
+            dp_balance_tokens: When True, split each mini-batch with the token-balanced split
                 (see :func:`split_for_dp`).
 
         Returns:
@@ -236,7 +241,7 @@ class MeshDispatch(Dispatch):
             assert (
                 mini_batch_size % dp_size == 0
             ), f"mini_batch_size % dp_size != 0, got {mini_batch_size} and {dp_size}"
-            chunks, sample_order = split_for_dp(mini_batch, dp_size, dp_balance_max_tokens)
+            chunks, sample_order = split_for_dp(mini_batch, dp_size, dp_balance_tokens)
             refs = OrderedRefs(ray.put(chunk) for chunk in chunks)
             refs.sample_order = sample_order
             all_chunk_refs.append(refs)

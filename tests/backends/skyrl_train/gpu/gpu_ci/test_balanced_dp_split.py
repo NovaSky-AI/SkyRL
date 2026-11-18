@@ -11,7 +11,7 @@ scale changes these values.
 The old log-probs come from a first forward pass, so the PPO ratio starts at 1 and the gradient is
 not clipped to zero.
 
-Tolerances. The two splits group the samples into different micro-batches. On FSDP the forward is
+Tolerances. The two splits give a rank different samples, so the ranks form different micro-batches. On FSDP the forward is
 bit-exact across groupings. On Megatron (BF16) a different grouping alone moves a per-token
 log-prob by up to ~0.07 and the gradient norm by ~0.1%, also with the default split and two
 different token caps. A swapped sample would differ by whole nats (random tokens: |log-prob| ~7).
@@ -23,8 +23,6 @@ Run with:
 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_balanced_dp_split.py -m "not megatron"
 uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_balanced_dp_split.py -m megatron
 """
-
-from typing import Optional
 
 import pytest
 import ray
@@ -108,7 +106,7 @@ def _config(strategy: str) -> SkyRLTrainConfig:
     return cfg
 
 
-def _run(strategy: str, balance_max_tokens: Optional[int]) -> dict:
+def _run(strategy: str, balance_tokens: bool) -> dict:
     cfg = _config(strategy)
     group = init_worker_with_type(
         "policy",
@@ -118,13 +116,13 @@ def _run(strategy: str, balance_max_tokens: Optional[int]) -> dict:
         cfg=cfg,
     )
 
-    def call(method, old_logprobs=None, max_tokens=balance_max_tokens):
-        refs = group.async_run_ray_method("mesh", method, data=_batch(old_logprobs), dp_balance_max_tokens=max_tokens)
+    def call(method, old_logprobs=None, balance=balance_tokens):
+        refs = group.async_run_ray_method("mesh", method, data=_batch(old_logprobs), dp_balance_tokens=balance)
         out = WorkerOutput.cat(group.actor_infos, ray.get(refs), sample_order=getattr(refs, "sample_order", None))
         return out, getattr(refs, "sample_order", None)
 
     # The old log-probs come from the default split in both arms, so both arms train on identical inputs.
-    before_out, _ = call("forward", max_tokens=None)
+    before_out, _ = call("forward", balance=False)
     old_logprobs = loss_fn_outputs_to_tensor(before_out.loss_fn_outputs, key="logprobs").float()
     train_out, order = call("forward_backward", old_logprobs)
     grad_norm = ray.get(group.async_run_ray_method("pass_through", "optim_step"))[0]
@@ -148,16 +146,15 @@ _RESULTS: dict = {}
 
 @pytest.mark.parametrize("strategy", STRATEGIES)
 def test_default_split_arm(ray_init_fixture, strategy):
-    result = _run(strategy, balance_max_tokens=None)
+    result = _run(strategy, balance_tokens=False)
     assert result["order"] is None
     _RESULTS[(strategy, "default")] = result
 
 
 @pytest.mark.parametrize("strategy", STRATEGIES)
 def test_balanced_split_arm(ray_init_fixture, strategy):
-    result = _run(strategy, balance_max_tokens=MAX_TOKENS)
+    result = _run(strategy, balance_tokens=True)
     assert result["order"] is not None and result["order"] != sorted(result["order"])
-    assert result["num_padding_microbatches"] == 0
     _RESULTS[(strategy, "balanced")] = result
 
 
