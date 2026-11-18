@@ -8,13 +8,13 @@ gradient norm of the optimizer step, and the per-sample log-probs after that ste
 different lengths and different advantages, so a wrong sample order or a split-dependent loss
 scale changes these values.
 
-The old log-probs come from a first forward pass, so the PPO ratio starts at 1 and the gradient is
-not clipped to zero.
+The old log-probs come from a first forward pass with the split of the run, as in the trainer. The
+PPO ratio therefore starts at 1 in both runs, and the gradient is not clipped to zero.
 
-Tolerances. The two splits give a rank different samples, so the ranks form different micro-batches. On FSDP the forward is
-bit-exact across groupings. On Megatron (BF16) a different grouping alone moves a per-token
-log-prob by up to ~0.07 and the gradient norm by ~0.1%, also with the default split and two
-different token caps. A swapped sample would differ by whole nats (random tokens: |log-prob| ~7).
+Tolerances. The two splits give a rank different samples, so the ranks form different
+micro-batches. On FSDP the forward is bit-exact across groupings. On Megatron (BF16) a different
+grouping alone moves a per-token log-prob by up to ~0.13, also with the default split on a
+reordered batch. A swapped sample would differ by whole nats (random tokens: |log-prob| ~7).
 Adam's first step is about ``lr * sign(grad)``, so it amplifies summation-order noise: the
 log-probs after the step differ by up to ~0.1 between two default-split runs with different caps.
 The after-step bounds are therefore loose, and they only catch a gross error.
@@ -121,8 +121,11 @@ def _run(strategy: str, balance_tokens: bool) -> dict:
         out = WorkerOutput.cat(group.actor_infos, ray.get(refs), sample_order=getattr(refs, "sample_order", None))
         return out, getattr(refs, "sample_order", None)
 
-    # The old log-probs come from the default split in both arms, so both arms train on identical inputs.
-    before_out, _ = call("forward", balance=False)
+    # Each arm computes the old log-probs with its own split, as the trainer does. The PPO ratio is
+    # then exactly 1 in both arms. With old log-probs from the other split, the BF16 regrouping noise
+    # of Megatron moves the ratio away from 1, and the gradient norm then differs by ~2% (also
+    # between two default-split runs on reordered batches).
+    before_out, _ = call("forward")
     old_logprobs = loss_fn_outputs_to_tensor(before_out.loss_fn_outputs, key="logprobs").float()
     train_out, order = call("forward_backward", old_logprobs)
     grad_norm = ray.get(group.async_run_ray_method("pass_through", "optim_step"))[0]
