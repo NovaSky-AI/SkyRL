@@ -13,7 +13,7 @@ class PythonCodeExecutorToolGroup(ToolGroup):
             result = subprocess.run(
                 ["python", "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=self.timeout, text=True
             )
-            if result.stderr:
+            if result.returncode != 0:
                 return f"Error executing Python code: {result.stderr.strip()}"
             return result.stdout.strip() if result.stdout else ""
         except subprocess.TimeoutExpired:
