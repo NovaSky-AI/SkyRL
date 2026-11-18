@@ -22,6 +22,14 @@ permissions:
   checks: write   # for status checks to appear
   contents: read
 
+# One run at a time per group, so runs don't compete for the H100 node. A newer run waits
+# instead of cancelling the one in progress, and replaces any run still pending. Keyed like
+# gpu_jax.yaml: on `pull_request_target`, `github.ref` is the base branch, so the key also
+# carries the event, the PR and the label.
+concurrency:
+  group: skyrl-gpu-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.label.name }}
+  cancel-in-progress: false
+
 jobs:
 
   skyrl_gpu_tests_h100:
@@ -41,9 +49,11 @@ jobs:
         )
       )
     runs-on: ubuntu-latest
-    # Runs as two parallel shards; see ci/gpu_ci_run_h100.sh.
+    # Runs as two shards, one at a time (see ci/gpu_ci_run_h100.sh), so each leg's 6 h job
+    # timeout starts only when the H100 node is free for it.
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         shard: [models, other]
     defaults:

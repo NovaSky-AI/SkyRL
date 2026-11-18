@@ -699,7 +699,7 @@ class MegatronConfig(BaseConfig):
     ``True`` / ``False`` force both empties on / off."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
-    Used for bridge and RoPE resolution. Not a general HF-config override -- use
+    Used for bridge resolution. Not a general HF-config override -- use
     ``transformer_config_kwargs`` instead."""
     dist_ckpt_optim_fully_reshardable: bool = False
     """When True, use the "fully-reshardable" format for the distributed-optimizer checkpoint.
@@ -765,6 +765,19 @@ class MegatronConfig(BaseConfig):
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
             self.transformer_config_kwargs = {}
+        # Megatron-Bridge builds the model from the checkpoint's own config, so these model_config overrides would
+        # never reach it (q_lora_rank used to, through a provider fixup that no longer exists). Checked here, where
+        # every entrypoint builds this config (SFT and Tinker never call validate_cfg), rather than in
+        # validate_megatron_cfg.
+        model_config_overrides = (self.model_config_kwargs or {}).get("model_config") or {}
+        unapplied = sorted(
+            {"rope_parameters", "rope_scaling", "rope_theta", "q_lora_rank"} & set(model_config_overrides)
+        )
+        if unapplied:
+            raise ValueError(
+                f"megatron_config.model_config_kwargs.model_config sets {unapplied}, which the Megatron backend does "
+                "not apply: Megatron-Bridge builds the model from the checkpoint's own config. Remove the override."
+            )
         # The top-level FP8 fields fold into the TransformerConfig kwargs; explicitly
         # configured kwargs take precedence.
         for key, value in (

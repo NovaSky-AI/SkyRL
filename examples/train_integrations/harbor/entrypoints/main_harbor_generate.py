@@ -13,8 +13,8 @@ from skyrl.train.utils import validate_cfg
 from skyrl.train.utils.utils import initialize_ray
 from skyrl.train.entrypoints.main_base import BasePPOExp
 from skyrl.train.generators.base import GeneratorInput, TrajectoryID
-from ..harbor_generator import HarborGenerator
-from ..dataset import HarborTaskDataset
+from skyrl.integration.harbor.harbor_generator import HarborGenerator
+from skyrl.integration.harbor.dataset import HarborTaskDataset
 from .main_harbor import (
     HarborSkyRLConfig,
     HARBOR_DEFAULT_CONFIG,

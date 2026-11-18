@@ -6,7 +6,8 @@ export CI=true
 # Usage: ci/gpu_ci_run_h100.sh [models|other|all]
 #
 # The full H100 suite takes ~5.5 h on one 4xH100 node, longer than the 4.5 h run timeout in
-# .github/workflows/gpu_ci_h100.yaml, so the workflow runs two shards as parallel jobs:
+# .github/workflows/gpu_ci_h100.yaml, so the workflow runs two shards as separate jobs, one
+# after the other:
 #   models -- test_megatron_models.py (~3 h)
 #   other  -- FSDP + the remaining Megatron files (~2.5 h)
 # `all` (the default) runs both, in order, in one job.

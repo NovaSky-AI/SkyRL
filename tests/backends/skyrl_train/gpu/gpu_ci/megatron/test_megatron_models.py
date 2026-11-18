@@ -228,6 +228,12 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
             scale_mode, e8m0_mode = "1", "0"
         env["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", scale_mode)
         env["VLLM_USE_DEEP_GEMM_E8M0"] = os.environ.get("VLLM_USE_DEEP_GEMM_E8M0", e8m0_mode)
+        # The first blockwise-FP8 row per model starts slowly: ~530 s of vLLM engine init for
+        # qwen3.5-0.8b on H100, which with server start-up reaches the 600 s health-wait default.
+        # Later FP8 rows for the same model start in ~100 s. A ceiling, not a duration.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
+        )
     if fp8_mode and fp8_mode.startswith("mxfp8"):
         # flashinfer's MXFP8 GEMM autotune on a cold cache can exceed the
         # 600 s health-wait default; production stages the same ceiling. This
@@ -261,6 +267,12 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         # kernels during CUDA-graph capture, then runs the JIT kernel warmup and the FlashInfer
         # MoE autotune: ~490 s to healthy on B200, and a cold H100 CI runner exceeded the 600 s
         # default. Warm caches boot in ~2 min.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
+        )
+    if "glm-4.7-flash" in model_name.lower():
+        # A cold node builds the Ray worker env and JIT-builds flashinfer's trtllm_mnnvl_comm
+        # during CUDA-graph capture, past the 600 s health-wait default. A ceiling, not a duration.
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
             "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
         )
