@@ -582,6 +582,99 @@ drafter aliases those two and its layerwise reload covers them. FSDP has no MTP 
 config validation (`_validate_draft_weight_sync_cfg`) requires Megatron. It also rejects
 serialized FP8 and adapter-only LoRA.
 
+## Bounded-memory colocated sync (opt-in)
+
+Design: `docs/design/colocated_weight_sync.md`. Results:
+`docs/design/colocated_weight_sync_results.md`. Code: `weight_sync/colocated/`
+(`slot_ring.py`, `instrumentation.py`) and `megatron_utils.export_from_offloaded_params`.
+Every option defaults off; with all off, colocated sync is unchanged. All are colocated
+CUDA-IPC only.
+
+| option | what it changes |
+|---|---|
+| `trainer.policy.megatron_config.weight_sync_from_offloaded_params` | `_prepare_for_weight_sync` offloads every model and optimizer instead of reloading the policy (`_sync_from_offloaded_params`), and `_finish_weight_sync` skips the offload. `MegatronWeightSource._export` runs inside `export_from_offloaded_params`, which replaces Megatron-Bridge's `model_bridge._gather_gtp_weight` with a GPU copy of the param's slice of the DDP buffer's `param_data_cpu` (via `param_index_map`). One param at a time, no prefetch. A no-op while params are on the GPU |
+| `generator.inference_engine.weight_sync_num_ipc_buffers` | N packed slots (`SlotRingSender`). Rank 0 posts `update_weights` for chunk k on a helper thread and joins it before posting k+1; one barrier per chunk. N > 2 adds nothing. Each slot is `weight_transfer_threshold_cuda_ipc_GB` per trainer rank |
+| `generator.inference_engine.weight_sync_layer_aligned_chunks` | Cut chunks at `.layers.<N>.` boundaries. A layer larger than a slot spans several chunks; a single tensor larger than a slot raises |
+| `generator.inference_engine.weight_sync_local_shard` | With vLLM expert parallelism, each trainer rank packs only the routed experts (`.experts.<id>.`) its GPU's worker serves. Rank 0 sends per-server lists indexed by `data_parallel_index * world_size + rank` (`update_weights_per_server`). Chunk cuts are agreed across ranks from the shared plan (`iter_packed_chunks`). Falls back to full tensors (logged) without vLLM EP, or if ranks and workers do not pair 1:1 by GPU UUID. Fused 3D expert tensors are not sliced. The draft session always sends full tensors |
+
+`SkyrlIPCTrainerWeightTransferEngine._send_packed` uses `SlotRingSender` when any of the
+last three is set; otherwise vLLM's packed producer runs. The receiver always uses
+`MultiSlotImporter` (one mapping per slot, released together at finish), which behaves like
+vLLM's `PackedBufferImporter` with one slot.
+
+**When to use which:**
+
+- Trainer params plus woken engine weights do not fit on the GPU: `weight_sync_from_offloaded_params`.
+  Full fine-tuning only. Costs one H2D copy of every param per sync.
+- MoE served with vLLM EP: `weight_sync_local_shard`. This is the main time and receiver-memory
+  win (Qwen3-30B-A3B: 61.1 to 10.3 GB per worker, 58 to 11 round trips).
+- `weight_sync_num_ipc_buffers=2` only when the trainer's gather is slow and there is memory for
+  a second slot. It gained nothing alone on Qwen3-30B-A3B (the receiver is the bottleneck), and
+  at ~600B scale a second slot ran the trainer out of memory.
+- At ~600B scale (EP32 next to TP8 engines), the working configuration was offloaded params,
+  local shards, and one 1 GB slot.
+
+**Validation** (`_validate_colocated_weight_sync_cfg`, from `validate_inference_engine_cfg`).
+Any option on requires `colocate_all=true` and `weight_sync_backend` `nccl` / `ipc`, and
+`weight_sync_num_ipc_buffers >= 1`. Serialized FP8 (`fp8_weight_sync_mode`) is rejected with
+`weight_sync_local_shard` or `weight_sync_from_offloaded_params`. `weight_sync_from_offloaded_params`
+also requires Megatron, `lora.rank == 0`, and `overlap_param_gather=false`. The ring,
+layer-aligned and local-shard options are not rejected under FSDP or in-memory LoRA sync, and
+are untested there.
+
+**Debug:**
+
+- `SKYRL_COLOCATED_SYNC_DEBUG=1`: per-sync trainer memory and time, export time and bytes,
+  round-trip count and time, ring counters (`Worker.get_last_weight_sync_stats`). Adds device
+  synchronizations.
+- `SKYRL_COLOCATED_SYNC_TRAINER_CAP_GIB`: test only; caps trainer CUDA memory during the send
+  to reproduce a large-model OOM on a small model.
+- Worker RPCs over `/collective_rpc`: `skyrl_debug_weight_checksums`,
+  `skyrl_debug_memory_stats` (device, CuMem by tag, receive
+  counters), `skyrl_local_shard_info`.
+- `Worker.reconfigure_for_test`: test only; swaps the trainer config to compare two paths on
+  the same trained weights.
+
+**Tests:**
+
+```bash
+# CPU -- validation, slot-ring packer and local-shard plan
+uv run --isolated --extra skyrl-train --extra dev pytest \
+  tests/train/test_colocated_weight_sync_config.py \
+  tests/backends/skyrl_train/weight_sync/test_colocated_slot_ring.py
+# CPU, needs megatron-bridge -- the offloaded-params read against fake DDP buffers
+uv run --isolated --extra dev --extra megatron pytest \
+  tests/backends/skyrl_train/distributed/test_export_from_offloaded_params.py
+
+# GPU, opt-in (8 GPUs): byte parity of every vLLM tensor vs a fresh load, and
+# after-train-step parity vs the default path. Skipped unless SKYRL_CWS_MODEL is set;
+# SKYRL_CWS_OVERRIDES (JSON of dotted config keys) selects the options under test.
+SKYRL_CWS_MODEL=Qwen/Qwen3-30B-A3B SKYRL_CWS_VLLM_EP=1 \
+SKYRL_CWS_OVERRIDES='{"generator.inference_engine.weight_sync_local_shard": true}' \
+uv run --isolated --extra dev --extra megatron pytest -s \
+  tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_colocated_weight_sync.py
+```
+
+The other harness variables (`SKYRL_CWS_GPUS`, `_NODES`, `_TP`, `_EP`, `_INFER_TP`,
+`_BUFFER_GB`, `_NUM_SYNCS`, `_EAGER`, ...) are listed in the results doc.
+
+**Gotchas:**
+
+- Megatron-Bridge builds a new bridge instance on every `AutoBridge._model_bridge` access, so
+  state set on that instance never reaches the export. At ~600B scale this made every sync
+  stack a layer's experts, run out of memory and fall back to CPU (~18 min per sync). Set
+  such state at class level.
+- Byte parity is the correctness gate. With CUDA graphs on, greedy output drifts at near-tie
+  tokens even with identical weights.
+- vLLM caches FlashInfer autotune results per rank; a run killed mid-autotune hangs the next
+  boot in `profile_run`. Use a fresh `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` (the harness does).
+
+Extension points relied on: Megatron-Bridge `model_bridge._gather_gtp_weight`; megatron-core
+`_ParamAndGradBuffer.param_data_cpu` / `param_index_map` and DDP `buffers` /
+`expert_parallel_buffers`; vLLM `IPCTrainerWeightTransferEngine._send_packed`,
+`IPCWeightTransferEngine._packed_importer`, `GPUWorker.update_weights` list routing, and the
+MoE modules' `expert_map`.
+
 ## KV offload during non-colocated weight sync
 
 Non-colocated normally keeps the engine fully awake and does `pause_generation → broadcast → resume_generation`. The opt-in `generator.inference_engine.offload_kv_for_weight_sync` flag sleeps the engine (freeing the KV cache from GPU) *during* the sync so `gpu_memory_utilization` can be pushed higher (no need to keep KV cache resident alongside the weight-transfer scratch buffers). It turns on `enable_sleep_mode` (via `inference_servers/utils.py`). Requires non-colocated and non-LoRA. Orchestrated in `WorkerDispatch.save_weights_for_sampler`; the flow depends on the trainer:
@@ -657,6 +750,7 @@ The CPU tests do **not** import `NewInferenceWorkerWrap`. Any change to the work
 | Draft session (`draft_session`, `SkyrlDraftSessionMixin`, `_build_draft_weight_source`) | `test_draft_session.py` (CPU) **and** GPU `megatron/test_mtp_weight_sync.py` |
 | The LoRA target (`lora_target.py`, the LoRA source, `patch_lora_in_memory.py`) | `test_lora_target.py` + `test_lora_receive.py` + `test_sources.py::TestLoraAdapterWeightSource` (CPU), then GPU `test_lora.py -k megatron_adapter` (disk and memory, colocated and not; the memory rows assert nothing was written to `lora_sync_path`) |
 | `NewInferenceWorkerWrap` | GPU `test_weight_sync.py` (CPU tests will not catch regressions) |
+| Colocated sync (`colocated/`, `export_from_offloaded_params`, `_validate_colocated_weight_sync_cfg`) | `test_colocated_weight_sync_config.py` + `test_colocated_slot_ring.py` + `test_export_from_offloaded_params.py` (CPU), then the opt-in GPU `megatron/test_colocated_weight_sync.py` with the options under test in `SKYRL_CWS_OVERRIDES` |
 | Delta publish / manifest / payload format | `test_delta_checkpoint.py` **and** GPU `test_delta_weight_sync_e2e.py` |
 | `LocalCheckpointStore` (fetch, replay, apply, cache keys) | `test_delta_checkpoint.py` |
 | `DeltaWeightTransferEngine` (receive side) | GPU `test_delta_weight_sync_e2e.py` only — it runs inside the vLLM worker |

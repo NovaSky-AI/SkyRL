@@ -509,6 +509,24 @@ class Worker(DistributedTorchRayActor):
             "total": total,
         }
 
+    def reconfigure_for_test(self, cfg: Any) -> None:
+        """Test-only: adopt another run config's trainer section and drop the transfer engine.
+
+        Lets a GPU test compare two weight-sync paths on the same trained weights; the
+        caller re-runs ``init_weight_sync_state`` afterwards.
+        """
+        from skyrl.backends.skyrl_train.weight_sync.weight_senders import (
+            teardown_engine,
+        )
+
+        self.cfg = cfg.trainer
+        engine, self._weight_sync_engine = getattr(self, "_weight_sync_engine", None), None
+        teardown_engine(engine)
+
+    def get_last_weight_sync_stats(self) -> Optional[Dict[str, Any]]:
+        """Per-phase memory/time of this rank's last weight sync (``SKYRL_COLOCATED_SYNC_DEBUG=1`` only)."""
+        return getattr(self, "last_weight_sync_stats", None)
+
     def save_memory_snapshot(self, tag: str = ""):
         """Save a snapshot of memory usage on the Worker's CUDA device.
 
@@ -699,8 +717,24 @@ class Worker(DistributedTorchRayActor):
         # is incompatible with the VMM addresses expandable segments use; some
         # engines (sharded_rdt) share GPU memory on every run and ask for the
         # toggle unconditionally.
-        with self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments):
-            await self._weight_sync_thread(engine.send_weights)
+        from skyrl.backends.skyrl_train.weight_sync.colocated.instrumentation import (
+            PhaseRecorder,
+            instrument_send,
+            trainer_memory_cap,
+        )
+        from skyrl.env_vars import SKYRL_COLOCATED_SYNC_DEBUG
+
+        recorder = PhaseRecorder("trainer_send") if SKYRL_COLOCATED_SYNC_DEBUG else None
+        with (
+            self._expandable_segments_disabled_for_sync(force=engine.skyrl_force_disable_expandable_segments),
+            trainer_memory_cap(),
+        ):
+            if recorder is None:
+                await self._weight_sync_thread(engine.send_weights)
+            else:
+                with recorder.phase("send"), instrument_send(engine, recorder):
+                    await self._weight_sync_thread(engine.send_weights)
+                self.last_weight_sync_stats = {"phases": recorder.phases, "counters": recorder.counters}
 
         if cache_reset_task is not None:
             await cache_reset_task

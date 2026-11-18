@@ -20,9 +20,20 @@ Imports vLLM at module scope, so import this lazily from anything that must work
 without the wheel.
 """
 
+import contextlib
 import re
 from functools import cached_property
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    ContextManager,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Tuple,
+)
 
 import torch
 from loguru import logger
@@ -125,6 +136,18 @@ class FsdpWeightSource(WeightSource):
             yield f"{self._prefix}{key}", full
 
 
+def _export_from_offloaded_params(module: Any) -> ContextManager[None]:
+    """:func:`~skyrl.backends.skyrl_train.distributed.megatron.megatron_utils.export_from_offloaded_params`,
+    or nothing without Megatron installed (a fake bridge and module in CPU tests)."""
+    try:
+        from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
+            export_from_offloaded_params,
+        )
+    except ImportError:
+        return contextlib.nullcontext()
+    return export_from_offloaded_params(module)
+
+
 class MegatronWeightSource(WeightSource):
     """``WeightSource`` over a Megatron model, via Megatron-Bridge.
 
@@ -166,7 +189,10 @@ class MegatronWeightSource(WeightSource):
                 for task in self._bridge.get_conversion_tasks(self._module)
                 if self._param_filter(task.global_param_name)
             ]
-        return self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=tasks)
+        # Offloaded params (colocated sync with megatron_config.weight_sync_from_offloaded_params)
+        # are read from their CPU copies one at a time; a no-op while they are on the GPU.
+        with _export_from_offloaded_params(self._module):
+            yield from self._bridge.export_hf_weights(self._module, show_progress=False, conversion_tasks=tasks)
 
     def _wire_dtype(self, tensor: torch.Tensor) -> torch.dtype:
         return wire_dtype(tensor, self._dtype)

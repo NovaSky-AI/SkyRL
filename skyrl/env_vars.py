@@ -25,6 +25,23 @@ Timeout for initializing the NCCL process group for the worker, defaults to 10 m
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Colocated weight sync (debug / test only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+SKYRL_COLOCATED_SYNC_DEBUG = str(os.environ.get("SKYRL_COLOCATED_SYNC_DEBUG", "False")).lower() in ("1", "true")
+"""
+Record per-phase GPU memory and time of every colocated weight sync on each trainer rank
+(``Worker.get_last_weight_sync_stats``). Adds device synchronizations; debug only.
+"""
+
+_trainer_cap = os.environ.get("SKYRL_COLOCATED_SYNC_TRAINER_CAP_GIB")
+SKYRL_COLOCATED_SYNC_TRAINER_CAP_GIB = float(_trainer_cap) if _trainer_cap else None
+"""
+Test only: cap each trainer process's CUDA allocations during a colocated weight sync, in GiB,
+to reproduce on a small model the OOM of a large one whose engines' woken weights fill the GPU.
+"""
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Inference Servers
 # ─────────────────────────────────────────────────────────────────────────────
 

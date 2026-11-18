@@ -145,6 +145,66 @@ def _build_skyrl_ipc_trainer() -> "tuple[type, type]":
     ):
         init_info_cls = SkyrlIPCTrainerInitInfo
 
+        #: Colocated send options (docs/design/colocated_weight_sync.md), set by
+        #: build_trainer_engine. All off keeps vLLM's packed producer unchanged.
+        skyrl_num_buffers: int = 1
+        skyrl_layer_aligned: bool = False
+        skyrl_local_shard: bool = False
+        _skyrl_plan: Any = None
+        _skyrl_plan_resolved: bool = False
+        skyrl_last_send_stats: Optional[dict] = None
+
+        def _skyrl_ring_enabled(self) -> bool:
+            return self.skyrl_num_buffers > 1 or self.skyrl_layer_aligned or self.skyrl_local_shard
+
+        def _send_packed(self, source: WeightSource) -> None:
+            if not self._skyrl_ring_enabled():
+                return super()._send_packed(source)
+            from skyrl.backends.skyrl_train.weight_sync.colocated.slot_ring import (
+                SlotRingSender,
+            )
+
+            # The draft session sends a different (small) source: full tensors there.
+            plan = self._skyrl_local_shard_plan() if source is not self.skyrl_draft_source else None
+            sender = SlotRingSender(
+                self,
+                num_buffers=self.skyrl_num_buffers,
+                layer_aligned=self.skyrl_layer_aligned,
+                plan=plan,
+            )
+            sender.send(source)
+            self.skyrl_last_send_stats = dict(sender.stats, local_shard=plan is not None)
+
+        def _skyrl_local_shard_plan(self):
+            """Resolve (once, on every rank) which experts each rank's colocated worker serves."""
+            if not self.skyrl_local_shard or self._skyrl_plan_resolved:
+                return self._skyrl_plan
+            import torch.distributed as dist
+
+            from skyrl.backends.skyrl_train.weight_sync.colocated.slot_ring import (
+                build_local_shard_plan,
+            )
+
+            world = dist.get_world_size() if dist.is_initialized() else 1
+            uuids = [None] * world
+            if world > 1:
+                dist.all_gather_object(uuids, self.gpu_uuid)
+            else:
+                uuids = [self.gpu_uuid]
+            box = [None]
+            if self.is_sender:
+                infos = self.client.collective_rpc_per_server("skyrl_local_shard_info")
+                plan, reason = build_local_shard_plan(infos, uuids)
+                box = [(plan, reason)]
+            if world > 1:
+                dist.broadcast_object_list(box, src=0)
+            plan, reason = box[0]
+            if plan is None and self.is_sender:
+                logger.warning("weight_sync_local_shard: sending full tensors (%s)", reason)
+            self._skyrl_plan = plan
+            self._skyrl_plan_resolved = True
+            return plan
+
     return SkyrlIPCTrainerInitInfo, SkyrlIPCTrainerWeightTransferEngine
 
 
@@ -253,6 +313,10 @@ def build_trainer_engine(
     else:
         engine = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
     engine.skyrl_draft_source = draft_source
+    if backend == "ipc":
+        engine.skyrl_num_buffers = int(getattr(ie_cfg, "weight_sync_num_ipc_buffers", 1) or 1)
+        engine.skyrl_layer_aligned = bool(getattr(ie_cfg, "weight_sync_layer_aligned_chunks", False))
+        engine.skyrl_local_shard = bool(getattr(ie_cfg, "weight_sync_local_shard", False))
 
     if backend == "sharded_rdt":
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
