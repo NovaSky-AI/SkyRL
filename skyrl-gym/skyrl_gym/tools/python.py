@@ -14,7 +14,8 @@ class PythonCodeExecutorToolGroup(ToolGroup):
                 ["python", "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=self.timeout, text=True
             )
             if result.returncode != 0:
-                return f"Error executing Python code: {result.stderr.strip()}"
+                error = result.stderr.strip() or result.stdout.strip() or f"exited with code {result.returncode}"
+                return f"Error executing Python code: {error}"
             return result.stdout.strip() if result.stdout else ""
         except subprocess.TimeoutExpired:
             return f"Error executing Python code: Execution timed out after {self.timeout} seconds."

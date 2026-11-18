@@ -49,6 +49,10 @@ def test_tool_parsing(action, expected_tool_name, expected_tool_input):
             "<tool><python>import warnings; warnings.warn('deprecated'); print(42)</python></tool>",
             "42",
         ),
+        (
+            "<tool><python>import sys; print('missing input'); sys.exit(2)</python></tool>",
+            "Error executing Python code: missing input",
+        ),
     ],
 )
 def test_python_code_execution(action, expected_output):
