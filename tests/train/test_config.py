@@ -26,6 +26,7 @@ from skyrl.train.utils import utils as train_utils
 from skyrl.train.utils.utils import (
     prepare_runtime_environment,
     validate_cfg,
+    validate_generator_cfg,
     validate_inference_engine_cfg,
     validate_megatron_cfg,
     validate_optimizer_offload_to_disk_cfg,
@@ -47,6 +48,55 @@ def _make_validated_test_config():
     cfg.trainer.policy_mini_batch_size = cfg.trainer.train_batch_size
     cfg.trainer.critic_mini_batch_size = cfg.trainer.train_batch_size
     return cfg
+
+
+def test_vlm_lora_requires_explicit_tower_support(monkeypatch):
+    monkeypatch.setattr(train_utils, "check_is_vlm", lambda _: True)
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "fsdp"
+    cfg.trainer.policy.model.lora.rank = 8
+    cfg.generator.max_input_length = cfg.trainer.max_prompt_length
+
+    with pytest.raises(ValueError, match=r"engine_init_kwargs.enable_tower_connector_lora=true"):
+        validate_generator_cfg(cfg)
+
+
+def test_vlm_lora_accepts_explicit_tower_support(monkeypatch):
+    monkeypatch.setattr(train_utils, "check_is_vlm", lambda _: True)
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "fsdp"
+    cfg.trainer.policy.model.lora.rank = 8
+    cfg.generator.max_input_length = cfg.trainer.max_prompt_length
+    cfg.generator.inference_engine.engine_init_kwargs["enable_tower_connector_lora"] = True
+
+    validate_generator_cfg(cfg)
+
+
+def test_vlm_lora_pd_requires_tower_support_on_both_roles(monkeypatch):
+    monkeypatch.setattr(train_utils, "check_is_vlm", lambda _: True)
+    cfg = _make_validated_test_config()
+    cfg.trainer.strategy = "fsdp"
+    cfg.trainer.policy.model.lora.rank = 8
+    cfg.generator.max_input_length = cfg.trainer.max_prompt_length
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.enable_pd = True
+    ie_cfg.num_engines = 2
+    ie_cfg.num_prefill = 1
+    for role in ("prefill", "decode"):
+        setattr(
+            ie_cfg,
+            f"{role}_init_kwargs",
+            {"kv_transfer_config": {"kv_connector": "NixlConnector"}, "enable_tower_connector_lora": True},
+        )
+
+    validate_generator_cfg(cfg)
+
+    for role in ("prefill", "decode"):
+        kwargs = getattr(ie_cfg, f"{role}_init_kwargs")
+        del kwargs["enable_tower_connector_lora"]
+        with pytest.raises(ValueError, match=rf"{role}_init_kwargs.enable_tower_connector_lora=true"):
+            validate_generator_cfg(cfg)
+        kwargs["enable_tower_connector_lora"] = True
 
 
 # Helper dataclasses for testing
