@@ -6,6 +6,7 @@ import torch.distributed as dist
 
 from skyrl.backends.skyrl_train.distributed.strategy import DistributedStrategy
 from skyrl.backends.skyrl_train.training_batch import (
+    MICROBATCH_SIZES_KEY,
     PACKED_FIELD_PADDING,
     TensorBatch,
     TrainingInputBatch,
@@ -287,15 +288,35 @@ class TokenBasedBatchIterator(BaseBatchIterator):
         attention_mask = data["attention_mask"]
         self._token_counts = attention_mask.sum(dim=1).cpu().tolist()  # [batch_size]
 
-        # Create microbatches based on token count. The "balanced" packer treats
-        # the token budget as a soft cap: a sequence longer than the budget gets
-        # its own (over-budget) microbatch rather than raising.
-        packer = make_seq_packer("balanced", bin_capacity=self._max_tokens_per_microbatch)
-        self._microbatches = packer.pack(self._token_counts)
+        prepacked = self._prepacked_microbatches()
+        if prepacked is not None:
+            # The driver packed this chunk (token-balanced DP split): keep its micro-batches.
+            self._microbatches = prepacked
+        else:
+            # Create microbatches based on token count. The "balanced" packer treats
+            # the token budget as a soft cap: a sequence longer than the budget gets
+            # its own (over-budget) microbatch rather than raising.
+            packer = make_seq_packer("balanced", bin_capacity=self._max_tokens_per_microbatch)
+            self._microbatches = packer.pack(self._token_counts)
 
         # Synchronize the number of microbatches across all DP workers
         max_num_microbatches = self._sync_num_microbatches()
         self._num_padding_microbatches = max_num_microbatches - len(self._microbatches)
+
+    def _prepacked_microbatches(self) -> Optional[List[List[int]]]:
+        """Micro-batches listed by the driver in the chunk metadata, as consecutive sample ranges.
+
+        ``None`` when the chunk has no list, or when the list does not cover this batch (a
+        slice of a dispatched chunk still carries the metadata of the whole chunk).
+        """
+        sizes = (self.data.metadata or {}).get(MICROBATCH_SIZES_KEY)
+        if not sizes or sum(sizes) != len(self._token_counts):
+            return None
+        microbatches, start = [], 0
+        for size in sizes:
+            microbatches.append(list(range(start, start + size)))
+            start += size
+        return microbatches
 
     def _create_microbatch_from_indices(self, indices: List[int]) -> TrainingInputBatch:
         """Create a TrainingInputBatch from a list of sample indices."""

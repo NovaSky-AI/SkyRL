@@ -39,6 +39,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
 | `patches/megatron/test_dist_optim_te_load_state_dict.py` (CPU) | `patch_dist_optim_te_load_state_dict.py` |
 | `patches/megatron/test_dist_ckpt_exchange_wait.py` (CPU) | `patch_dist_ckpt_exchange_wait.py` |
+| `gpu_ci/patches/megatron/test_moe_node_dedup_dispatch.py` | `patch_moe_node_dedup_dispatch.py` vs the stock dispatcher (four ranks, two pseudo-nodes) |
+| `patches/megatron/test_moe_twohop_fused.py` (CPU) | `_moe_twohop_fused.py` (the fused mode of `patch_moe_node_dedup_dispatch.py`) vs a dense oracle, ranks as threads |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -284,6 +286,31 @@ Per-forward DSA index-share carrier under activation recompute.
   `_dsa_index_share_carrier_scope`, and applying the patch logs a warning telling you to delete it.
 - **Remove:** the `patch_dsa_index_share()` call in `MegatronWorker.make_megatron_module`, both
   files here, and the `*.patch` package-data entry in `pyproject.toml` if nothing else uses it.
+
+### `patch_moe_node_dedup_dispatch.py`: one inter-node copy per (token, node) in the MoE all-to-all
+
+Opt-in (`SKYRL_MOE_NODE_DEDUP=1`). megatron-core's all-to-all dispatcher sends a token once per
+selected expert; with top-8 over 288 experts on 8 nodes most tokens pick several experts on the
+same remote node. The patch sends each token once per destination node (to the same-local-index GPU
+there, with that node's routing bits and probabilities), fans copies out over NVLink, and sums each
+node's expert outputs there before one partial sum crosses back. Expert ranks see exactly the stock
+rows/order (checked against `output_splits` every call), so ETP, sorting and experts are untouched;
+the combine's bf16 sum is only re-associated. 1.41x faster fwd+bwd at 64k on 64 B200 whose
+inter-node NCCL runs over TCP. Applied in `make_megatron_module` (no-op unless enabled).
+
+`SKYRL_MOE_NODE_DEDUP=fused` selects the fused form (`_moe_twohop_fused.py`, kernels in
+`_moe_twohop_kernels.py`). It sends hidden states, probabilities and expert columns in one packed
+message per hop: 2 all-to-alls per dispatch and 2 per combine (the tensor-op form uses 7 and 2).
+One count all-gather gives every split size of both hops. Two Triton row kernels (a row gather
+into a packed buffer, and a fixed fan-in row sum) do the data moves, and the backward is written by
+hand. It replaces megatron-core's permutation, so it accepts `moe_permute_fusion`; it needs ETP 1.
+Rows of one expert arrive in a different order than in megatron-core (by relay, then source node),
+which the experts do not see. `SKYRL_MOE_NODE_DEDUP_KERNELS=torch` runs the kernels as plain tensor
+ops. `SKYRL_MOE_DISPATCH_PROFILE=1` times each phase of the stock, tensor-op and fused paths.
+- **Landed?** megatron-core's alltoall dispatcher deduplicates per node (or SkyRL switches to a
+  hierarchical dispatcher such as DeepEP/HybridEP where the network allows).
+- **Remove:** the module, `_moe_twohop_fused.py`, `_moe_twohop_kernels.py`, its call in
+  `make_megatron_module`, `test_moe_node_dedup_dispatch.py` and `test_moe_twohop_fused.py`.
 
 ### `patch_sparse_mla_nope.py`: NVIDIA/Megatron-LM#7617
 

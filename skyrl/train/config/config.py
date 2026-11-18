@@ -1805,6 +1805,17 @@ class TrainerConfig(BaseConfig):
     longer than ``max_tokens_per_microbatch`` is placed alone in its own microbatch that exceeds the
     cap (no error, no truncation). The true peak microbatch size is therefore
     ``max(max_tokens_per_microbatch, longest_sequence_in_batch)``."""
+    balance_dp_tokens: bool = False
+    """Balance tokens across data-parallel ranks. Needs ``max_tokens_per_microbatch > 0``.
+
+    When False, a batch is cut into ``dp_size`` chunks with the same number of samples, in batch
+    order, and each rank packs its chunk into micro-batches. Ranks with short samples then pad with
+    empty micro-batches and wait for the busiest rank in every collective.
+
+    When True, the driver packs the whole batch (or mini-batch) into micro-batches of at most
+    ``max_tokens_per_microbatch`` tokens and deals them to the ranks. All ranks get the same number
+    of micro-batches, and the micro-batches that run at the same time hold about the same number of
+    tokens. Ranks can get different numbers of samples. Outputs keep the batch order."""
     recompute_old_logprobs_per_minibatch: bool = True
     """When True, recomputes policy/ref model logprobs (and critic values) per mini-batch using
     the same mini-batch + DP partition as the training step. When False, a single full-batch forward is run.
