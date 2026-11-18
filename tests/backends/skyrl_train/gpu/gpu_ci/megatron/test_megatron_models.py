@@ -270,6 +270,12 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
             "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
         )
+    if "glm-4.7-flash" in model_name.lower():
+        # A cold node builds the Ray worker env and JIT-builds flashinfer's trtllm_mnnvl_comm
+        # during CUDA-graph capture, past the 600 s health-wait default. A ceiling, not a duration.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
+        )
     return env or None
 
 
