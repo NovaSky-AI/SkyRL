@@ -15,6 +15,7 @@ from skyrl.backends.skyrl_train.distributed.megatron import quantization_utils
 from skyrl.train.config.config import (
     BaseConfig,
     DeltaWeightSyncConfig,
+    MegatronConfig,
     PolicyConfig,
     SkyRLTrainConfig,
     TrainerConfig,
@@ -22,6 +23,7 @@ from skyrl.train.config.config import (
     build_nested_dataclass,
     overrides_dict_to_dotlist,
 )
+from skyrl.train.config.sft_config import SFTConfig
 from skyrl.train.utils import utils as train_utils
 from skyrl.train.utils.utils import (
     prepare_runtime_environment,
@@ -548,6 +550,28 @@ def test_megatron_empty_cuda_cache_from_cli_override():
     )
     assert cfg.trainer.policy.megatron_config.empty_cuda_cache is None
     assert cfg.trainer.policy.megatron_config.empty_cuda_cache_after_backward() is False
+
+
+@pytest.mark.parametrize(
+    ("config_cls", "prefix"),
+    [
+        (SkyRLTrainConfig, "trainer.policy.megatron_config"),
+        (SkyRLTrainConfig, "trainer.ref.megatron_config"),
+        (SFTConfig, "megatron_config"),
+    ],
+)
+@pytest.mark.parametrize("key", ["rope_theta", "rope_parameters.rope_theta", "rope_scaling.factor", "q_lora_rank"])
+def test_megatron_config_rejects_unapplied_overrides_in_model_config(config_cls, prefix, key):
+    # Every entrypoint builds a MegatronConfig, including SFT and Tinker, which never call validate_cfg.
+    with pytest.raises(ValueError, match="megatron_config.model_config_kwargs.model_config sets"):
+        config_cls.from_cli_overrides([f"{prefix}.model_config_kwargs.model_config.{key}=500000.0"])
+
+
+@pytest.mark.parametrize(
+    "model_config_kwargs", [{"model_config": {"vocab_size": 151936}}, {"model_config": None}, {}, None]
+)
+def test_megatron_config_allows_other_model_config_overrides(model_config_kwargs):
+    MegatronConfig(model_config_kwargs=model_config_kwargs)
 
 
 def test_megatron_validation_allows_inference_only_fp8_param_without_gather():

@@ -417,22 +417,6 @@ class MegatronWorker:
             provider.mtp_num_layers = None
             _clear_mtp_hybrid_pattern(provider)
 
-        # Workaround for megatron-bridge CONFIG_MAPPING dropping None values:
-        # MLA models like Moonlight-16B have q_lora_rank=None (no Q compression),
-        # but CONFIG_MAPPING skips None so the MCoreMLATransformerConfig default
-        # (512) is used instead, causing the wrong model architecture to be built.
-        # see: https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/c8eb587c5fd43163dbcd9c40980225b3fe1981f8/src/megatron/bridge/recipes/moonlight/moonlight_16b.py#L60
-        if hasattr(provider, "q_lora_rank") and hasattr(hf_config, "q_lora_rank"):
-            provider.q_lora_rank = hf_config.q_lora_rank
-
-        # Workaround for transformers v5 moving rope_theta into rope_parameters
-        # (previously it was a top-level config attribute). megatron-bridge's
-        # CONFIG_MAPPING reads config.rope_theta which no longer exists in v5,
-        # causing it to fall back to the default rotary_base of 10000.
-        rope_params = getattr(hf_config, "rope_parameters", None) or getattr(hf_config, "rope_scaling", None)
-        if isinstance(rope_params, dict) and "rope_theta" in rope_params:
-            provider.rotary_base = rope_params["rope_theta"]
-
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
         provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
