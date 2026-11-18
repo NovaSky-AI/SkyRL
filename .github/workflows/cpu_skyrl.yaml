@@ -60,6 +60,9 @@ jobs:
     if: github.repository == 'NovaSky-AI/SkyRL'
     needs: check_code_quality
     runs-on: ubuntu-latest
+    env:
+      # Allow transient GitHub Releases errors to clear when fetching backend wheels.
+      UV_HTTP_RETRIES: '5'
     defaults:
       run:
         shell: bash
