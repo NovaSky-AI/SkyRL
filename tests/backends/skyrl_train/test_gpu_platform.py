@@ -84,6 +84,26 @@ def test_rocm_unsupported_names_the_platform(feature):
     assert rocm_unsupported(feature).startswith("Not supported on AMD ROCm: ")
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_fused_lm_head_kernel_asks_for_ieee_dot_precision_on_rocm(rocm, dtype):
+    # Triton on ROCm has no tf32: it fails to compile the kernel when asked for it.
+    from skyrl.backends.skyrl_train.distributed.megatron import (
+        fused_linear_logprob_triton as kernel,
+    )
+
+    assert kernel._dot_input_precision(torch.empty(1, dtype=dtype)) == "ieee"
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_fused_lm_head_kernel_keeps_tf32_dot_precision_on_a_cuda_build(not_rocm, monkeypatch, dtype):
+    from skyrl.backends.skyrl_train.distributed.megatron import (
+        fused_linear_logprob_triton as kernel,
+    )
+
+    monkeypatch.setattr(kernel, "FORCE_FP32_IEEE_PRECISION", False)
+    assert kernel._dot_input_precision(torch.empty(1, dtype=dtype)) == "tf32"
+
+
 def test_unregistered_bridges_warn_unless_megatron_itself_is_missing(caplog):
     from skyrl.backends.skyrl_train.workers.megatron import model_bridges
 

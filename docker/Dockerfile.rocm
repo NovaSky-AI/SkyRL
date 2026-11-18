@@ -24,8 +24,7 @@ ARG NVTE_ROCM_ARCH="gfx942;gfx950"
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-ENV HF_HUB_ENABLE_HF_TRANSFER=1 \
-    PATH=/root/.local/bin:${PATH}
+ENV PATH=/root/.local/bin:${PATH}
 
 # Ray writes no per-process GPU mask in this image: every process sees every GPU, and SkyRL selects its
 # own by the index Ray assigned. Under Ray's default masking a trainer process sees one GPU while the
