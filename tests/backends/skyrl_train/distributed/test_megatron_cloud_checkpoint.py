@@ -73,11 +73,18 @@ def strategy_module(monkeypatch):
                 "load_megatron_grads_to_gpu",
                 "load_megatron_model_to_gpu",
                 "load_megatron_optimizer",
+                "megatron_grad_buffers_resident",
                 "offload_megatron_grads_to_cpu",
                 "offload_megatron_model_to_cpu",
                 "offload_megatron_optimizer",
             )
         },
+    )
+    stub(
+        "skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk",
+        CHECKPOINT_SUBDIR="optimizer_offload_to_disk",
+        OffloadedDistributedOptimizer=DistributedOptimizer,
+        disk_state_stores=Mock(return_value=[]),
     )
     stub("skyrl.backends.skyrl_train.workers.megatron.megatron_model_wrapper", MegatronModelWrapper=object)
     path = Path(__file__).parents[4] / "skyrl/backends/skyrl_train/distributed/megatron/megatron_strategy.py"
