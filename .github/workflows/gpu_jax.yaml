@@ -9,7 +9,7 @@ name: SkyRL-JAX-GPU
 # YAML anchors.
 #
 # Three ways this job starts:
-# - `push` to `main`, and PRs whose head branch lives on NovaSky-AI/SkyRL,
+# - `push` to `main`, and PRs whose head branch lives on skyrl-project/SkyRL,
 #   auto-run (paths-gated above).
 # - Fork PRs run only when a maintainer applies the `run_jax_gpu_ci` label,
 #   through `pull_request_target`.
@@ -67,7 +67,7 @@ jobs:
     # `types: [labeled]` fires one event per label added; testing
     # `github.event.label.name` means bulk labelling starts one run, not one per label.
     if: >
-      github.repository == 'NovaSky-AI/SkyRL' &&
+      github.repository == 'skyrl-project/SkyRL' &&
       (
         (github.event_name == 'push' || github.event_name == 'workflow_dispatch') ||
         (github.event_name == 'pull_request' &&
