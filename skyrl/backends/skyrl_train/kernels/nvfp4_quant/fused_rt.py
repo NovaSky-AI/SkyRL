@@ -11,9 +11,10 @@ and Philox4x32-10 random bits: weights keyed by their :class:`.stochastic.Weight
 per expert), activations by a seed drawn from the current CUDA generator.
 
 The kernel library is compiled with ``nvcc`` on first use (cached per source hash under ``SKYRL_QAT_NVFP4_KERNEL_DIR``,
-default ``$TMPDIR/skyrl_nvfp4_kernels``) and loaded with ctypes. :func:`available` is False, and callers keep the
-FlashInfer path, when ``SKYRL_QAT_NVFP4_FUSED=0``, the device is not sm_100 / sm_103, or the build fails. It is built
-for ``sm_100a`` and ``sm_103a``: the stochastic ``cvt.rs`` conversion is arch-specific (no ``sm_100f`` family form).
+default ``$TMPDIR/skyrl_nvfp4_kernels_<uid>``; it must be the user's own and not writable by others) and loaded with
+ctypes. :func:`available` is False, and callers keep the FlashInfer path, when ``SKYRL_QAT_NVFP4_FUSED=0``, the device
+is not sm_100 / sm_103, or the build fails. It is built for ``sm_100a`` and ``sm_103a``: the stochastic ``cvt.rs``
+conversion is arch-specific (no ``sm_100f`` family form).
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import hashlib
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -63,6 +65,22 @@ def _nvcc() -> str | None:
     return next((c for c in cands if c and os.path.exists(c)), None)
 
 
+def _kernel_dir() -> Path:
+    """The kernel cache directory. Its libraries are loaded into this process, so it must be a real directory (not a
+    symlink) owned by this user that group and others cannot write."""
+    uid = os.getuid()
+    default = Path(tempfile.gettempdir()) / f"skyrl_nvfp4_kernels_{uid}"
+    root = Path(os.environ.get("SKYRL_QAT_NVFP4_KERNEL_DIR") or default)
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    st = root.lstat()
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid or st.st_mode & 0o022:
+        raise RuntimeError(
+            f"unsafe NVFP4 kernel cache {root} (owner uid {st.st_uid}, mode {stat.S_IMODE(st.st_mode):o}): it must be "
+            f"a directory owned by uid {uid} that group and others cannot write"
+        )
+    return root
+
+
 def _build() -> ctypes.CDLL:
     nvcc = _nvcc()
     if nvcc is None:
@@ -73,8 +91,7 @@ def _build() -> ctypes.CDLL:
     flags = ["-O3", "-std=c++17", "-ftz=true", "-gencode", "arch=compute_100a,code=sm_100a", "-gencode",
              "arch=compute_103a,code=sm_103a", "--shared", "-Xcompiler", "-fPIC"]  # fmt: skip
     key = hashlib.sha256(src + ver.encode() + " ".join(flags).encode()).hexdigest()[:16]
-    root = Path(os.environ.get("SKYRL_QAT_NVFP4_KERNEL_DIR") or Path(tempfile.gettempdir()) / "skyrl_nvfp4_kernels")
-    root.mkdir(parents=True, exist_ok=True)
+    root = _kernel_dir()
     so = root / f"nvfp4_roundtrip_{key}.so"
     if not so.exists():
         with open(root / f".{key}.lock", "w") as lock:  # one build per node; other ranks wait for it
