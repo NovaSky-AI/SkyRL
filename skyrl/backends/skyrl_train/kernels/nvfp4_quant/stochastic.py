@@ -40,7 +40,7 @@ def splitmix64(x: int) -> int:
 
 
 def weight_seed(base_seed: int, version: int) -> int:
-    """The 64-bit seed of weight version ``version`` (optimizer steps since start) under ``base_seed``."""
+    """The 64-bit seed of weight version ``version`` (optimizer steps taken, resumes included) under ``base_seed``."""
     return splitmix64(splitmix64(base_seed & _MASK64) ^ (version & _MASK64))
 
 

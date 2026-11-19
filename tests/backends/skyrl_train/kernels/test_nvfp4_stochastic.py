@@ -95,7 +95,7 @@ def test_weight_draw_follows_the_registry_and_version(monkeypatch):
     d0 = expert_nvfp4.weight_draw([w0, w1])
     assert d0 == sr.WeightDraw(sr.weight_seed(7, 0), (5, 6))
     assert expert_nvfp4.weight_draw([w0, w1]) == d0  # fprop, dgrad and recompute of a version agree
-    expert_nvfp4.advance_weight_rounding()
+    expert_nvfp4.set_weight_version(1)
     assert expert_nvfp4.weight_draw([w0, w1]).seed == sr.weight_seed(7, 1)
     with pytest.raises(RuntimeError, match="not registered"):
         expert_nvfp4.weight_draw([torch.nn.Parameter(torch.zeros(1))])

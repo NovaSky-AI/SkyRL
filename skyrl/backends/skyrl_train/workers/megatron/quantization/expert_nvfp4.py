@@ -31,9 +31,10 @@ kernel does (:func:`fp4_fprop`). dgrad and wgrad stay bf16, on the round trips. 
 The trainer's rounding has its own knobs (``expert_nvfp4_weight_rounding``, ``expert_nvfp4_activation_rounding``): 4/6
 or absmax block scales, by default ``expert_nvfp4_block_scale`` (the grid the weight sync and the engines use), and
 round-to-nearest (the default) or stochastic values (``kernels.nvfp4_quant.stochastic``). Stochastic weights draw once
-per weight version (optimizer step, :func:`advance_weight_rounding`) and expert, so every fprop, dgrad and recompute of
-a version, and every rank holding the expert, round it alike; stochastic inputs draw afresh in each forward from the
-CUDA generator, which activation checkpointing restores for the recompute.
+per weight version (the optimizer steps taken, :func:`set_weight_version`) and expert, so every fprop, dgrad and
+recompute of a version, and every rank holding the expert, round it alike, and a resumed run continues the draws;
+stochastic inputs draw afresh in each forward from the CUDA generator, which activation checkpointing restores for the
+recompute.
 """
 
 from __future__ import annotations
@@ -82,7 +83,7 @@ def block_scale_name(four_over_six: bool) -> str:
 
 @dataclass
 class _WeightRounding:
-    """Stochastic weight rounding: off, or on with a base seed and the current weight version."""
+    """Stochastic weight rounding: off, or on with a base seed and the current weight version (optimizer steps)."""
 
     stochastic: bool = False
     base_seed: int = 0
@@ -99,10 +100,11 @@ def set_weight_rounding(stochastic: bool, base_seed: int = 0) -> None:
     _WEIGHT_ROUNDING.version = 0
 
 
-def advance_weight_rounding() -> None:
-    """A new weight version (call after each optimizer step): stochastic weight rounding draws afresh. Within a
-    version every fprop, dgrad and recompute rounds a weight alike."""
-    _WEIGHT_ROUNDING.version += 1
+def set_weight_version(version: int) -> None:
+    """The weight version: the optimizer steps taken, from the LR scheduler's step count (``num_steps``), which the
+    checkpoint restores, so a run resumed at a step draws as a continuous one does. Set after each optimizer step and
+    checkpoint load; within a version every fprop, dgrad and recompute rounds a weight alike."""
+    _WEIGHT_ROUNDING.version = version
 
 
 def weight_draw(weights: Sequence[torch.Tensor]) -> WeightDraw | None:
@@ -531,8 +533,8 @@ def install_expert_nvfp4(
     """``expert_nvfp4`` on a built model (outside ``bf16_layers``): ``w4a16`` rounds the routed-expert weights,
     ``w4a4`` the per-token expert inputs as well (see the module docstring). ``block_scale`` /
     ``activation_block_scale``: the weights' / inputs' block scales; ``weight_stochastic`` / ``activation_stochastic``
-    round the values stochastically (weights: one draw per weight version under ``seed``, advanced by
-    :func:`advance_weight_rounding`). Returns the number of rounded weights."""
+    round the values stochastically (weights: one draw per weight version under ``seed``, set by
+    :func:`set_weight_version`). Returns the number of rounded weights."""
     if mode not in EXPERT_NVFP4_MODES:
         raise ValueError(f"expert_nvfp4_mode must be one of {EXPERT_NVFP4_MODES}, got {mode!r}")
     if torch.cuda.is_available() and torch.cuda.get_device_capability() not in NVFP4_DEVICE_CAPABILITIES:

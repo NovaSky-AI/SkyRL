@@ -1665,6 +1665,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         seconds, self._train_compute_seconds = self._train_compute_seconds, 0.0
         return seconds
 
+    def _sync_expert_nvfp4_weight_version(self) -> None:
+        """``expert_nvfp4`` stochastic weight rounding draws per optimizer step: its version is the LR scheduler's
+        step count, which the checkpoint restores, so a run resumed at a step draws as a continuous one does."""
+        if not self.cfg.policy.megatron_config.expert_nvfp4 or self.scheduler is None:
+            return
+        from skyrl.backends.skyrl_train.workers.megatron.quantization.expert_nvfp4 import (
+            set_weight_version,
+        )
+
+        set_weight_version(self.scheduler.num_steps)
+
+    def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
+        states = super().load_checkpoint(ckpt_dir, load_optimizer_states, load_lr_scheduler_states)
+        self._sync_expert_nvfp4_weight_version()
+        return states
+
     @_counts_train_compute
     def optim_step(self) -> Optional[float]:
         """
@@ -1692,13 +1708,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.model.run_pending_grad_sync()
 
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
-        if self.cfg.policy.megatron_config.expert_nvfp4:
-            from skyrl.backends.skyrl_train.workers.megatron.quantization.expert_nvfp4 import (
-                advance_weight_rounding,
-            )
-
-            # New weights: stochastic weight rounding draws afresh (a no-op count otherwise).
-            advance_weight_rounding()
+        # New weights: stochastic weight rounding draws afresh.
+        self._sync_expert_nvfp4_weight_version()
 
         # Clear the DDP grad buffers for the next window. `optimizer.zero_grad()` inside
         # `optimizer_step` only drops `param.grad` / the fp32 main-param grads -- the
