@@ -18,6 +18,7 @@ from ray import ObjectRef
 
 from skyrl.backends.skyrl_train.distributed.dispatch import (
     MeshDispatch,
+    OrderedRefs,
     WorkerOutput,
 )
 from skyrl.backends.skyrl_train.training_batch import (
@@ -83,6 +84,16 @@ class WorkerDispatch:
         self._gpu_state: Dict[str, GPUState] = {
             name: GPUState(model_on_gpu=True, optimizer_on_gpu=(name != "ref")) for name in self._actor_groups.keys()
         }
+
+    @property
+    def _dp_balance_tokens(self) -> bool:
+        """True when ``trainer.balance_dp_tokens`` is on.
+
+        With False, dispatch, staging and output collection behave exactly as they did before
+        the token-balanced split existed.
+        """
+        trainer_cfg = getattr(getattr(self, "cfg", None), "trainer", None)
+        return getattr(trainer_cfg, "balance_dp_tokens", False) is True
 
     def register_actor_group(self, model: str, actor_group: PPORayActorGroup) -> None:
         self._actor_groups[model] = actor_group
@@ -290,10 +301,14 @@ class WorkerDispatch:
         if loss_fn_config is not None:
             kwargs["loss_fn_config"] = loss_fn_config
 
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward", data=data, **kwargs)
+        refs = self._actor_groups[model].async_run_ray_method(
+            "mesh", "forward", data=data, dp_balance_tokens=self._dp_balance_tokens, **kwargs
+        )
         results = deadline.ray_get(refs, "forward")
 
-        return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
+        return WorkerOutput.cat(
+            self._actor_groups[model].actor_infos, results, sample_order=getattr(refs, "sample_order", None)
+        )
 
     def forward_from_staged(
         self,
@@ -341,14 +356,16 @@ class WorkerDispatch:
             **kwargs,
         )
         results = deadline.ray_get(refs, "forward")
-        return WorkerOutput.cat(self._actor_groups[model].actor_infos, results)
+        return WorkerOutput.cat(
+            self._actor_groups[model].actor_infos, results, sample_order=getattr(chunk_refs, "sample_order", None)
+        )
 
     def stage_data(
         self,
         model: str,
         data: TrainingInputBatch,
         mini_batch_boundaries: List[Tuple[int, int]],
-    ) -> List[List[ObjectRef]]:
+    ) -> List[OrderedRefs]:
         """Pre-stage mini-batch chunks in the Ray object store.
 
         Call this once before the training loop so that all serialization is
@@ -361,10 +378,13 @@ class WorkerDispatch:
                 The i-th mini-batch is data[mini_batch_boundaries[i][0]:mini_batch_boundaries[i][1]].
 
         Returns:
-            ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*.
+            ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*. Each
+            ``result[i]`` carries the sample order of mini-batch *i*.
         """
         dp_size = self._actor_groups[model].actor_infos[0].rank.dp_size
-        return MeshDispatch.stage_chunks(dp_size, data, mini_batch_boundaries)
+        return MeshDispatch.stage_chunks(
+            dp_size, data, mini_batch_boundaries, dp_balance_tokens=self._dp_balance_tokens
+        )
 
     def forward_backward(
         self,
@@ -405,12 +425,16 @@ class WorkerDispatch:
         if loss_fn_config is not None:
             kwargs["loss_fn_config"] = loss_fn_config
 
-        refs = self._actor_groups[model].async_run_ray_method("mesh", "forward_backward", data, **kwargs)
+        refs = self._actor_groups[model].async_run_ray_method(
+            "mesh", "forward_backward", data, dp_balance_tokens=self._dp_balance_tokens, **kwargs
+        )
         statuses = deadline.ray_get(refs, "forward_backward")
 
         self._save_memory_snapshot(model, "forward_backward")
 
-        return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
+        return WorkerOutput.cat(
+            self._actor_groups[model].actor_infos, statuses, sample_order=getattr(refs, "sample_order", None)
+        )
 
     def forward_backward_from_staged(
         self,
@@ -456,7 +480,9 @@ class WorkerDispatch:
         statuses = deadline.ray_get(refs, "forward_backward")
 
         self._save_memory_snapshot(model, "forward_backward")
-        return WorkerOutput.cat(self._actor_groups[model].actor_infos, statuses)
+        return WorkerOutput.cat(
+            self._actor_groups[model].actor_infos, statuses, sample_order=getattr(chunk_refs, "sample_order", None)
+        )
 
     def optim_step(self, model: str, model_id: Optional[str] = None) -> Optional[float]:
         """Run optimizer step. For single-tenant training, the model should already be on GPU from forward_backward.
