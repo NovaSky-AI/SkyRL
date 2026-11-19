@@ -16,7 +16,10 @@ pytest.importorskip("vllm", reason="the receiver drives vLLM's layerwise reload 
 pytestmark = pytest.mark.vllm
 
 from skyrl.backends.skyrl_train.weight_sync import nvfp4_stacked_receive as recv  # noqa: E402, I001
-from skyrl.backends.skyrl_train.weight_sync.nvfp4_stacked import STACKED_LEAVES  # noqa: E402
+from skyrl.backends.skyrl_train.weight_sync.nvfp4_stacked import (  # noqa: E402
+    STACKED_LEAVES,
+    stacked_wire_name,
+)
 
 E, N, H = 4, 16, 32
 
@@ -128,3 +131,18 @@ def test_direct_copy_through_vllm_layerwise_reload():
             a, b = a.view(torch.uint8), b.view(torch.uint8)
         assert torch.equal(a, b), leaf
     layerwise.finalize_layerwise_reload(module, SimpleNamespace(dtype=torch.bfloat16))
+
+
+def test_layer_without_an_expert_module_takes_the_per_expert_fallback():
+    """Every pipeline stage receives the whole stream. A stage has no expert module for a layer of another stage, so
+    the receiver hands the layer to the model's own loader, which applies vLLM's stage checks."""
+    loaded = []
+    receiver = recv.Nvfp4StackedReceiver(torch.nn.Module(), fallback_load=loaded.extend)
+    stacks = _stacks()
+    for leaf in STACKED_LEAVES:
+        receiver.accept(stacked_wire_name("model.layers.0.mlp.experts", leaf), stacks[leaf])
+    receiver.finish()
+    assert receiver.layers_fallback == 1 and receiver.layers_fast == 0
+    names = [name for name, _ in loaded]
+    assert "model.layers.0.mlp.experts.0.gate_proj.weight" in names
+    assert f"model.layers.0.mlp.experts.{E - 1}.down_proj.input_scale" in names
