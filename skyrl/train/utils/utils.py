@@ -1,9 +1,7 @@
 import functools
-import ipaddress
 import logging
 import math
 import os
-import socket
 import sys
 import time
 from contextlib import contextmanager
@@ -969,13 +967,6 @@ def _validate_new_inference_cfg(cfg: SkyRLTrainConfig):
         )
 
 
-@ray.remote
-def get_all_env_variables():
-    import os
-
-    return os.environ
-
-
 def ray_noset_visible_devices(env_vars=os.environ):
     # Refer to
     # https://github.com/ray-project/ray/blob/161849364a784442cc659fb9780f1a6adee85fce/python/ray/_private/accelerators/nvidia_gpu.py#L95-L96
@@ -999,17 +990,100 @@ def ray_noset_visible_devices(env_vars=os.environ):
     return any(env_vars.get(env_var) for env_var in NOSET_VISIBLE_DEVICES_ENV_VARS_LIST)
 
 
-def get_physical_gpu_id():
-    import torch
+# Env vars read by the Ray workers that are copied unchanged from the driver when set there. Ray
+# starts workers from the raylet, not from the driver, so a driver export reaches them only
+# through the runtime env built by `prepare_runtime_environment`.
+_FORWARDED_ENV_VARS = (
+    # The uv runtime-env hook re-runs the driver's `uv run ... --extra <backend>` in every worker,
+    # which must resolve to the driver's venv.
+    "UV_PROJECT_ENVIRONMENT",
+    "UV_CACHE_DIR",
+    "UV_LINK_MODE",
+    "UV_PYTHON",
+    "UV_OFFLINE",
+    # Toolkit that TileLang JIT-compiles kernels with; the pip wheel tree it defaults to can pair
+    # mismatched nvcc and runtime versions.
+    "CUDA_HOME",
+    # Hugging Face cache and auth: model paths resolve against HF_HOME.
+    "HF_HOME",
+    "HF_TOKEN",
+    "HF_HUB_OFFLINE",
+    "HF_ENDPOINT",
+    # Experiment trackers, and the sandbox providers that Harbor environments run on.
+    "WANDB_API_KEY",
+    "MLFLOW_TRACKING_URI",
+    "MLFLOW_TRACKING_TOKEN",
+    "DAYTONA_API_KEY",
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+    # TODO (sumanthrh): Test the vLLM compile cache with shared storage in a multi-node env.
+    "VLLM_DISABLE_COMPILE_CACHE",
+    "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+    # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
+    "VLLM_ALLREDUCE_USE_FLASHINFER",
+    "VLLM_ALLREDUCE_USE_SYMM_MEM",
+    "RAY_CGRAPH_get_timeout",
+    "PYTORCH_CUDA_ALLOC_CONF",
+    "NCCL_NET_PLUGIN",
+    # Ray sets OMP_NUM_THREADS=num_cpus (1 per policy actor) unless the runtime env has it,
+    # which leaves the CPU-offloaded optimizer step single-threaded.
+    "OMP_NUM_THREADS",
+    # Debug and trace switches.
+    "NVTE_DEBUG",
+    "NVTE_DEBUG_LEVEL",
+    "CUDA_LAUNCH_BLOCKING",
+    "PYTHONFAULTHANDLER",
+    "TORCH_SHOW_CPP_STACKTRACES",
+    "TORCH_USE_CUDA_DSA",
+    "NCCL_DEBUG",
+)
+# Every driver env var with one of these prefixes is copied too: `skyrl/env_vars.py` reads its
+# SKYRL_* knobs at import time in every process.
+_FORWARDED_ENV_PREFIXES = ("SKYRL_",)
+# Forwarded env vars whose values are never logged.
+_UNLOGGED_ENV_VARS = frozenset(
+    {
+        "HF_TOKEN",
+        "WANDB_API_KEY",
+        "MLFLOW_TRACKING_URI",
+        "MLFLOW_TRACKING_TOKEN",
+        "DAYTONA_API_KEY",
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET",
+    }
+)
 
-    device = torch.cuda.current_device()
-    props = torch.cuda.get_device_properties(device)
-    return str(props.uuid)
+
+def _forward_driver_env_vars(env_vars: dict[str, str], names: set[str], unlogged_names: set[str]) -> None:
+    """Copies the driver's non-empty values of ``names`` and of prefixed env vars into ``env_vars``.
+
+    A value already in ``env_vars`` was computed for this config and is kept. Values of prefixed
+    env vars and of ``unlogged_names`` are not logged.
+    """
+    logged, prefixed = [], []
+    for name, value in sorted(os.environ.items()):
+        if not value or not (name in names or name.startswith(_FORWARDED_ENV_PREFIXES)):
+            continue
+        if env_vars.get(name, value) != value:
+            logger.warning(f"Not forwarding the driver's `{name}`: SkyRL sets it to `{env_vars[name]}` for this run.")
+            continue
+        env_vars[name] = value
+        if name not in names:
+            prefixed.append(name)
+        else:
+            logged.append(f"{name}={'[REDACTED]' if name in unlogged_names else value}")
+    if logged:
+        logger.info(f"Forwarding driver env vars to the ray runtime env: {', '.join(logged)}")
+    if prefixed:
+        logger.info(f"Forwarding driver env vars to the ray runtime env (values not logged): {', '.join(prefixed)}")
 
 
 def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     """
     Prepare environment variables for Ray runtime environment.
+
+    These are the values SkyRL computes for this config, plus the driver's values of the env vars
+    in ``_FORWARDED_ENV_VARS`` and of those starting with ``_FORWARDED_ENV_PREFIXES``.
 
     Args:
         cfg: Training config
@@ -1019,19 +1093,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
     """
     # TODO(sumanthrh): introduce a debug mode and add debugging flags like `CUDA_LAUNCH_BLOCKING` here
     env_vars = {}
-    annotation_cfg = cfg.trainer.grafana_annotations
-    if annotation_cfg.enabled and (token := os.environ.get(annotation_cfg.token_env_var)):
-        env_vars[annotation_cfg.token_env_var] = token
-
-    # TileLang JITs kernels by shelling out to nvcc, and picks its toolkit from CUDA_HOME,
-    # defaulting to the pip wheel tree (site-packages/nvidia/cu13). That tree can be internally
-    # inconsistent -- e.g. nvidia-cuda-nvcc==13.3 next to nvidia-cuda-runtime==13.0 -- and
-    # nvidia-cuda-cccl then rejects the pair at compile time with "CUDA compiler and CUDA toolkit
-    # headers are incompatible". Pointing CUDA_HOME at a self-consistent system toolkit
-    # (e.g. /usr/local/cuda-13.3) fixes it. Workers are re-exec'd through the runtime env, so a
-    # plain driver export does not reach them; forward it here for both trainer and engine actors.
-    if os.environ.get("CUDA_HOME"):
-        env_vars["CUDA_HOME"] = os.environ["CUDA_HOME"]
 
     # NOTE (erictang000): This should no longer be required since this has been removed in vllm
     # and fixed in NCCL (https://github.com/vllm-project/vllm/pull/24141, https://github.com/NVIDIA/nccl/issues/1234), but empirically seeing OOMs for
@@ -1055,16 +1116,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             # https://github.com/NVIDIA/TransformerEngine/blob/release_v2.5/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L916
             env_vars["NVTE_FUSED_ATTN"] = "0"
 
-        # Forward TransformerEngine attention-backend debug logging to workers when
-        # set on the driver. Workers are re-exec'd through the runtime env (e.g. the
-        # uv hook), so a plain raylet/driver export does not reach them.
-        for nvte_var in ("NVTE_DEBUG", "NVTE_DEBUG_LEVEL"):
-            if os.environ.get(nvte_var):
-                env_vars[nvte_var] = os.environ[nvte_var]
-        # DeepSeek-V4.1 switches read by the Megatron workers (patches/megatron/deepseek_v41: KV fake-quant,
-        # Engram table placement, faulthandler).
-        env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
-
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
 
@@ -1073,34 +1124,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # object and requires pickling.
         env_vars["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
 
-        # vLLM torch compile is default enabled, we leave it as-is and propagate any user-supplied
-        # overrides for `VLLM_DISABLE_COMPILE_CACHE`
-        # TODO (sumanthrh): Test with shared storage in a multi-node env where we can persist cache
-        if os.environ.get("VLLM_DISABLE_COMPILE_CACHE"):
-            logger.info(
-                "Exporting `VLLM_DISABLE_COMPILE_CACHE` to ray runtime env: "
-                f"{os.environ['VLLM_DISABLE_COMPILE_CACHE']}"
-            )
-            env_vars["VLLM_DISABLE_COMPILE_CACHE"] = os.environ["VLLM_DISABLE_COMPILE_CACHE"]
-
         if not os.environ.get("VLLM_USE_V1", False):
             logger.info(
                 "`VLLM_USE_V1` is not specified, setting `VLLM_USE_V1` to 1. To override, set `VLLM_USE_V1` explicitly"
             )
             env_vars["VLLM_USE_V1"] = "1"
             env_vars["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
-
-        if os.environ.get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"):
-            logger.info(
-                f"Exporting `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` to ray runtime env: {os.environ['VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS']}"
-            )
-            env_vars["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] = os.environ["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"]
-
-        if os.environ.get("RAY_CGRAPH_get_timeout"):
-            logger.info(
-                f"Exporting `RAY_CGRAPH_get_timeout` to ray runtime env: {os.environ['RAY_CGRAPH_get_timeout']}"
-            )
-            env_vars["RAY_CGRAPH_get_timeout"] = os.environ["RAY_CGRAPH_get_timeout"]
 
     # Use max of available GPU counts, defaulting to 1 if none found
     gpu_counts = []
@@ -1120,98 +1149,6 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         logger.info("Peer access is not supported on this node type, disabling NCCL P2P and SHM")
         env_vars["NCCL_P2P_DISABLE"] = "1"
         env_vars["NCCL_SHM_DISABLE"] = "1"
-
-    if os.environ.get("NCCL_NET_PLUGIN"):
-        logger.info(f"Exporting NCCL_NET_PLUGIN to ray runtime env: {os.environ['NCCL_NET_PLUGIN']}")
-        env_vars["NCCL_NET_PLUGIN"] = os.environ["NCCL_NET_PLUGIN"]
-
-    # TODO: this can be removed if we standardize on env files.
-    # But it's helpful for a quickstart
-    if os.environ.get("WANDB_API_KEY"):
-        logger.info("Exporting wandb api key to ray runtime env")
-        env_vars["WANDB_API_KEY"] = os.environ["WANDB_API_KEY"]
-
-    if os.environ.get("MLFLOW_TRACKING_URI"):
-        logger.info("Exporting mlflow tracking uri to ray runtime env")
-        env_vars["MLFLOW_TRACKING_URI"] = os.environ["MLFLOW_TRACKING_URI"]
-
-    if os.environ.get("MLFLOW_TRACKING_TOKEN"):
-        logger.info("Exporting mlflow tracking token to ray runtime env")
-        env_vars["MLFLOW_TRACKING_TOKEN"] = os.environ["MLFLOW_TRACKING_TOKEN"]
-
-    # NOTE(charlie): these are for Harbor. We should remove these once we have a sustainable way to handle these environment vars.
-    for var_name in ["DAYTONA_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"]:
-        if value := os.environ.get(var_name):
-            logger.info(f"Exporting {var_name} to ray runtime env")
-            env_vars[var_name] = value
-
-    if SKYRL_LD_LIBRARY_PATH_EXPORT:
-        # export `LD_LIBRARY_PATH` to ray runtime env.
-        # For some reason the `LD_LIBRARY_PATH` is not exported to the worker with .env file.
-        logger.info(f"Exporting `LD_LIBRARY_PATH` to ray runtime env: {os.environ['LD_LIBRARY_PATH']}")
-        env_vars["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
-
-    if SKYRL_PYTHONPATH_EXPORT:
-        # allow pythonpath to be updated as a fall back for deps that are not shipped with UV
-        # not recommended since it can cause unexpected conflicts with UV packages,
-        # but keeping for backwards compatibility
-        logger.info(f"Exporting `PYTHONPATH` to ray runtime env: {os.environ['PYTHONPATH']}")
-        env_vars["PYTHONPATH"] = os.environ["PYTHONPATH"]
-
-    # Forward uv's project-environment selection to the workers. Ray's uv runtime-env hook makes each
-    # worker re-run `uv run ... --extra <backend>`, and that subprocess must resolve to the SAME venv
-    # as the driver. Workers are spawned by the raylet and only inherit env vars we forward here, so a
-    # driver-only `UV_PROJECT_ENVIRONMENT` (e.g. from a local `.env`) would otherwise be lost and the
-    # worker's `uv run` would fall back to the empty project `.venv` (-> `No module named 'megatron'`).
-    for var_name in (
-        "UV_PROJECT_ENVIRONMENT",
-        "UV_CACHE_DIR",
-        "UV_LINK_MODE",
-        "UV_PYTHON",
-        "UV_OFFLINE",
-        # HuggingFace cache/auth: model paths resolve against HF_HOME, so a
-        # driver-only setting (e.g. from a local `.env` pointing at a big data
-        # volume) must reach the worker actors or they re-download to ~/.cache.
-        "HF_HOME",
-        "HF_TOKEN",
-        "HF_HUB_OFFLINE",
-        "HF_ENDPOINT",
-        "PYTORCH_CUDA_ALLOC_CONF",
-        # Selects the DSA indexer top-k backend under dsa_kernel_backend=cudnn
-        # (patches/megatron/patch_dsa_hybrid_indexer.py); read in the Megatron workers.
-        "SKYRL_DSA_INDEXER_BACKEND",
-        # GLM-5.3-Flash k-pool indexer query sharding (glm5_next/dsa.py) and head-full sparse
-        # attention (patches/megatron/patch_dsa_head_full.py); read in the Megatron workers.
-        "SKYRL_DSA_INDEXER_TP_SHARD",
-        "SKYRL_DSA_HEAD_FULL",
-        "SKYRL_DSA_HEAD_FULL_FAST_PERMUTE",
-        "SKYRL_DSA_HEAD_FULL_ZIGZAG",
-        # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
-        "VLLM_ALLREDUCE_USE_FLASHINFER",
-        "VLLM_ALLREDUCE_USE_SYMM_MEM",
-        # Ray sets OMP_NUM_THREADS=num_cpus (1 per policy actor) unless the runtime env has it,
-        # which leaves the CPU-offloaded optimizer step single-threaded.
-        "OMP_NUM_THREADS",
-        # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
-        "CUDA_LAUNCH_BLOCKING",
-        "PYTHONFAULTHANDLER",
-        "TORCH_SHOW_CPP_STACKTRACES",
-        "TORCH_USE_CUDA_DSA",
-        "NCCL_DEBUG",
-    ):
-        if value := os.environ.get(var_name):
-            logged_value = "[REDACTED]" if var_name == "HF_TOKEN" else value
-            logger.info(f"Exporting `{var_name}` to ray runtime env: {logged_value}")
-            env_vars[var_name] = value
-
-    # Forward any SKYRL_* overrides set in the launching shell (e.g.
-    # SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S for very large models
-    # whose weight load exceeds the 600s default) — skyrl.env_vars reads them at
-    # import time in every process, so they must ride the runtime env.
-    forwarded = {k: v for k, v in os.environ.items() if k.startswith("SKYRL_") and k not in env_vars}
-    if forwarded:
-        logger.info(f"Exporting SKYRL_* overrides to ray runtime env: {sorted(forwarded)}")
-    env_vars.update(forwarded)
 
     # Forward one block-scale contract to all Ray actors. Hopper defaults to FP32
     # scales; Blackwell (SM100+) defaults to power-of-two scales, the only mode TE
@@ -1295,6 +1232,27 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting `{var_name}` to ray runtime env: {value}")
             env_vars[var_name] = value
 
+    forward_names = set(_FORWARDED_ENV_VARS)
+    unlogged_names = set(_UNLOGGED_ENV_VARS)
+    annotation_cfg = cfg.trainer.grafana_annotations
+    if annotation_cfg.enabled:
+        forward_names.add(annotation_cfg.token_env_var)
+        unlogged_names.add(annotation_cfg.token_env_var)
+    # Opt-in: uv does not pass LD_LIBRARY_PATH from a .env file to the workers, and a forwarded
+    # PYTHONPATH can shadow the uv-managed packages.
+    for flag, enabled, name in (
+        ("SKYRL_LD_LIBRARY_PATH_EXPORT", SKYRL_LD_LIBRARY_PATH_EXPORT, "LD_LIBRARY_PATH"),
+        ("SKYRL_PYTHONPATH_EXPORT", SKYRL_PYTHONPATH_EXPORT, "PYTHONPATH"),
+    ):
+        if enabled:
+            if not os.environ.get(name):
+                raise ValueError(
+                    f"{flag} is set, but {name} is not set in the shell that launches training. "
+                    f"Export {name} there, or unset {flag}."
+                )
+            forward_names.add(name)
+    # Runs last so that every value computed above wins over the driver's.
+    _forward_driver_env_vars(env_vars, forward_names, unlogged_names)
     return env_vars
 
 
@@ -1506,17 +1464,6 @@ class ResolvedPlacementGroup:
         return len(self._get_bundle_placement()) // self.num_nodes
 
 
-def torch_dtype_to_str(dtype: torch.dtype) -> str:
-    if dtype == torch.bfloat16:
-        return "bfloat16"
-    elif dtype == torch.float16:
-        return "float16"
-    elif dtype == torch.float32:
-        return "float32"
-    else:
-        return str(dtype)
-
-
 def str_to_torch_dtype(dtype: str) -> torch.dtype:
     if dtype == "bfloat16":
         return torch.bfloat16
@@ -1607,30 +1554,3 @@ def _apply_overrides_in_place(module_config, override_config_kwargs):
             _apply_overrides_in_place(getattr(module_config, key), val)
         else:
             setattr(module_config, key, val)
-
-
-def get_tcp_url(host: str, port: int) -> str:
-    """
-    Formats the TCP URL for the given host and port, handling IPv6 addresses correctly.
-
-    Args:
-        host (str): The hostname or IP address.
-        port (int): The port number.
-    Returns:
-        str: The formatted TCP URL.
-    """
-    try:
-        if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
-            return f"tcp://[{host}]:{port}"
-    except ValueError:
-        # not a literal IP, probably a hostname
-        pass
-    return f"tcp://{host}:{port}"
-
-
-def get_free_port():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.bind(("", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port

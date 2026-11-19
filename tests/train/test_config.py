@@ -204,6 +204,75 @@ def test_runtime_env_supports_fsdp_without_megatron_configs(monkeypatch):
     assert "VLLM_USE_DEEP_GEMM_E8M0" not in env_vars
 
 
+@pytest.mark.parametrize(
+    "strategy, name, value, expected",
+    [
+        ("megatron", "HF_HOME", "/mnt/hf", "/mnt/hf"),
+        ("megatron", "SKYRL_DSA_HEAD_FULL", "1", "1"),
+        ("megatron", "NCCL_DEBUG", "INFO", "INFO"),
+        # Per-node NCCL settings reach the workers through each raylet's own env.
+        ("megatron", "NCCL_SOCKET_IFNAME", "eth0", None),
+        ("fsdp", "NVTE_DEBUG", "1", "1"),
+        ("megatron", "TRITON_CACHE_DIR", "/cache", None),
+        ("megatron", "HF_HOME", "", None),
+        # Computed for weight_sync_backend=nccl; the driver's value does not override it.
+        ("megatron", "NCCL_CUMEM_ENABLE", "1", "0"),
+    ],
+)
+def test_runtime_env_forwards_driver_env_vars(monkeypatch, strategy, name, value, expected):
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setenv(name, value)
+    cfg = example_dummy_config()
+    cfg.trainer.strategy = strategy
+
+    env_vars = prepare_runtime_environment(cfg)
+
+    assert env_vars.get(name) == expected
+
+
+@pytest.mark.parametrize(
+    "flag, name",
+    [("SKYRL_LD_LIBRARY_PATH_EXPORT", "LD_LIBRARY_PATH"), ("SKYRL_PYTHONPATH_EXPORT", "PYTHONPATH")],
+)
+def test_runtime_env_export_flag_requires_its_env_var(monkeypatch, flag, name):
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    monkeypatch.setattr(train_utils, flag, True)
+    monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(ValueError, match=f"{flag} is set, but {name} is not set"):
+        prepare_runtime_environment(example_dummy_config())
+
+    monkeypatch.setenv(name, "/opt/lib")
+    assert prepare_runtime_environment(example_dummy_config())[name] == "/opt/lib"
+
+
+def test_runtime_env_log_hides_secret_and_prefixed_values(monkeypatch):
+    from loguru import logger
+
+    monkeypatch.setattr(train_utils, "peer_access_supported", lambda **_kwargs: True)
+    secrets = ("HF_TOKEN", "WANDB_API_KEY", "GRAFANA_API_TOKEN", "SKYRL_TEST_TOKEN")
+    for name in secrets:
+        monkeypatch.setenv(name, "s3cr3t")
+    monkeypatch.setenv("HF_HOME", "/mnt/hf")
+    monkeypatch.setenv("NCCL_DEBUG", "INFO")
+    cfg = example_dummy_config()
+    cfg.trainer.strategy = "megatron"
+    cfg.trainer.grafana_annotations.enabled = True
+
+    messages = []
+    handler_id = logger.add(messages.append, level="INFO")
+    try:
+        env_vars = prepare_runtime_environment(cfg)
+    finally:
+        logger.remove(handler_id)
+    log = "".join(messages)
+
+    assert all(env_vars[name] == "s3cr3t" for name in secrets)
+    assert "HF_HOME=/mnt/hf" in log and "NCCL_DEBUG=INFO" in log and "HF_TOKEN=[REDACTED]" in log
+    assert "SKYRL_TEST_TOKEN" in log
+    assert "s3cr3t" not in log
+
+
 def test_serialized_fp8_runtime_defaults_to_fp32_scales(monkeypatch):
     monkeypatch.delenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", raising=False)
     monkeypatch.delenv("VLLM_USE_DEEP_GEMM_E8M0", raising=False)
