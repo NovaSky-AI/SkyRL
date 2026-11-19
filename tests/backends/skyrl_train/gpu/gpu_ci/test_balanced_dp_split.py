@@ -12,12 +12,13 @@ The old log-probs come from a first forward pass with the split of the run, as i
 PPO ratio therefore starts at 1 in both runs, and the gradient is not clipped to zero.
 
 Tolerances. The two splits give a rank different samples, so the ranks form different
-micro-batches. On FSDP the forward is bit-exact across groupings. On Megatron (BF16) a different
-grouping alone moves a per-token log-prob by up to ~0.13, also with the default split on a
-reordered batch. A swapped sample would differ by whole nats (random tokens: |log-prob| ~7).
+micro-batches. In BF16 a different grouping alone moves a per-token log-prob by up to ~0.13
+(Megatron on B200) or ~0.09 (FSDP on L4), also with the default split on a reordered batch. FSDP
+is bit-exact across groupings on B200, but not on L4, so both backends use the same bounds. A
+swapped sample would differ by whole nats (random tokens: |log-prob| ~7).
 Adam's first step is about ``lr * sign(grad)``, so it amplifies summation-order noise: the
-log-probs after the step differ by up to ~0.1 between two default-split runs with different caps.
-The after-step bounds are therefore loose, and they only catch a gross error.
+log-probs after the step differ by up to ~0.4 (FSDP on L4, where the mean size of the step is
+~0.035). The after-step bounds are therefore loose, and they only catch a gross error.
 
 Run with:
 uv run --isolated --extra dev --extra fsdp pytest -s tests/backends/skyrl_train/gpu/gpu_ci/test_balanced_dp_split.py -m "not megatron"
@@ -43,12 +44,10 @@ MAX_TOKENS = 64
 NUM_ACTIONS = 4
 
 
-# Per backend: log-prob max / mean difference, relative gradient-norm difference, and
-# after-step log-prob max / mean difference.
-TOLERANCES = {
-    "fsdp2": {"logprobs_max": 1e-3, "logprobs_mean": 1e-4, "grad_norm": 1e-3, "after_max": 0.3, "after_mean": 0.1},
-    "megatron": {"logprobs_max": 0.3, "logprobs_mean": 0.03, "grad_norm": 1e-2, "after_max": 0.3, "after_mean": 0.1},
-}
+# Log-prob max / mean difference, relative gradient-norm difference, and after-step log-prob
+# max / mean difference. Measured on FSDP with L4: 0.090 / 0.0085, 0.31%, 0.41 / 0.036.
+# Measured on Megatron with B200: 0.131 / 0.011, 0.38%.
+TOLERANCES = {"logprobs_max": 0.3, "logprobs_mean": 0.03, "grad_norm": 1e-2, "after_max": 1.0, "after_mean": 0.1}
 
 
 def _batch(old_logprobs=None) -> TrainingInputBatch:
@@ -187,7 +186,7 @@ def test_balanced_split_gives_the_same_update(strategy):
     for key, value in report.items():
         print(f"  {strategy} {key}: {value}")
 
-    tol = TOLERANCES[strategy]
+    tol = TOLERANCES
     assert default["grad_norm"] > 0 and step_change > 0, "the batch must produce an update"
     assert report["logprobs max diff"] < tol["logprobs_max"]
     assert report["logprobs mean diff"] < tol["logprobs_mean"]
