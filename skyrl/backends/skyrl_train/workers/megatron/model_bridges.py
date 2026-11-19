@@ -306,6 +306,15 @@ def _expected_rope_fields(provider, rope_parameters: dict) -> dict:
                 f"transformer_config_kwargs.rope_parameters with rope_type={rope_type!r} needs a 'factor'."
             )
         expected[field] = rope_parameters["factor"]
+    if rope_type == "yarn":
+        # Megatron-Bridge has no default for YaRN's original context length, and Megatron's YaRN embedding needs it.
+        if "original_max_position_embeddings" not in rope_parameters:
+            raise ValueError(
+                "transformer_config_kwargs.rope_parameters with rope_type='yarn' needs "
+                "'original_max_position_embeddings' (the context length the checkpoint was trained with)."
+            )
+        original_field = "original_max_position_embeddings" if mla else "yarn_original_max_position_embeddings"
+        expected[original_field] = rope_parameters["original_max_position_embeddings"]
     return expected
 
 
