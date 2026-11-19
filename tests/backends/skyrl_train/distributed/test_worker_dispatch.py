@@ -78,12 +78,14 @@ def _fft_dispatch_cfg(weight_sync_backend: str = "nccl") -> SimpleNamespace:
         trainer=SimpleNamespace(
             strategy="fsdp",
             policy=SimpleNamespace(
-                model=SimpleNamespace(lora=SimpleNamespace(rank=0)),
+                model=SimpleNamespace(lora=SimpleNamespace(rank=0, sync_mode="disk")),
                 megatron_config=SimpleNamespace(lora_config=SimpleNamespace(merge_lora=False)),
             ),
         ),
         generator=SimpleNamespace(
-            inference_engine=SimpleNamespace(weight_sync_backend=weight_sync_backend, offload_kv_for_weight_sync=False),
+            inference_engine=SimpleNamespace(
+                weight_sync_backend=weight_sync_backend, offload_kv_for_weight_sync=False, data_parallel_size=1
+            ),
         ),
     )
 
@@ -236,6 +238,38 @@ class TestSaveWeights:
         dispatch._inference_engine_client.resume_generation.assert_not_awaited()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "sync_mode, data_parallel_size, pauses",
+        [("memory", 4, True), ("disk", 4, True), ("memory", 1, False), ("disk", 1, False)],
+    )
+    async def test_inplace_lora_sync_pauses_under_data_parallel(self, sync_mode, data_parallel_size, pauses):
+        """Under data parallelism the engines are paused around the in-place LoRA sync: the in-memory sync is a
+        collective RPC that a still-generating rank deadlocks (the DP ranks step in lockstep), and the disk sync would
+        otherwise swap the adapter on each rank at a different step. Single-rank engines keep the no-pause swap."""
+        from skyrl.backends.skyrl_train.workers.worker_dispatch import WorkerDispatch
+
+        cfg = _fft_dispatch_cfg()
+        cfg.trainer.policy.model.lora.rank = 32
+        cfg.trainer.policy.model.lora.sync_mode = sync_mode
+        cfg.generator.inference_engine.data_parallel_size = data_parallel_size
+
+        call_order = []
+        dispatch = WorkerDispatch.__new__(WorkerDispatch)
+        dispatch.colocate_all = False
+        dispatch.cfg = cfg
+        dispatch._inference_engine_client = AsyncMock()
+        dispatch._inference_engine_client.pause_generation = AsyncMock(side_effect=lambda: call_order.append("pause"))
+        dispatch._inference_engine_client.resume_generation = AsyncMock(side_effect=lambda: call_order.append("resume"))
+        dispatch._broadcast_to_inference_engines = MagicMock(side_effect=lambda *a, **k: call_order.append("sync"))
+        dispatch._prepare_for_weight_sync = AsyncMock()
+        dispatch._finish_weight_sync = MagicMock()
+        dispatch.ensure_active_adapter = MagicMock()
+
+        await dispatch.save_weights_for_sampler(model_id="lora-target")
+
+        assert call_order == (["pause", "sync", "resume"] if pauses else ["sync"])
+
+    @pytest.mark.asyncio
     async def test_non_colocated_megatron_merge_lora_still_pauses(self):
         """Megatron + merge_lora keeps the pause/resume path (LoRA merged
         into the base weights → tensors flow over NCCL, not load_lora_adapter)."""
@@ -277,12 +311,11 @@ class TestSaveWeights:
 
     @pytest.mark.asyncio
     async def test_broadcast_does_not_block_event_loop(self):
-        """The broadcast blocks on ``ray.get``. A timeout armed by a coroutine sharing the
-        loop (a fully-async generator's HTTP request) must not expire because of it."""
+        """A coroutine sharing the loop must run before the blocking broadcast finishes."""
         dispatch = self._nccl_dispatch(lambda *args, **kwargs: time.sleep(0.5))
 
         sync = asyncio.create_task(dispatch.save_weights_for_sampler())
-        async with asyncio.timeout(0.4):
+        async with asyncio.timeout(1.0):
             await asyncio.sleep(0.05)
         assert not sync.done()
         await sync

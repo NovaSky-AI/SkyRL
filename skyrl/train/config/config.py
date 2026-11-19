@@ -839,6 +839,23 @@ class MegatronConfig(BaseConfig):
             return self.empty_cuda_cache
         return not expandable_segments
 
+    def check_expert_grid(self, world_size: int, prefix: str) -> None:
+        """Raise unless Megatron's expert grid (pp * ep * etp) divides ``world_size``, as Megatron requires at
+        startup even for a dense model. ``prefix`` is where this config sits, for the error message."""
+        pp, ep = self.pipeline_model_parallel_size, self.expert_model_parallel_size
+        # Megatron's own fallback: an unset expert_tensor_parallel_size is the tensor parallel size.
+        etp = (
+            self.tensor_model_parallel_size
+            if self.expert_tensor_parallel_size is None
+            else self.expert_tensor_parallel_size
+        )
+        if world_size % (pp * ep * etp):
+            raise ValueError(
+                f"world_size {world_size} should be divisible by Megatron's expert grid (pp * ep * etp) {pp * ep * etp}. "
+                f"{prefix}.expert_model_parallel_size and expert_tensor_parallel_size lay it out, and Megatron builds "
+                "it even for a dense model, where expert_model_parallel_size=1 works."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Placement
@@ -1809,6 +1826,18 @@ class TrainerConfig(BaseConfig):
     longer than ``max_tokens_per_microbatch`` is placed alone in its own microbatch that exceeds the
     cap (no error, no truncation). The true peak microbatch size is therefore
     ``max(max_tokens_per_microbatch, longest_sequence_in_batch)``."""
+    balance_dp_tokens: bool = False
+    """Balance tokens across data-parallel ranks.
+
+    When False (the default), the behavior is the same as before this option existed. A batch is
+    cut into ``dp_size`` chunks with the same number of samples, in batch order. Samples of one
+    prompt have similar lengths and are next to each other, so some ranks get many more tokens
+    than others. The lighter ranks then wait for the busiest rank in every collective.
+
+    When True, the driver deals the samples of each batch (or mini-batch) to the ranks by length.
+    Every rank still gets the same number of samples, and the ranks get similar numbers of tokens.
+    Each rank forms its micro-batches as before, so this option does not depend on
+    ``max_tokens_per_microbatch``. Outputs keep the batch order."""
     recompute_old_logprobs_per_minibatch: bool = True
     """When True, recomputes policy/ref model logprobs (and critic values) per mini-batch using
     the same mini-batch + DP partition as the training step. When False, a single full-batch forward is run.

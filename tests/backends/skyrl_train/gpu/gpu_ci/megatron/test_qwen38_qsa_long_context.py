@@ -42,7 +42,7 @@ from tests.backends.skyrl_train.gpu.utils import (
 )
 
 # SKYRL_QWEN38_QSA_PROMPT_TOKENS / _NUM_PROMPTS run the same comparison at long context (the
-# context-parallel rows, e.g. 65536 or 260096 tokens with 2 prompts).
+# context-parallel row, e.g. 65536 tokens with 2 prompts).
 PROMPT_TOKENS = int(os.environ.get("SKYRL_QWEN38_QSA_PROMPT_TOKENS", "7680"))
 GENERATE_LENGTH = 256
 MAX_MODEL_LEN = PROMPT_TOKENS + 768 + 512  # prompt + response + chat-template headroom
@@ -93,19 +93,18 @@ def _long_context_input(model_name, tokenizer):
         pytest.param(1, 1, 4, 1e-1, id="qwen3.8-flash-next-4layer_h100_ep4_qsa8k"),
         # Sequence parallelism: the indexer selects on the TP-gathered sequence.
         pytest.param(2, 1, 4, 1e-1, id="qwen3.8-flash-next-4layer_h100_tp2_ep4_qsa8k"),
-        # Context parallelism (split-K cuDNN QSA: Blackwell only), for the long-context prompt sizes.
+        # Context parallelism (split-K cuDNN QSA: Blackwell only). The ep4 row above is the same
+        # configuration at CP=1.
         pytest.param(
             1,
-            8,
-            8,
+            4,
+            4,
             1e-1,
-            id="qwen3.8-flash-next-4layer_cp8_ep8",
+            id="qwen3.8-flash-next-4layer_cp4_ep4",
             marks=pytest.mark.skipif(
                 not _blackwell_with_cudnn_qsa(), reason="CP QSA needs Blackwell and cudnn-frontend's QSA ops"
             ),
         ),
-        # The CP=1 reference on the same 8 GPUs (prompts that fit one GPU, e.g. 32K).
-        pytest.param(1, 1, 8, 1e-1, id="qwen3.8-flash-next-4layer_cp1_ep8"),
     ],
 )
 async def test_qwen38_qsa_long_context_logprobs(tp, cp, num_gpus, threshold, monkeypatch):

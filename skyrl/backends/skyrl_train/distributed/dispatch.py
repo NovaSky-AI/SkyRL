@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import ray
 import torch
@@ -14,6 +14,87 @@ from skyrl.backends.skyrl_train.training_batch import (
     TrainingOutputBatch,
     pad_training_input_batch,
 )
+
+
+class OrderedRefs(List[ObjectRef]):
+    """A list of object refs that remembers how the driver permuted the samples.
+
+    ``sample_order[i]`` is the batch index of the i-th sample in the concatenation of the
+    per-rank chunks (DP-rank order). ``None`` means the chunks follow the batch order.
+    """
+
+    sample_order: Optional[List[int]] = None
+
+
+def balanced_dp_indices(token_counts: List[int], dp_size: int) -> List[List[int]]:
+    """Deal samples to DP ranks: the same number of samples on every rank, and similar token totals.
+
+    Example, ``token_counts=[90, 80, 20, 10]`` and ``dp_size=2``::
+
+        round 1: sample 0 (90) -> rank 0, sample 1 (80) -> rank 1
+        round 2: sample 2 (20) -> rank 1 (fewest tokens), sample 3 (10) -> rank 0
+        result:  [[0, 3], [1, 2]], 100 tokens on each rank
+
+    The default split gives ``[[0, 1], [2, 3]]``: 170 and 30 tokens.
+    """
+    assert len(token_counts) % dp_size == 0
+    by_length = sorted(range(len(token_counts)), key=lambda i: token_counts[i], reverse=True)
+    indices: List[List[int]] = [[] for _ in range(dp_size)]
+    rank_tokens = [0] * dp_size
+    for start in range(0, len(by_length), dp_size):
+        ranks = sorted(range(dp_size), key=lambda r: rank_tokens[r])
+        for rank, i in zip(ranks, by_length[start : start + dp_size]):
+            indices[rank].append(i)
+            rank_tokens[rank] += token_counts[i]
+    return indices
+
+
+def split_for_dp(
+    data: TrainingInputBatch, dp_size: int, balance_tokens: bool = False
+) -> Tuple[List[TrainingInputBatch], Optional[List[int]]]:
+    """Split ``data`` into ``dp_size`` chunks with the same number of samples, one per DP rank.
+
+    ``balance_tokens=False`` (the default): the chunks follow the batch order. This is exactly the
+    split before ``balance_tokens`` existed: the same ``data.chunk`` call and no sample order.
+
+    ``balance_tokens=True``: the samples are dealt by length (see :func:`balanced_dp_indices`), so
+    the chunks hold similar numbers of tokens. Only the assignment of samples to ranks changes:
+    the chunk size, the chunk metadata and the worker code path are the same as in the default
+    split. The second return value is the sample order of the concatenated chunks. A batch with
+    sub-sequence rows or without an attention mask gets the default split.
+    """
+    assert len(data) % dp_size == 0, "data batch size must be divisible by dp_size, got {} and {}".format(
+        len(data), dp_size
+    )
+    # Rows with sub-sequences are already laid out per rank by the collator.
+    if not balance_tokens or data.get("sub_seq_lengths") is not None or data.get("attention_mask") is None:
+        return data.chunk(len(data) // dp_size), None
+
+    token_counts = data["attention_mask"].sum(dim=1).cpu().tolist()
+    chunks, sample_order = [], []
+    for indices in balanced_dp_indices(token_counts, dp_size):
+        index = torch.tensor(indices, dtype=torch.long)
+        chunk = data.__class__({key: (None if value is None else value[index]) for key, value in data.items()})
+        chunk.metadata = data.metadata
+        chunks.append(chunk)
+        sample_order.extend(indices)
+    return chunks, sample_order
+
+
+def restore_sample_order(items: List[Any], sample_order: Optional[List[int]]) -> List[Any]:
+    """Undo the driver's permutation on a per-sample list (no-op without one, or on an empty list).
+
+    Example: the split ``[[0, 3], [1, 2]]`` gives ``sample_order=[0, 3, 1, 2]``. The outputs come back
+    in that order, ``[out0, out3, out1, out2]``. The result is ``[out0, out1, out2, out3]``.
+    """
+    if sample_order is None or not items:
+        return items
+    if len(items) != len(sample_order):
+        raise ValueError(f"Got {len(items)} per-sample outputs for {len(sample_order)} dispatched samples")
+    restored: List[Any] = [None] * len(items)
+    for item, original_index in zip(items, sample_order):
+        restored[original_index] = item
+    return restored
 
 
 @dataclass
@@ -102,15 +183,20 @@ class MeshDispatch(Dispatch):
     """
 
     @classmethod
-    def dispatch(cls, actor_infos: List[ActorInfo], method: str, data: TrainingInputBatch, **kwargs) -> List[ObjectRef]:
+    def dispatch(
+        cls,
+        actor_infos: List[ActorInfo],
+        method: str,
+        data: TrainingInputBatch,
+        dp_balance_tokens: bool = False,
+        **kwargs,
+    ) -> OrderedRefs:
+        """``dp_balance_tokens=True`` selects the token-balanced split (see :func:`split_for_dp`);
+        the returned list then carries the sample order."""
         assert len(actor_infos) > 0, "actor_infos must be a non-empty list"
-        object_refs = []
+        object_refs = OrderedRefs()
         dp_size = actor_infos[0].rank.dp_size
-        assert len(data) % dp_size == 0, "data batch size must be divisible by dp_size, got {} and {}".format(
-            len(data), dp_size
-        )
-        chunk_size = len(data) // dp_size
-        data_chunks: List[TrainingInputBatch] = data.chunk(chunk_size)
+        data_chunks, object_refs.sample_order = split_for_dp(data, dp_size, dp_balance_tokens)
 
         # Put each unique chunk in object store ONCE to avoid redundant serialization
         # when the same chunk is sent to multiple workers (e.g., SP/TP replicas)
@@ -128,7 +214,8 @@ class MeshDispatch(Dispatch):
         dp_size: int,
         data: TrainingInputBatch,
         mini_batch_boundaries: List[Tuple[int, int]],
-    ) -> List[List[ObjectRef]]:
+        dp_balance_tokens: bool = False,
+    ) -> List[OrderedRefs]:
         """Pre-stage mini-batch chunks into the object store.
 
         Each mini-batch is defined by a ``(start, end)`` index pair from mini_batch_boundaries.
@@ -141,10 +228,14 @@ class MeshDispatch(Dispatch):
             mini_batch_boundaries: List of ``(start, end)`` index pairs.  The i-th mini-batch is
                 data[mini_batch_boundaries[i][0]:mini_batch_boundaries[i][1]].
 
+            dp_balance_tokens: When True, split each mini-batch with the token-balanced split
+                (see :func:`split_for_dp`).
+
         Returns:
-            ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*.
+            ``result[i][dp_rank]`` - ObjectRef for mini-batch *i*, DP rank *dp_rank*. Each
+            ``result[i]`` is an :class:`OrderedRefs` that carries the sample order of mini-batch *i*.
         """
-        all_chunk_refs: List[List[ObjectRef]] = []
+        all_chunk_refs: List[OrderedRefs] = []
         for start, end in mini_batch_boundaries:
             mini_batch = data[start:end]
             mb_size = end - start
@@ -158,9 +249,10 @@ class MeshDispatch(Dispatch):
             assert (
                 mini_batch_size % dp_size == 0
             ), f"mini_batch_size % dp_size != 0, got {mini_batch_size} and {dp_size}"
-            chunk_size = mini_batch_size // dp_size
-            chunks = mini_batch.chunk(chunk_size)
-            all_chunk_refs.append([ray.put(chunk) for chunk in chunks])
+            chunks, sample_order = split_for_dp(mini_batch, dp_size, dp_balance_tokens)
+            refs = OrderedRefs(ray.put(chunk) for chunk in chunks)
+            refs.sample_order = sample_order
+            all_chunk_refs.append(refs)
         return all_chunk_refs
 
     @classmethod
@@ -299,8 +391,16 @@ class WorkerOutput:
     metrics: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def cat(cls, actor_infos: List[ActorInfo], shards: List["WorkerOutput"]) -> "WorkerOutput":
+    def cat(
+        cls,
+        actor_infos: List[ActorInfo],
+        shards: List["WorkerOutput"],
+        sample_order: Optional[List[int]] = None,
+    ) -> "WorkerOutput":
         """Concatenate per-DP-rank shards in DP-rank order.
+
+        ``sample_order`` is the permutation of a token-balanced dispatch (see
+        :class:`OrderedRefs`); with it, ``loss_fn_outputs`` return to the batch order.
 
         Only collects from collection DP ranks (matches
         :meth:`MeshRank.is_collection_dp_rank`). ``loss_fn_outputs`` are
@@ -319,7 +419,7 @@ class WorkerOutput:
         ordered = [dp_rank_to_shard[i] for i in range(actor_infos[0].rank.dp_size)]
         return cls(
             loss_fn_output_type=ordered[0].loss_fn_output_type,
-            loss_fn_outputs=[x for s in ordered for x in s.loss_fn_outputs],
+            loss_fn_outputs=restore_sample_order([x for s in ordered for x in s.loss_fn_outputs], sample_order),
             # metrics are already all-reduced across DP within each worker, so
             # taking rank 0's dict (rather than re-aggregating) is correct.
             metrics=dict(ordered[0].metrics),
