@@ -773,7 +773,8 @@ class MegatronConfig(BaseConfig):
     straight-through: the backward runs on the rounded keys and values, and their gradient reaches the unrounded key
     unchanged. DeepSeek-V3.2 / GLM-5.x geometry; needs vLLM in the trainer env (and Blackwell for ``nvfp4_ds_mla``)
     and ``engine_init_kwargs.attention_config.sparse_mla_force_mqa: true``, which makes every engine prefill read the
-    cache. The ref model mirrors the policy's setting. See
+    cache. Not supported with prefill-decode disaggregation (``enable_pd``). The ref model mirrors the policy's setting.
+    See
     ``skyrl.backends.skyrl_train.workers.megatron.quantization.fake_kv_cache_qat``."""
     kv_cache_qat_format: Optional[Literal["nvfp4_ds_mla", "fp8_ds_mla"]] = None
     """The emulated KV cache format, set during config validation; leave unset.

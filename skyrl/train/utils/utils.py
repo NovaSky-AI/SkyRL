@@ -497,7 +497,12 @@ def _apply_kv_cache_qat_cfg(cfg: SkyRLTrainConfig) -> None:
         return
     if cfg.trainer.strategy != "megatron":
         raise ValueError(f"{name} needs trainer.strategy=megatron")
-    engine_kwargs = cfg.generator.inference_engine.engine_init_kwargs
+    ie_cfg = cfg.generator.inference_engine
+    if ie_cfg.enable_pd:
+        raise ValueError(
+            f"{name} does not support prefill-decode disaggregation (generator.inference_engine.enable_pd=true)"
+        )
+    engine_kwargs = ie_cfg.engine_init_kwargs
     kv_dtype = engine_kwargs.get("kv_cache_dtype", "auto")
     if kv_dtype not in tuple(KvCacheFormat):
         raise ValueError(

@@ -93,6 +93,20 @@ def test_force_mqa_is_required():
         _apply_kv_cache_qat_cfg(_cfg(force_mqa=False))
 
 
+@pytest.mark.parametrize("role_kwargs", [False, True])
+def test_prefill_decode_disaggregation_is_rejected(role_kwargs):
+    """PD is rejected as such, not as an unquantized cache, with the engine kwargs in either place PD allows."""
+    cfg = _cfg("nvfp4_ds_mla")
+    ie_cfg = cfg.generator.inference_engine
+    ie_cfg.enable_pd = True
+    if role_kwargs:
+        ie_cfg.prefill_init_kwargs = dict(ie_cfg.engine_init_kwargs)
+        ie_cfg.decode_init_kwargs = dict(ie_cfg.engine_init_kwargs)
+        ie_cfg.engine_init_kwargs = {}
+    with pytest.raises(ValueError, match="does not support prefill-decode disaggregation"):
+        _apply_kv_cache_qat_cfg(cfg)
+
+
 def test_disagreeing_format_is_rejected():
     cfg = _cfg("nvfp4_ds_mla")
     cfg.trainer.policy.megatron_config.kv_cache_qat_format = "fp8_ds_mla"
