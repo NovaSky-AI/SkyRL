@@ -291,6 +291,11 @@ class MegatronDDPConfig(BaseConfig):
     grad_reduce_in_fp32: bool = True
     overlap_grad_reduce: bool = False
     overlap_param_gather: bool = False
+    align_param_gather: bool = False
+    """With ``overlap_param_gather``, dispatch every bucket's parameter all-gather from the forward
+    schedule instead of chaining each one from the previous bucket's forward pre-hook. Without it,
+    ``overlap_param_gather`` has failed in the second training step with
+    ``assert self.param_gather_handle is None`` in megatron-core's ``start_param_sync``."""
     fp8_param_gather: bool = False
     """Keep the DDP parameter all-gather in FP8.
     Must be ``True`` when training with ``transformer_config_kwargs.fp8_param=true`` so persistent

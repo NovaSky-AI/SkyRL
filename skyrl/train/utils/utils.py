@@ -1064,6 +1064,8 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # DeepSeek-V4.1 switches read by the Megatron workers (patches/megatron/deepseek_v41: KV fake-quant,
         # Engram table placement, faulthandler).
         env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
+        # NCCL tuning set on the driver (e.g. NCCL_BUFFSIZE). NCCL_CUMEM_ENABLE is managed separately.
+        env_vars.update({k: v for k, v in os.environ.items() if k.startswith("NCCL_") and k != "NCCL_CUMEM_ENABLE"})
 
     if cfg.generator.inference_engine.backend == "vllm":
         env_vars["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = "true"
