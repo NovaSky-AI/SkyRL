@@ -971,6 +971,25 @@ def test_hf_overrides_rope_parameters_must_match_megatron_trainer_side_override(
         )
 
 
+@pytest.mark.parametrize(
+    ("strategy", "trainer_prefix"),
+    [
+        ("fsdp", "trainer.policy.model_config_kwargs"),
+        ("megatron", "trainer.policy.megatron_config.transformer_config_kwargs"),
+    ],
+)
+def test_trainer_only_rope_parameters_must_be_matched_by_hf_overrides(strategy, trainer_prefix):
+    with pytest.raises(ValueError, match="hf_overrides.rope_parameters` must match"):
+        SkyRLTrainConfig.from_cli_overrides(
+            [
+                f"trainer.strategy={strategy}",
+                f"{trainer_prefix}.rope_parameters.rope_type=linear",
+                f"{trainer_prefix}.rope_parameters.factor=2.0",
+                f"{trainer_prefix}.rope_parameters.rope_theta=10000",
+            ]
+        )
+
+
 def test_run_engines_locally_false_requires_external_endpoint():
     cfg = SkyRLTrainConfig()
     cfg.generator.inference_engine.run_engines_locally = False

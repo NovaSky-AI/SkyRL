@@ -2379,20 +2379,20 @@ class SkyRLTrainConfig(BaseConfig):
         inference_rope_parameters = _get_nested_value(
             overrides, "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters"
         )
-        if inference_rope_parameters is not _MISSING:
-            trainer_strategy = _get_nested_value(overrides, "trainer.strategy")
-            trainer_strategy = "fsdp" if trainer_strategy is _MISSING else trainer_strategy
-            trainer_rope_parameters_path = (
-                "trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters"
-                if trainer_strategy == "megatron"
-                else "trainer.policy.model_config_kwargs.rope_parameters"
+        trainer_strategy = _get_nested_value(overrides, "trainer.strategy")
+        trainer_strategy = "fsdp" if trainer_strategy is _MISSING else trainer_strategy
+        trainer_rope_parameters_path = (
+            "trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters"
+            if trainer_strategy == "megatron"
+            else "trainer.policy.model_config_kwargs.rope_parameters"
+        )
+        trainer_rope_parameters = _get_nested_value(overrides, trainer_rope_parameters_path)
+        # Either side alone is a mismatch too: vLLM would sample on different positions than the trainer scores.
+        if inference_rope_parameters != trainer_rope_parameters:
+            raise ValueError(
+                "`generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters` must match "
+                f"the trainer-side override at `{trainer_rope_parameters_path}` (set both, or neither)"
             )
-            trainer_rope_parameters = _get_nested_value(overrides, trainer_rope_parameters_path)
-            if inference_rope_parameters != trainer_rope_parameters:
-                raise ValueError(
-                    "`generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters` must match "
-                    f"the trainer-side override at `{trainer_rope_parameters_path}`"
-                )
         async_engine_path = "generator.inference_engine.async_engine"
         async_engine = _get_nested_value(overrides, async_engine_path)
         if async_engine is not _MISSING:
