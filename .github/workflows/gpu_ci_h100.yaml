@@ -38,7 +38,7 @@ jobs:
     # set, so labelling in bulk launched one identical GPU run per label.
     # Forks inherit these workflows but not the secrets they need -- only run upstream.
     if: >
-      github.repository == 'NovaSky-AI/SkyRL' &&
+      github.repository == 'skyrl-project/SkyRL' &&
       (
         github.event_name == 'push' ||
         github.event_name == 'workflow_dispatch' ||
