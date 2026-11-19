@@ -26,6 +26,8 @@
 #   * Release the oversized d-logits staging buffer before final partial-vocab
 #     backward projections.
 #   * Removed unused VERL wrappers, reductions, and backward strategies.
+#   * Ask ``tl.dot`` for ``ieee`` input precision on AMD ROCm, whose Triton has
+#     no ``tf32``.
 #
 # Preserve verl's #2656 OOB-vocab masking lines (search ``vocab_bound`` /
 # ``logits_for_lse``); they are required for TP correctness.
@@ -70,6 +72,8 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+
+from skyrl.backends.skyrl_train.gpu_platform import is_rocm
 
 # Local replacements for verl.utils.device.
 is_cuda_available = torch.cuda.is_available()
@@ -714,7 +718,13 @@ FORCE_FP32_IEEE_PRECISION = False
 
 
 def _dot_input_precision(hidden: torch.Tensor):
-    """Choose ``tl.dot`` input precision; accumulation remains fp32."""
+    """Choose ``tl.dot`` input precision; accumulation remains fp32.
+
+    ``tf32`` is an NVIDIA tensor-core mode. Triton on AMD ROCm accepts only ``ieee``, ``bf16x3`` and
+    ``bf16x6`` and fails to compile the kernel for any other value, so ROCm asks for ``ieee``.
+    """
+    if is_rocm():
+        return "ieee"
     if FORCE_FP32_IEEE_PRECISION and hidden.dtype == torch.float32:
         return "ieee"
     return "tf32"

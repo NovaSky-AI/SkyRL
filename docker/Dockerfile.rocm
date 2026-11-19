@@ -1,0 +1,102 @@
+# SkyRL's Megatron backend on AMD Instinct GPUs (ROCm): MI300X/MI325X and MI350X/MI355X.
+#
+# The parent image supplies the ROCm builds of torch, Triton and flash-attn, and vLLM at the version
+# SkyRL pins. This file adds AMD's fork of TransformerEngine, built from source, and every other package
+# of SkyRL's lock at its pinned version, minus the CUDA-only ones (docker/rocm-excluded-packages.txt).
+# megatron-core and Megatron-Bridge are the same commits as on NVIDIA.
+#
+# Build from the repository root, on x86-64 Linux; no GPU is needed to build:
+#   docker build -f docker/Dockerfile.rocm -t skyrl-rocm .
+#
+# Run SkyRL in the image with the image's own interpreter (`python -m skyrl.train.entrypoints.main_base
+# ...`). `uv run --isolated`, which the example scripts use, would resolve a fresh CUDA environment from
+# the lock.
+#
+# docker/Dockerfile.amd is a separate image: the Tinker API server with the FSDP backend.
+FROM vllm/vllm-openai-rocm:v0.33.0-rocm100
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG UV_VERSION=0.11.11
+# AMD's TransformerEngine fork, at the tag that matches the transformer-engine version in uv.lock.
+ARG TE_TAG=v2.19_rocm
+# The GPU architectures TransformerEngine is compiled for: gfx942 is MI300X/MI325X, gfx950 is MI350X/MI355X.
+ARG NVTE_ROCM_ARCH="gfx942;gfx950"
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV PATH=/root/.local/bin:${PATH}
+
+# Ray writes no per-process GPU mask in this image: every process sees every GPU, and SkyRL selects its
+# own by the index Ray assigned. Under Ray's default masking a trainer process sees one GPU while the
+# workers of a multi-GPU inference engine see several, and RCCL then cannot connect the group that
+# carries the weights from one to the other (_validate_megatron_cfg_on_rocm in skyrl/train/utils/utils.py).
+ENV RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES=1 \
+    RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
+
+# flash-linear-attention has a TileLang variant of one Gated DeltaNet backward kernel, which SkyRL turns
+# on by default and which needs NVIDIA's compiler. Keep Gated DeltaNet on the Triton kernels.
+ENV FLA_TILELANG=0
+
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        iproute2 \
+        iputils-ping \
+        kmod \
+        libnuma-dev \
+        libxml2 \
+        net-tools \
+        netcat-openbsd \
+        openssh-server \
+        traceroute \
+        tzdata \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN if ! command -v uv >/dev/null 2>&1; then \
+        curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh; \
+    fi \
+    && uv --version
+
+# ---------- TransformerEngine (AMD's fork), built against the parent image's torch ----------
+# It has no prebuilt wheel at this version. The ROCm compilers and libraries come from the parent image,
+# which carries the ROCm SDK's devel tree and exports ROCM_PATH, HIP_PATH and HIP_CLANG_PATH for it.
+RUN python -m pip install --no-cache-dir packaging "cmake<4" ninja wheel "setuptools<80" pybind11==3.0.4 Cython \
+    && git clone --recursive --branch "${TE_TAG}" --depth 1 --shallow-submodules \
+        https://github.com/ROCm/TransformerEngine.git /tmp/TransformerEngine \
+    && cd /tmp/TransformerEngine \
+    && HIP_PLATFORM=amd CMAKE_PREFIX_PATH="${ROCM_PATH}/lib/cmake/" \
+        NVTE_FRAMEWORK=pytorch NVTE_USE_ROCM=1 NVTE_ROCM_ARCH="${NVTE_ROCM_ARCH}" \
+        MAX_JOBS="$(nproc)" CMAKE_BUILD_PARALLEL_LEVEL="$(nproc)" \
+        python -m pip install --no-cache-dir --no-build-isolation --no-deps . \
+    && cd / \
+    && rm -rf /tmp/TransformerEngine
+
+WORKDIR /workspace/SkyRL
+COPY . /workspace/SkyRL
+
+# ---------- SkyRL and its lock, minus the CUDA-only packages ----------
+# --no-deps: the list is the whole lock already, and resolving dependencies would let megatron-bridge's
+#   metadata pull the CUDA TransformerEngine back in.
+# --no-config: without it uv applies the override-dependencies of pyproject.toml, which replace the
+#   megatron-core git pin in the list with the newest PyPI release.
+# The verify command fails the build if a package of the parent image was replaced, a CUDA-tagged
+# distribution was installed, or a git pin is not installed from its pinned commit. The last command
+# imports the Megatron worker, which needs no GPU, and fails the build if SkyRL's extra Megatron bridges
+# did not register: without them a Qwen3.5 model is built through the wrong bridge.
+RUN python docker/rocm_requirements.py snapshot > /tmp/rocm-protected.json \
+    && uv export --frozen --no-hashes --no-annotate --no-emit-project --extra megatron --extra dev \
+        -q -o .rocm-export.txt \
+    && python docker/rocm_requirements.py filter .rocm-export.txt docker/rocm-excluded-packages.txt \
+        > .rocm-requirements.txt \
+    && STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 \
+        uv pip install --system --no-config --no-deps --no-cache-dir -r .rocm-requirements.txt \
+    && uv pip install --system --no-config --no-deps --no-cache-dir -e . \
+    && python docker/rocm_requirements.py verify /tmp/rocm-protected.json .rocm-requirements.txt \
+    && python -c "import torch; assert torch.version.hip is not None; print('torch', torch.__version__, 'hip', torch.version.hip)" \
+    && python -c "import skyrl.train.entrypoints.main_base; from skyrl.backends.skyrl_train.workers.megatron import megatron_worker, model_bridges as b; assert hasattr(b, 'Qwen35DenseLMBridge') and hasattr(b, 'Qwen35MoELMBridge'), 'extra Megatron bridges are not registered'; print('megatron worker imports; extra Megatron bridges registered')"
+
+ENTRYPOINT []
+CMD ["/bin/bash"]
