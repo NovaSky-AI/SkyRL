@@ -261,18 +261,18 @@ _ROPE_TYPES = {
 }
 
 
-def apply_rope_override(bridge, rope_parameters: dict) -> None:
-    """Write a RoPE override into the HF config Megatron-Bridge translates into the provider.
+def apply_rope_override(hf_config, rope_parameters: dict) -> None:
+    """Write a RoPE override into an HF config.
 
-    This is the same write vLLM makes for ``hf_overrides.rope_parameters`` (top-level ``rope_parameters``), so
-    the trainer and the inference engine start from the same config. Call it before
-    ``bridge.to_megatron_provider()``, then confirm the result with :func:`check_rope_override`.
+    This is the same write vLLM makes for ``hf_overrides.rope_parameters`` (top-level ``rope_parameters``). Applied
+    to ``bridge.hf_pretrained.config`` before ``bridge.to_megatron_provider()``, it reaches the Megatron model
+    (confirm with :func:`check_rope_override`); applied to the config saved on export, the exported checkpoint
+    carries it too.
     """
-    config = bridge.hf_pretrained.config
-    config.rope_parameters = dict(rope_parameters)
+    hf_config.rope_parameters = dict(rope_parameters)
     # Megatron-Bridge maps a top-level rope_theta before it reads rope_parameters, so set both.
     if "rope_theta" in rope_parameters:
-        config.rope_theta = rope_parameters["rope_theta"]
+        hf_config.rope_theta = rope_parameters["rope_theta"]
 
 
 def _expected_rope_fields(provider, rope_parameters: dict) -> dict:

@@ -15,7 +15,12 @@ pytest.importorskip("megatron.bridge", reason="requires the megatron extra")
 pytestmark = pytest.mark.megatron
 
 from megatron.bridge import AutoBridge  # noqa: E402
-from transformers import DeepseekV3Config, LlamaConfig, Qwen2Config  # noqa: E402
+from transformers import (  # noqa: E402
+    AutoConfig,
+    DeepseekV3Config,
+    LlamaConfig,
+    Qwen2Config,
+)
 
 from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (  # noqa: E402
     apply_rope_override,
@@ -85,7 +90,7 @@ def _bridge(config, tmp_path):
 )
 def test_rope_override_reaches_the_provider_or_raises(tmp_path, make_config, override, match):
     bridge = _bridge(make_config(), tmp_path)
-    apply_rope_override(bridge, override)
+    apply_rope_override(bridge.hf_pretrained.config, override)
     provider = bridge.to_megatron_provider(load_weights=False)
     bridge_name = type(bridge._model_bridge).__name__
 
@@ -111,5 +116,16 @@ def test_theta_written_only_into_rope_parameters_loses_to_a_top_level_rope_theta
         check_rope_override(bridge.to_megatron_provider(load_weights=False), YARN, "Qwen2Bridge")
 
     bridge = _bridge_with_top_level_rope_theta(tmp_path)
-    apply_rope_override(bridge, YARN)
+    apply_rope_override(bridge.hf_pretrained.config, YARN)
     check_rope_override(bridge.to_megatron_provider(load_weights=False), YARN, "Qwen2Bridge")
+
+
+def test_exported_config_keeps_the_rope_override(tmp_path):
+    # init_configs applies the override to the config save_hf_configs writes with save_pretrained, so a model trained
+    # under it is exported with it and reloads with the same positions.
+    config = _qwen2()
+    apply_rope_override(config, YARN)
+    config.save_pretrained(tmp_path)
+
+    reloaded = AutoConfig.from_pretrained(tmp_path)
+    assert {key: reloaded.rope_parameters.get(key) for key in YARN} == YARN

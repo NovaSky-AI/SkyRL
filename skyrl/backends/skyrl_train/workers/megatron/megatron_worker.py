@@ -1,3 +1,4 @@
+import copy
 import dataclasses
 import functools
 import os
@@ -390,7 +391,7 @@ class MegatronWorker:
                 "(native GDN thd packing path; vision tower dropped)"
             )
         if rope_parameters:
-            apply_rope_override(bridge, rope_parameters)
+            apply_rope_override(bridge.hf_pretrained.config, rope_parameters)
         if language_model_only and getattr(hf_config_original, "model_type", None) == "kimi_k25":
             # megatron-bridge ships its own KimiK25VLBridge for this architecture, whose
             # provider builds a vision tower this backend cannot train. model_bridges
@@ -564,8 +565,14 @@ class MegatronWorker:
 
         # strategy.hf_config is the on-disk source-of-truth used by
         # save_hf_configs and must NOT carry runtime overrides like
-        # mtp_num_layers=0; assign the un-mutated AutoConfig here.
-        self.strategy.hf_config = hf_config_original
+        # mtp_num_layers=0; assign the un-mutated AutoConfig here. A RoPE
+        # override is not runtime-only: the weights are trained under it, so the
+        # exported config carries it (as FSDP's saved config does).
+        export_config = hf_config_original
+        if rope_parameters:
+            export_config = copy.deepcopy(hf_config_original)
+            apply_rope_override(export_config, rope_parameters)
+        self.strategy.hf_config = export_config
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
         self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
