@@ -923,12 +923,13 @@ def test_megatron_ref_inherits_the_policy_rope_override():
     )
 
 
-def test_megatron_ref_rope_override_must_match_the_policy():
+@pytest.mark.parametrize("policy_overrides", [_MEGATRON_YARN_OVERRIDES, []], ids=["different", "ref-only"])
+def test_megatron_ref_rope_override_must_match_the_policy(policy_overrides):
     with pytest.raises(ValueError, match="trainer.ref.megatron_config.transformer_config_kwargs.rope_parameters"):
         SkyRLTrainConfig.from_cli_overrides(
             [
                 "trainer.strategy=megatron",
-                *_MEGATRON_YARN_OVERRIDES,
+                *policy_overrides,
                 "trainer.ref.megatron_config.transformer_config_kwargs.rope_parameters.rope_type=default",
                 "trainer.ref.megatron_config.transformer_config_kwargs.rope_parameters.rope_theta=10000.0",
             ]
