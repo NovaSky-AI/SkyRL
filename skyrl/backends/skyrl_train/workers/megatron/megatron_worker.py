@@ -417,7 +417,7 @@ class MegatronWorker:
         # model_parallel_cuda_manual_seed, so TP-replicated parameters come out identical.
         provider = bridge.to_megatron_provider(load_weights=not SKYRL_MEGATRON_RANDOM_INIT)
         if rope_parameters:
-            check_rope_override(provider, rope_parameters, type(bridge._model_bridge).__name__)
+            check_rope_override(provider, rope_parameters, type(getattr(bridge, "_model_bridge", None)).__name__)
 
         if not enable_mtp and getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
