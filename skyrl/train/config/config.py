@@ -558,12 +558,13 @@ class QatRoundingConfig(BaseConfig):
     trainer round differently from the rollouts it emulates (logged at startup)."""
 
     four_over_six: Optional[bool] = None
-    """NVFP4 4/6 block scales: per 16-block amax/6 or amax/4, whichever has the lower squared error (FlashInfer's
-    4over6), instead of amax/6. ``None``: the rollouts' setting."""
+    """NVFP4 4/6 block scales: per 16-block amax/6 or amax/4, whichever has the lower squared error.
+    FlashInfer's 4over6, instead of amax/6. ``None``: the rollouts' setting."""
     stochastic_rounding: bool = False
-    """Round each scaled value to one of its two E2M1 neighbours, up with probability equal to its distance from the
-    lower one: unbiased, where round-to-nearest repeats the same error every time. Scales stay the round-to-nearest
-    grid's, one E4M3 step larger where a block's largest value would saturate."""
+    """Round each scaled value stochastically to one of its two E2M1 neighbours.
+    Up with probability equal to its distance from the lower one: unbiased, where round-to-nearest repeats the same
+    error every time. Scales stay the round-to-nearest grid's, one E4M3 step larger where a block's largest value would
+    saturate."""
 
 
 @dataclass
@@ -714,14 +715,14 @@ class MegatronConfig(BaseConfig):
     ``optimizer_offload_fraction=1.0``), whose step allocates little GPU memory.
     ``True`` / ``False`` force both empties on / off."""
     expert_nvfp4: bool = False
-    """Routed-expert NVFP4 training: the trainer's routed experts (``*.experts.linear_fc1/fc2``) compute on the
-    NVFP4 grid vLLM serves, and the same NVFP4 expert weights are synced to vLLM (ModelOpt NVFP4, per-token
-    activations on FlashInfer TRT-LLM, no re-quantization on the sampler), so the trainer's logprobs follow the
-    rollouts'. Everything else stays BF16, and so do the optimizer's master weights (straight-through).
-    ``expert_nvfp4_mode`` picks what the trainer rounds; ``expert_nvfp4_block_scale`` the block scales of both
-    sides. Requires ``moe_grouped_gemm``, expert TP 1 (``expert_tensor_parallel_size: 1``; set it explicitly with
-    ``tensor_model_parallel_size > 1``, Megatron defaults it to the TP size), the NCCL or CUDA-IPC weight sync and
-    SM100. The ref model mirrors the policy's setting.
+    """Train the routed experts on the NVFP4 grid vLLM serves, and sync the same NVFP4 expert weights to vLLM.
+    The trainer's routed experts (``*.experts.linear_fc1/fc2``) compute on that grid and the sync ships them as
+    ModelOpt NVFP4 (per-token activations on FlashInfer TRT-LLM, no re-quantization on the sampler), so the trainer's
+    logprobs follow the rollouts'. Everything else stays BF16, and so do the optimizer's master weights
+    (straight-through). ``expert_nvfp4_mode`` picks what the trainer rounds; ``expert_nvfp4_block_scale`` the block
+    scales of both sides. Requires ``moe_grouped_gemm``, expert TP 1 (``expert_tensor_parallel_size: 1``; set it
+    explicitly with ``tensor_model_parallel_size > 1``, Megatron defaults it to the TP size), the NCCL or CUDA-IPC
+    weight sync and SM100. The ref model mirrors the policy's setting.
 
     ``num_layers_at_start_in_bf16`` / ``num_layers_at_end_in_bf16`` keep the routed experts of the first / last
     N layers in BF16, in the trainer and on the sampler (the vLLM ignore list and the weight sync follow them)."""
