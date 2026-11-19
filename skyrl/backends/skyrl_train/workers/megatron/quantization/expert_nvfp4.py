@@ -355,7 +355,8 @@ def check_supported_transformer_config(config: Any) -> None:
     ``general_grouped_gemm`` call, or receive already-quantized weights the hook would not recognize."""
     if config.fp8 is not None or config.fp4 is not None:
         raise ValueError(
-            f"expert_nvfp4 needs BF16 expert compute, got transformer config fp8={config.fp8!r} fp4={config.fp4!r}"
+            "expert_nvfp4 needs BF16 expert compute: leave transformer config fp8 / fp4 unset (None); got "
+            f"fp8={config.fp8!r} fp4={config.fp4!r}"
         )
     if config.moe_use_grouped_tensor or config.moe_single_grouped_weight or config.use_transformer_engine_op_fuser:
         raise ValueError(

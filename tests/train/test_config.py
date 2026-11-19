@@ -2041,7 +2041,6 @@ def test_expert_nvfp4_accepts_packed_push_backends(colocated, mode):
         ({"trainer.policy.megatron_config.moe_grouped_gemm": False}, "moe_grouped_gemm"),
         ({"trainer.policy.megatron_config.expert_tensor_parallel_size": 2}, "expert_tensor_parallel_size: 1"),
         ({"trainer.policy.megatron_config.tensor_model_parallel_size": 2}, "takes from tensor_model_parallel_size"),
-        ({"trainer.policy.megatron_config.transformer_config_kwargs": {"fp8": "e4m3"}}, "global fp8/fp4"),
         ({"trainer.policy.megatron_config.transformer_config_kwargs": {"quant_recipe": {}}}, "quant_recipe"),
         ({"trainer.mtp.enabled": True}, "MTP"),
     ],
@@ -2053,6 +2052,33 @@ def test_expert_nvfp4_rejects_unsupported_setups(overrides, message):
         setattr(_get_nested_attr(cfg, ".".join(parents)), leaf, value)
     with pytest.raises(ValueError, match=message):
         _validate_expert_nvfp4_cfg(cfg)
+
+
+@pytest.mark.parametrize("value", [False, "false", "e4m3", True])
+@pytest.mark.parametrize("key", ["fp8", "fp4"])
+def test_expert_nvfp4_rejects_any_set_fp8_or_fp4(key, value):
+    """Megatron enables FP8 / FP4 for any value but None, so even ``False`` is rejected at config time."""
+    cfg = _expert_nvfp4_config()
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs[key] = value
+    with pytest.raises(ValueError, match=r"fp8 / fp4 unset \(None\)"):
+        _validate_expert_nvfp4_cfg(cfg)
+
+
+def test_expert_nvfp4_rejects_a_disabled_top_level_fp8():
+    """``megatron_config.fp8`` folds into ``transformer_config_kwargs["fp8"]`` whenever it is not None."""
+    from skyrl.train.config.config import MegatronConfig
+
+    cfg = _expert_nvfp4_config()
+    folded = MegatronConfig(expert_nvfp4=True, fp8="false").transformer_config_kwargs
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs = folded
+    with pytest.raises(ValueError, match=r"fp8 / fp4 unset \(None\)"):
+        _validate_expert_nvfp4_cfg(cfg)
+
+
+def test_expert_nvfp4_accepts_unset_fp8_and_fp4():
+    cfg = _expert_nvfp4_config()
+    cfg.trainer.policy.megatron_config.transformer_config_kwargs.update(fp8=None, fp4=None)
+    _validate_expert_nvfp4_cfg(cfg)
 
 
 def test_expert_nvfp4_accepts_tensor_parallel_with_whole_experts():

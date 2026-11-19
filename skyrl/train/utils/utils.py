@@ -431,8 +431,15 @@ def _validate_expert_nvfp4_cfg(cfg: SkyRLTrainConfig):
     if not mc.moe_grouped_gemm:
         raise ValueError(f"{name} requires moe_grouped_gemm=true")
     kwargs = mc.transformer_config_kwargs
-    if is_fp8_enabled(kwargs.get("fp8")) or kwargs.get("fp4") or kwargs.get("quant_recipe") is not None:
-        raise ValueError(f"{name} conflicts with global fp8/fp4 or a quant_recipe")
+    # Megatron turns FP8 / FP4 on for any value but None (``config.fp8 is not None``), ``False`` included.
+    if kwargs.get("fp8") is not None or kwargs.get("fp4") is not None:
+        raise ValueError(
+            f"{name} needs BF16 expert compute: leave trainer.policy.megatron_config.fp8 and transformer_config_kwargs "
+            f"fp8 / fp4 unset (None), which Megatron reads as on for any other value, False included; got "
+            f"fp8={kwargs.get('fp8')!r} fp4={kwargs.get('fp4')!r}"
+        )
+    if kwargs.get("quant_recipe") is not None:
+        raise ValueError(f"{name} conflicts with a quant_recipe")
     # Each expert's global (per-tensor) scale must come from the whole matrix, as on the sampler.
     etp = mc.expert_tensor_parallel_size or mc.tensor_model_parallel_size
     if etp != 1:
