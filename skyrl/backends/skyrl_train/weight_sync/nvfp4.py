@@ -36,12 +36,20 @@ NVFP4_BLOCK_SIZE = NVFP4_GROUP_SIZE
 _EXPERT_RE = re.compile(
     r"^(?P<prefix>.*\.layers\.(?P<layer>\d+)\.mlp\.experts\.(?P<expert>\d+))\.(?P<proj>gate_proj|up_proj|down_proj)\.weight$"
 )
+# One tensor for all experts of a layer (the Qwen3.5 bridge's packed export). The serializer quantizes per-expert
+# tensors only, so it rejects these names: passed through, they reach an NVFP4 sampler as BF16.
+_PACKED_EXPERT_RE = re.compile(r"\.layers\.(?P<layer>\d+)\.mlp\.experts\.(?:gate_up_proj|down_proj)(?:\.weight)?$")
 
 # Modules that stay BF16 on the sampler: everything except the routed experts.
 NVFP4_EXPERT_ONLY_IGNORE = (
     "*self_attn*",
     "*linear_attn*",
     "*mlp.gate",
+    # The MLP of a dense (non-MoE) layer. vLLM names the routed experts ``...mlp.experts``, which none of these match.
+    "*mlp.gate_up_proj",
+    "*mlp.gate_proj",
+    "*mlp.up_proj",
+    "*mlp.down_proj",
     "*shared_expert*",
     "lm_head",
     "*lm_head*",
@@ -115,6 +123,13 @@ class Nvfp4ExpertSerializer:
 
     def __call__(self, name: str, tensor: Any) -> Iterator[Tuple[str, Any]]:
         m = _EXPERT_RE.match(name)
+        if m is None:
+            packed = _PACKED_EXPERT_RE.search(name)
+            if packed is not None and int(packed.group("layer")) not in self.bf16_layers:
+                raise ValueError(
+                    f"NVFP4 sync: {name!r} holds all experts of a layer in one tensor. The serializer quantizes "
+                    "per-expert tensors (`...mlp.experts.<i>.gate_proj.weight`) only; export the experts per expert."
+                )
         if m is None or int(m.group("layer")) in self.bf16_layers:
             yield name, tensor
             return

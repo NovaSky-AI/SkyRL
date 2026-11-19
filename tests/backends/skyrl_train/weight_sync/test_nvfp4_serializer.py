@@ -201,3 +201,42 @@ def test_quantizes_with_vllms_global_scale_over_the_whole_matrix(monkeypatch, bl
 def test_settings_reject_unknown_block_scales():
     with pytest.raises(ValueError, match="block_scale"):
         nvfp4.Nvfp4WeightQuantSettings("mse")
+
+
+@pytest.mark.parametrize("proj", ["gate_up_proj", "down_proj"])
+def test_packed_expert_tensor_is_an_error(fake_quantizer, proj):
+    """One tensor for all experts of a layer is not quantized here, so it must not reach an NVFP4 sampler as BF16."""
+    name = f"model.language_model.layers.3.mlp.experts.{proj}"
+    packed = torch.zeros(4, 6, 32)
+    with pytest.raises(ValueError, match="all experts of a layer"):
+        list(nvfp4.Nvfp4ExpertSerializer(_SETTINGS)(name, packed))
+    # The experts of a BF16 layer stay BF16 on the sampler, so the packed tensor passes through.
+    out = _run(nvfp4.Nvfp4ExpertSerializer(_SETTINGS, bf16_layers=[3]), [(name, packed)])
+    assert [n for n, _ in out] == [name] and not fake_quantizer
+
+
+@pytest.mark.vllm
+def test_vllm_keeps_dense_mlp_layers_in_bf16():
+    """With the ignore list, vLLM's ModelOpt NVFP4 config quantizes the routed experts only: the MLP of a dense
+    (non-MoE) layer stays BF16, as the weight sync sends it."""
+    pytest.importorskip("vllm")
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+
+    overrides = nvfp4.get_nvfp4_vllm_engine_overrides(bf16_layers=[5])
+    config = ModelOptNvFp4Config.from_config(dict(overrides["hf_overrides"]["quantization_config"]))
+    # vLLM fuses gate_proj and up_proj of a dense MLP into gate_up_proj.
+    config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    def excluded(prefix):
+        return config.is_layer_excluded(prefix)
+
+    for prefix in (
+        "model.layers.0.mlp.gate_up_proj",
+        "model.layers.0.mlp.down_proj",
+        "language_model.model.layers.2.mlp.down_proj",
+        "model.layers.3.mlp.gate",
+        "model.layers.5.mlp.experts",
+    ):
+        assert excluded(prefix), prefix
+    for prefix in ("model.layers.3.mlp.experts", "language_model.model.layers.4.mlp.experts"):
+        assert not excluded(prefix), prefix
