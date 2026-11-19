@@ -18,6 +18,7 @@ from megatron.bridge import AutoBridge  # noqa: E402
 from transformers import (  # noqa: E402
     AutoConfig,
     DeepseekV3Config,
+    GptOssConfig,
     LlamaConfig,
     Qwen2Config,
 )
@@ -28,6 +29,16 @@ from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (  # noqa:
 )
 
 YARN = {"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 4096, "rope_theta": 1_000_000.0}
+YARN_ALL_KEYS = {**YARN, "beta_fast": 16.0, "beta_slow": 2.0, "mscale": 1.0, "mscale_all_dim": 1.0}
+GPT_OSS_YARN = {
+    "rope_type": "yarn",
+    "factor": 32.0,
+    "beta_fast": 32.0,
+    "beta_slow": 1.0,
+    "truncate": False,
+    "original_max_position_embeddings": 4096,
+    "rope_theta": 150_000.0,
+}
 LINEAR = {"rope_type": "linear", "factor": 2.0, "rope_theta": 1_000_000.0}
 # Megatron Core applies llama3 scaling with fixed low/high frequency factors and original length; only the factor
 # is free (Megatron-Bridge's llama_bridge.py rejects anything else).
@@ -60,6 +71,13 @@ def _deepseek_v3():
     )  # fmt: skip
 
 
+def _gpt_oss():
+    return GptOssConfig(
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16, num_local_experts=4, num_experts_per_tok=2,
+        architectures=["GptOssForCausalLM"], **_TINY,
+    )  # fmt: skip
+
+
 def _bridge(config, tmp_path):
     # The call init_configs makes; weights load lazily and to_megatron_provider(load_weights=False) never asks.
     config.save_pretrained(tmp_path)
@@ -71,7 +89,16 @@ def _bridge(config, tmp_path):
     [
         pytest.param(_qwen2, {"rope_type": "default", "rope_theta": 500_000.0}, None, id="qwen2-theta"),
         pytest.param(_qwen2, YARN, None, id="qwen2-yarn"),
+        pytest.param(_qwen2, {**YARN_ALL_KEYS, "truncate": False}, None, id="qwen2-yarn-all-keys"),
         pytest.param(_deepseek_v3, YARN, None, id="deepseek-v3-mla-yarn"),
+        pytest.param(_deepseek_v3, YARN_ALL_KEYS, None, id="deepseek-v3-mla-yarn-all-keys"),
+        pytest.param(_gpt_oss, GPT_OSS_YARN, None, id="gpt-oss-yarn"),
+        pytest.param(
+            _gpt_oss,
+            {**GPT_OSS_YARN, "beta_fast": 16.0},
+            "GPTOSSBridge does not translate it",
+            id="gpt-oss-overwritten",
+        ),
         pytest.param(_llama, LINEAR, None, id="llama-linear"),
         pytest.param(_llama, LLAMA3, None, id="llama-llama3"),
         pytest.param(_qwen2, LINEAR, "Qwen2Bridge does not translate it", id="qwen2-linear-dropped"),
