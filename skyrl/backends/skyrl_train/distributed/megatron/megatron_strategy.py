@@ -5,6 +5,7 @@ import random
 import re
 import shutil
 import tempfile
+import time
 from typing import List, Optional, Union
 
 import megatron.core.parallel_state as mpu
@@ -18,7 +19,6 @@ from megatron.core.dist_checkpointing.serialization import (
     get_default_save_sharded_strategy,
 )
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
-    FullyParallelLoadStrategyWrapper,
     FullyParallelSaveStrategyWrapper,
 )
 from megatron.core.optimizer import DistributedOptimizer
@@ -36,6 +36,11 @@ from skyrl.backends.skyrl_train.distributed.megatron.megatron_utils import (
     offload_megatron_grads_to_cpu,
     offload_megatron_model_to_cpu,
     offload_megatron_optimizer,
+)
+from skyrl.backends.skyrl_train.distributed.megatron.node_local_checkpoint import (
+    NodeLocalFullyParallelLoadStrategyWrapper,
+    log_checkpoint_checksums,
+    replicate_checkpoint_metadata,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
     CHECKPOINT_SUBDIR as OFFLOAD_TO_DISK_CHECKPOINT_SUBDIR,
@@ -430,10 +435,12 @@ class MegatronStrategy(DistributedStrategy):
         global _async_calls
         if disk_state_stores(optimizer) and io.is_cloud_path(ckpt_dir):
             raise NotImplementedError("optimizer_offload_to_disk checkpoints require a local ckpt_path.")
+        save_start = time.time()
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
         sync_params_for_export(model, optimizer)
+        log_checkpoint_checksums("save", model, optimizer, self.print)
         assert len(model) == 1, "Megatron virtual pipeline parallel is not yet supported"
         unwrapped_model = model[0]
         while hasattr(unwrapped_model, "module"):
@@ -518,7 +525,10 @@ class MegatronStrategy(DistributedStrategy):
             # tearing it down here would orphan that write.
             _async_calls.close()
             _async_calls = AsyncCallsQueue(persistent=True)
-        self.print(f"Checkpoint successfully saved to {ckpt_dir}")
+            if not io.is_cloud_path(ckpt_dir):
+                # A node-local ckpt_path holds only its ranks' shards; give every node the global files.
+                replicate_checkpoint_metadata(ckpt_dir, node_local_rank)
+        self.print(f"Checkpoint successfully saved to {ckpt_dir} in {time.time() - save_start:.1f}s")
 
     @staticmethod
     def _finalize_async_calls() -> None:
@@ -588,6 +598,7 @@ class MegatronStrategy(DistributedStrategy):
 
         # A reload must observe a fully-written checkpoint.
         self.finalize_pending_saves()
+        load_start = time.time()
 
         # Extract base model.
         model: List[nn.Module] = model.actor_module
@@ -614,9 +625,10 @@ class MegatronStrategy(DistributedStrategy):
         if io.is_cloud_path(ckpt_dir):
             state_dict = self._load_dist_checkpoint_from_cloud(ckpt_dir, sharded_state_dict)
         else:
-            # Load from local filesystem with full parallel strategy.
+            # Load from local filesystem with full parallel strategy; each rank reads only shard files its
+            # node has, so a node-local ckpt_path works (see node_local_checkpoint.py).
             load_strategy = get_default_load_sharded_strategy(ckpt_dir)
-            load_strategy = FullyParallelLoadStrategyWrapper(
+            load_strategy = NodeLocalFullyParallelLoadStrategyWrapper(
                 load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
             )
             state_dict = dist_checkpointing.load(
@@ -656,6 +668,9 @@ class MegatronStrategy(DistributedStrategy):
         if "rng" in state_dict:
             self.load_rng_state(state_dict["rng"])
 
+        if load_optimizer_states:
+            log_checkpoint_checksums("load", model, optimizer, self.print)
+        self.print(f"Checkpoint loaded from {ckpt_dir} in {time.time() - load_start:.1f}s")
         return ckpt_dir, {}
 
     _SHARD_FILE_PATTERN = re.compile(r"__(\d+)_\d+\.distcp$")
@@ -719,7 +734,7 @@ class MegatronStrategy(DistributedStrategy):
             self.print(f"All ranks downloaded checkpoint shards from {ckpt_dir}")
 
             load_strategy = get_default_load_sharded_strategy(local_dir)
-            load_strategy = FullyParallelLoadStrategyWrapper(
+            load_strategy = NodeLocalFullyParallelLoadStrategyWrapper(
                 load_strategy, mpu.get_data_parallel_group(with_context_parallel=True)
             )
             return dist_checkpointing.load(

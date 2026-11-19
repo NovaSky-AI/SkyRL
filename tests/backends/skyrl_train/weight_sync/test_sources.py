@@ -121,14 +121,16 @@ class TestFsdpWeightSource:
 class _FakeBridge:
     """Stands in for Megatron-Bridge. Records calls so laziness is observable."""
 
-    def __init__(self, tensors, *, expect_module=None):
+    def __init__(self, tensors, *, expect_module=None, sources=None):
         self._tensors = tensors
         self.export_calls = 0
         self.yielded = 0
         self.tasks_args = []
         self._expect_module = expect_module
+        # HF name -> the Megatron parameter names it is exported from.
+        self._sources = sources or {}
 
-    def export_hf_weights(self, module, show_progress=False, conversion_tasks=None):
+    def export_hf_weights(self, module, show_progress=False, conversion_tasks=None, with_megatron_names=False):
         assert self._expect_module is None or module is self._expect_module
         self.export_calls += 1
         self.tasks_args.append(conversion_tasks)
@@ -136,7 +138,10 @@ class _FakeBridge:
         def gen():
             for name, tensor in self._tensors:
                 self.yielded += 1
-                yield name, tensor
+                if with_megatron_names:
+                    yield name, tensor, self._sources.get(name, (name,))
+                else:
+                    yield name, tensor
 
         return gen()
 
@@ -203,11 +208,85 @@ class TestMegatronWeightSource:
         assert [m.dtype for m in meta] == [torch.float8_e4m3fn, e8m0, torch.bfloat16]
         assert [t.dtype for _, t in pairs] == [m.dtype for m in meta]
 
+    def test_fp32_megatron_tensors_keep_fp32(self):
+        """FP32 Megatron tensors (a router's expert bias) go out in FP32; an FP32 export of BF16
+        Megatron parameters (the bridge's LoRA merge) goes out in the inference dtype."""
+        module = torch.nn.Module()
+        module.register_buffer("expert_bias", torch.zeros(4, dtype=torch.float32))
+        module.weight = torch.nn.Parameter(torch.zeros(2, 2, dtype=torch.bfloat16))
+        tensors = [
+            ("model.layers.0.mlp.gate.e_score_correction_bias", torch.ones(4, dtype=torch.float32)),
+            ("model.layers.0.self_attn.q_proj.weight", torch.ones(2, 2, dtype=torch.float32)),
+        ]
+        sources = {
+            "model.layers.0.mlp.gate.e_score_correction_bias": ("expert_bias",),
+            "model.layers.0.self_attn.q_proj.weight": ("weight",),
+        }
+        meta, pairs = _assert_channels_agree(
+            MegatronWeightSource(_FakeBridge(tensors, sources=sources), module, torch.bfloat16)
+        )
+        assert [m.dtype for m in meta] == [torch.float32, torch.bfloat16]
+        assert [t.dtype for _, t in pairs] == [torch.float32, torch.bfloat16]
+
+    def test_fp32_names_are_gathered_from_every_rank(self, monkeypatch):
+        """Under PP / EP a rank holds only some sources; the FP32 set is the union over ranks, so
+        every rank picks the same wire dtype for a tensor it does not hold."""
+        module = torch.nn.Module()
+        module.weight = torch.nn.Parameter(torch.zeros(2, 2, dtype=torch.bfloat16))
+        tensors = [
+            ("model.layers.9.mlp.gate.e_score_correction_bias", torch.ones(4, dtype=torch.float32)),
+            ("model.layers.9.self_attn.q_proj.weight", torch.ones(2, 2, dtype=torch.float32)),
+        ]
+        sources = {
+            "model.layers.9.mlp.gate.e_score_correction_bias": ("decoder.layers.9.mlp.router.expert_bias",),
+            "model.layers.9.self_attn.q_proj.weight": ("decoder.layers.9.self_attention.linear_qkv.weight",),
+        }
+
+        def all_gather_object(out, obj):
+            out[0], out[1] = obj, ["decoder.layers.9.mlp.router.expert_bias"]
+
+        monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+        monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+        monkeypatch.setattr(torch.distributed, "all_gather_object", all_gather_object)
+        source = MegatronWeightSource(_FakeBridge(tensors, sources=sources), module, torch.bfloat16)
+        meta, _ = _assert_channels_agree(source)
+        assert [m.dtype for m in meta] == [torch.float32, torch.bfloat16]
+
     def test_reads_the_module_it_was_given(self):
         module = object()
         bridge = _FakeBridge(self._tensors(), expect_module=module)
         list(MegatronWeightSource(bridge, module, torch.bfloat16).iter_full())
         assert bridge.export_calls == 1
+
+    def test_model_bridge_splits_tensors_on_the_wire(self):
+        """A model bridge's ``split_for_weight_sync`` sends one exported tensor as several, in
+        both the metadata and the stream; ``weight_sync_numel`` sizes the transfer buffer."""
+
+        class _ModelBridge:
+            @staticmethod
+            def split_for_weight_sync(name, tensor):
+                if not name.endswith("experts.w2_weight"):
+                    return [(name, tensor)]
+                base, kind = name.rsplit(".", 1)
+                return [(f"{base}.{e}.{kind}", tensor[e]) for e in range(tensor.shape[0])]
+
+            @staticmethod
+            def weight_sync_numel(name, shape):
+                return 7
+
+        experts = torch.arange(12, dtype=torch.float32).reshape(3, 2, 2)
+        bridge = _FakeBridge([("model.embed_tokens.weight", torch.ones(4, 2)), ("l.experts.w2_weight", experts)])
+        bridge._model_bridge = _ModelBridge()
+        source = MegatronWeightSource(bridge, object(), torch.bfloat16)
+        meta, pairs = _assert_channels_agree(source)
+        assert [m.name for m in meta] == ["model.embed_tokens.weight"] + [f"l.experts.{e}.w2_weight" for e in range(3)]
+        assert [tuple(m.shape) for m in meta[1:]] == [(2, 2)] * 3
+        for e, (_, t) in enumerate(pairs[1:]):
+            assert torch.equal(t.float().cpu(), experts[e])
+        assert source.wire_numel("x", (3, 2, 2)) == 7
+
+    def test_no_split_without_a_model_bridge_hook(self):
+        assert MegatronWeightSource(_FakeBridge(self._tensors()), object(), torch.bfloat16).wire_numel is None
 
 
 def _expert_key(expert: int, which: str) -> str:

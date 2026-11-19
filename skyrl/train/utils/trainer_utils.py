@@ -122,6 +122,20 @@ def run_on_each_node(node_ids: List[str], fn: Callable, *args, **kwargs):
     return deadline.ray_get(refs, "run_on_each_node")
 
 
+def write_files(files: Dict[str, bytes]) -> None:
+    """Write ``files`` (path -> contents) in order, each atomically; skip a file that already has the contents."""
+    for path, data in files.items():
+        if os.path.exists(path) and os.path.getsize(path) == len(data):
+            with open(path, "rb") as f:
+                if f.read() == data:
+                    continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp{os.getpid()}"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+
+
 def extract_step_from_path(path: str) -> int:
     basename = os.path.basename(path)
     if basename.startswith(GLOBAL_STEP_PREFIX):

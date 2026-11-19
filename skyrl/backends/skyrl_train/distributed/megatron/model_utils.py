@@ -1411,13 +1411,16 @@ class AllGatherCPTensor(torch.autograd.Function):
 
 
 # Below ported from https://github.com/volcengine/verl/blob/main/verl/utils/megatron/tensor_parallel.py#L109
+@torch.compile(dynamic=True)
+def _mul_reduce(a, b):
+    return (a * b).sum(dim=-1, keepdim=True)
+
+
 class _VocabParallelEntropy(torch.autograd.Function):
     @staticmethod
     def forward(ctx, vocab_parallel_logits: torch.Tensor) -> torch.Tensor:
-        @torch.compile(dynamic=True)
-        def mul_reduce(a, b):
-            return (a * b).sum(dim=-1, keepdim=True)
-
+        # _mul_reduce is compiled once at module level: a torch.compile wrapper built inside forward cost ~10 ms of
+        # host time per call (per entropy chunk, per microbatch), with the GPU idle.
         logits_max = vocab_parallel_logits.max(dim=-1, keepdim=True).values
         dist.all_reduce(logits_max, op=dist.ReduceOp.MAX, group=mpu.get_tensor_model_parallel_group())
         normalized_vocab_parallel_logits = vocab_parallel_logits - logits_max
@@ -1425,7 +1428,7 @@ class _VocabParallelEntropy(torch.autograd.Function):
         normalized_sum_exp_logits = normalized_exp_logits.sum(dim=-1, keepdim=True)
         dist.all_reduce(normalized_sum_exp_logits, group=mpu.get_tensor_model_parallel_group())
         softmax_logits = normalized_exp_logits.div_(normalized_sum_exp_logits)
-        sum_softmax_times_logits = mul_reduce(softmax_logits, vocab_parallel_logits)
+        sum_softmax_times_logits = _mul_reduce(softmax_logits, vocab_parallel_logits)
         dist.all_reduce(sum_softmax_times_logits, group=mpu.get_tensor_model_parallel_group())
         entropy = logits_max + normalized_sum_exp_logits.log() - sum_softmax_times_logits
         ctx.save_for_backward(vocab_parallel_logits, softmax_logits, sum_softmax_times_logits)

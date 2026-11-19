@@ -121,7 +121,10 @@ skyrl-train = [
 
 fsdp = [
     "skyrl[skyrl-train]",
-    "vllm==0.33.0; sys_platform == 'linux'",
+    # DO NOT MERGE: Inkling2 needs a vLLM build of the Inkling2 vLLM branch (torch 2.14, cu130,
+    # x86_64 only) until a vLLM release ships the model; aarch64 stays on the release.
+    "vllm @ https://github.com/NovaSky-AI/skyrl-wheels/releases/download/vllm-inkling2-b6efe5297-cu13torch2.14/vllm-0.33.1.dev792%2Binkling2.gb6efe5297.cu130.torch214-cp38-abi3-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "vllm==0.33.0; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -180,7 +183,10 @@ megatron = [
     # (imported lazily as `flash_mla.flash_mla_sparse_fwd`). Not on PyPI: our own build of the
     # `nv_dev` branch (x86_64 and aarch64), see [tool.uv.sources].
     "flash-mla==1.0.0+cu.13.0.torch.2.14.b7643bd; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
-    "vllm==0.33.0; sys_platform == 'linux'",
+    # DO NOT MERGE: Inkling2 needs a vLLM build of the Inkling2 vLLM branch (torch 2.14, cu130,
+    # x86_64 only) until a vLLM release ships the model; aarch64 stays on the release.
+    "vllm @ https://github.com/NovaSky-AI/skyrl-wheels/releases/download/vllm-inkling2-b6efe5297-cu13torch2.14/vllm-0.33.1.dev792%2Binkling2.gb6efe5297.cu130.torch214-cp38-abi3-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "vllm==0.33.0; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
     # so with a cu13 torch it loads `nixl_cu13`. `nixl-cu13` ships the `nixl_cu13`
@@ -296,6 +302,9 @@ version = {attr = "skyrl.__version__"}
 # Installs the R3 pipeline-parallel config patch in every vLLM process (incl. the engine core); no-op unless
 # SKYRL_R3_PP_RELAY=1 (set by the server actor for R3 with PP > 1).
 skyrl_r3_pp_relay = "skyrl.backends.skyrl_train.patches.vllm.patch_routed_experts_pp_relay:vllm_general_plugin"
+# Serves Inkling2 through SkyRL's RL model class (BF16 / MXFP8 experts, in-place weight sync) on a
+# vLLM that ships Inkling2; no-op otherwise.
+skyrl_inkling2 = "skyrl.backends.skyrl_train.patches.vllm.inkling2:vllm_general_plugin"
 # Serves DeepSeek-V4.1 with vLLM's text-only (LoRA-capable) class; SKYRL_DEEPSEEK_V41_TEXT_ONLY=0 opts out.
 skyrl_deepseek_v41 = "skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v41:vllm_general_plugin"
 # Declares Kimi K2.5-family checkpoints LoRA-capable before vLLM 0.33's config-time LoRA support check.
@@ -336,6 +345,9 @@ no-build-isolation-package = [
 override-dependencies = [
     "transformer-engine[pytorch]==2.19.0; sys_platform == 'linux'",
     "transformers>=5.6.1,<=5.16.1; sys_platform == 'linux'",
+    # The Inkling2 vLLM build requires huggingface_hub>=2 (vllm#64779 touched only its requirement
+    # files), which transformers<=5.16.1 does not admit; it serves correctly on hub 1.x.
+    "huggingface-hub>=1.31.0,<2; sys_platform == 'linux'",
     "megatron-core>=0.16.0; sys_platform == 'linux'",
     "ml_dtypes>=0.5.0; sys_platform == 'linux'",
     # `nixl` hard-depends on both nixl-cu12 and nixl-cu13; drop the cu12 variant

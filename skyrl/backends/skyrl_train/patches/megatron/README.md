@@ -37,6 +37,13 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
 | `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
+| `patches/megatron/inkling2/test_quant.py` (CPU) | `inkling2/quant.py` NVFP4 / MXFP8 dequantization vs the formats' element formulas |
+| `gpu_ci/patches/megatron/inkling2/test_model_vs_reference.py` | `inkling2/modules.py` + `provider.py` vs `reference.py` (dense and FlexAttention), backward |
+| `gpu_ci/patches/megatron/inkling2/test_bridge.py` | `inkling2/bridge.py` import parity and exact export on a synthetic BF16 / NVFP4 / MXFP8 checkpoint |
+| `gpu_ci/patches/megatron/inkling2/test_lora.py` | LoRA targets on every Inkling2 linear, merged export vs `reference.py`, unmerged adapter export vs the merge |
+| `gpu_ci/patches/megatron/inkling2/test_worker.py` | Megatron policy worker forward / train step, EP and TP (sequence-parallel convolutions), packed and unpacked |
+| `gpu_ci/patches/megatron/inkling2/test_fused_elementwise.py` | `inkling2/modules.py` compiled elementwise pieces (`modules.fused`) vs their eager versions, values and gradients |
+| `gpu_ci/patches/vllm/test_inkling2_mxfp8_experts.py` (B200) | vLLM plugin's MXFP8 rollout experts: BF16 load bitwise equal to the branch's layout, forward, routed-experts capture (R3) |
 | `patches/megatron/test_dist_optim_te_load_state_dict.py` (CPU) | `patch_dist_optim_te_load_state_dict.py` |
 | `patches/megatron/test_dist_ckpt_exchange_wait.py` (CPU) | `patch_dist_ckpt_exchange_wait.py` |
 
@@ -200,6 +207,39 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
     drop it if upstream shards the k-pool scoring itself.
   - Delete `glm5_next/`.
 - **Verify:** the full [Verification](#verification) set.
+
+## Inkling2 (`inkling2`)
+
+Inkling2 (`Inkling2ForConditionalGeneration`, `model_type: inkling2_mm_model`) has no upstream
+Megatron-Core, Megatron-Bridge or Transformers support: `inkling2/` is the whole model.
+
+- **Carried as:** `inkling2/` -- `modules.py` (attn-res decoder layer, relative-bias attention on
+  FlexAttention, short convolutions; the MoE is stock megatron-core with SiTU-GLU
+  `activation_func_tanh_clamp_scale*`), `layer_specs.py`, `provider.py`, `bridge.py` (registered
+  in `workers/megatron/model_bridges.py`), `quant.py` (NVFP4 / MXFP8 expert dequantization),
+  `configuration.py` (registers the HF config with `AutoConfig`) and `reference.py` (plain-PyTorch
+  forward used as the test oracle; transcribed from the SGLang fork shipped with the checkpoint).
+  `examples/train/megatron/dequantize_inkling2.py` writes BF16 checkpoints and slices.
+- **Landed?** Megatron-Bridge ships an Inkling2 bridge, or Megatron-Core an attn-res
+  (block attention residual) transformer layer.
+- **Remove:** switch `model_bridges.py` to the upstream bridge and delete `inkling2/` and its
+  tests (`tests/backends/skyrl_train/patches/megatron/inkling2/`,
+  `tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/inkling2/`). The worker's
+  `lora_all_linear_extra_targets` hook and soft-cap / `fused_lm_head_logprob` guard are generic
+  and stay.
+- **Limits:** no pipeline (the attn-res state grows across layers) or context parallelism;
+  tensor parallelism requires sequence parallelism.
+- **Upstream issue carried in `bridge.py`:** Megatron-Bridge's grouped-export LoRA merge
+  (`_merge_grouped_export_adapter_weights`) adds the delta in Megatron's row layout to the
+  already-converted HF tensor, which is wrong for any grouped mapping that reorders rows
+  (Inkling2's interleaved `w13`; also GPT-OSS's gate/up interleave). `Inkling2Bridge` overrides it;
+  drop the override once upstream merges before converting. The unmerged adapter export has the
+  same gap: `_build_packed_expert_linear_out_by_base` stacks a packed expert's `lora_B` in
+  Megatron's `[gate; up]` rows; `Inkling2Bridge` interleaves `w13`'s (what vLLM's Inkling2 LoRA
+  applies to the interleaved base weight).
+- **Verify:** `patches/megatron/inkling2/test_quant.py` (CPU);
+  `gpu_ci/patches/megatron/inkling2/` (`test_model_vs_reference.py`, `test_bridge.py`,
+  `test_lora.py`, `test_worker.py`, `test_fused_elementwise.py`; 2 GPUs).
 
 ## Qwen3.8-Flash-Next (`qwen4_exp`)
 

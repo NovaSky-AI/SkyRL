@@ -231,6 +231,9 @@ class VLLMServerActor(ServerActorProtocol):
                 Grafana).
             metrics_role: Prefill/decode role exposed to external metrics collectors.
         """
+        from skyrl.utils.rlimits import raise_open_file_limit
+
+        raise_open_file_limit()  # inherited by vLLM's engine-core and worker subprocesses
         from skyrl.train.utils.ray_logging import redirect_actor_output_to_file
 
         redirect_actor_output_to_file()

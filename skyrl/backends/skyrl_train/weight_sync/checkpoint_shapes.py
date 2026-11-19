@@ -22,7 +22,7 @@ import logging
 import math
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ __all__ = ["max_param_numel"]
 _NOT_SYNCED = re.compile(r"(^|\.)engram\.embed\.(weight|scale)$")
 
 
-def max_param_numel(model_path: str) -> int:
+def max_param_numel(model_path: str, wire_numel: Optional[Callable[[str, Tuple[int, ...]], int]] = None) -> int:
     """Element count of the largest tensor in ``model_path``'s safetensors files.
 
     Args:
@@ -42,6 +42,9 @@ def max_param_numel(model_path: str) -> int:
             resolved from the local HF cache only -- the caller has already
             loaded this model, so the files are present, and this must never
             trigger a download.
+        wire_numel: ``(name, shape) -> element count`` of the largest piece a
+            tensor goes on the wire as, for a source that splits tensors
+            (``MegatronWeightSource.wire_numel``). Defaults to the whole tensor.
 
     Returns:
         The largest ``prod(shape)`` across every synced tensor, or ``0`` if the shapes
@@ -69,7 +72,8 @@ def max_param_numel(model_path: str) -> int:
                         continue
                     # get_slice reads the file's header entry; it does not read
                     # or map the tensor data.
-                    largest = max(largest, math.prod(handle.get_slice(key).get_shape()))
+                    shape = tuple(handle.get_slice(key).get_shape())
+                    largest = max(largest, wire_numel(key, shape) if wire_numel else math.prod(shape))
         except Exception as exc:  # noqa: BLE001 - a bad shard must not stop training
             logger.warning("Could not read tensor shapes from %s: %s", path, exc)
     return largest

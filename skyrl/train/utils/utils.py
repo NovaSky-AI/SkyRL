@@ -916,6 +916,8 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
             ie_cfg.weight_sync_backend != "delta"
         ), "Offloading KV cache during weight sync is not supported for delta weight sync"
 
+    _validate_colocated_weight_sync_cfg(cfg)
+
     # Validate speculative decoding. `method` is required rather than left to vLLM's
     # inference from the draft model config, so an unsupported drafter cannot reach the
     # engine implicitly.
@@ -1192,6 +1194,12 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # Ray sets OMP_NUM_THREADS=num_cpus (1 per policy actor) unless the runtime env has it,
         # which leaves the CPU-offloaded optimizer step single-threaded.
         "OMP_NUM_THREADS",
+        # One FlashInfer cubin directory for every `uv run --isolated` venv on a node. Each venv
+        # otherwise has its own flashinfer-cubin copy, and FlashInfer re-points a shared header
+        # symlink (~/.cache/flashinfer/.../trtllmGen_bmm_export) at whichever venv touched it last:
+        # processes in another venv then fail "Header trtllm/gen/CommonUtils.h not found" while
+        # JIT-building TRT-LLM-gen MoE modules (e.g. Inkling2's MXFP8 experts).
+        "FLASHINFER_CUBIN_DIR",
         # Debug/trace knobs — forwarded so they reach the worker actors, not just the driver.
         "CUDA_LAUNCH_BLOCKING",
         "PYTHONFAULTHANDLER",
@@ -1204,14 +1212,21 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
             logger.info(f"Exporting `{var_name}` to ray runtime env: {logged_value}")
             env_vars[var_name] = value
 
-    # Forward any SKYRL_* overrides set in the launching shell (e.g.
-    # SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S for very large models
+    # Forward any SKYRL_* overrides set in the launching shell (e.g. SKYRL_INKLING2_ROLLOUT_EXPERTS, which
+    # every vLLM process reads, or SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S for very large models
     # whose weight load exceeds the 600s default) — skyrl.env_vars reads them at
     # import time in every process, so they must ride the runtime env.
     forwarded = {k: v for k, v in os.environ.items() if k.startswith("SKYRL_") and k not in env_vars}
     if forwarded:
         logger.info(f"Exporting SKYRL_* overrides to ray runtime env: {sorted(forwarded)}")
     env_vars.update(forwarded)
+    # NCCL_* settings of the driver (transport selection such as NCCL_NET / NCCL_IB_HCA, which decide
+    # between InfiniBand and a slower fallback on multi-NIC nodes) reach the worker actors too; values
+    # SkyRL sets itself (e.g. NCCL_CUMEM_ENABLE) win.
+    nccl = {k: v for k, v in os.environ.items() if k.startswith("NCCL_") and k not in env_vars}
+    if nccl:
+        logger.info(f"Exporting NCCL_* settings to ray runtime env: {sorted(nccl)}")
+    env_vars.update(nccl)
 
     # Forward one block-scale contract to all Ray actors. Hopper defaults to FP32
     # scales; Blackwell (SM100+) defaults to power-of-two scales, the only mode TE
@@ -1634,3 +1649,55 @@ def get_free_port():
     port = s.getsockname()[1]
     s.close()
     return port
+
+
+def _validate_colocated_weight_sync_cfg(cfg: SkyRLTrainConfig) -> None:
+    """Reject unsupported combinations of the colocated weight-sync options.
+
+    See docs/design/colocated_weight_sync.md. Every option is colocated CUDA-IPC only;
+    the rest of weight sync keeps today's path, so an option that would silently do
+    nothing is an error instead.
+    """
+    ie_cfg = cfg.generator.inference_engine
+    mcfg = cfg.trainer.policy.megatron_config
+    colocated = cfg.trainer.placement.colocate_all
+    ring_opts = {
+        "weight_sync_num_ipc_buffers": ie_cfg.weight_sync_num_ipc_buffers != 1,
+        "weight_sync_layer_aligned_chunks": ie_cfg.weight_sync_layer_aligned_chunks,
+        "weight_sync_local_shard": ie_cfg.weight_sync_local_shard,
+        "selective_weight_sleep": ie_cfg.selective_weight_sleep,
+        "staged_weight_wake": ie_cfg.staged_weight_wake,
+    }
+    enabled = [k for k, on in ring_opts.items() if on]
+    if mcfg.weight_sync_from_offloaded_params:
+        enabled.append("trainer.policy.megatron_config.weight_sync_from_offloaded_params")
+    if not enabled:
+        return
+    if ie_cfg.weight_sync_num_ipc_buffers < 1:
+        raise ValueError("generator.inference_engine.weight_sync_num_ipc_buffers must be >= 1")
+    if not colocated:
+        raise ValueError(f"{enabled} require trainer.placement.colocate_all=true (CUDA-IPC weight sync).")
+    if ie_cfg.weight_sync_backend not in ("nccl", "ipc"):
+        raise ValueError(f"{enabled} require the push weight-sync backend, got {ie_cfg.weight_sync_backend!r}.")
+    if ie_cfg.fp8_weight_sync_mode is not None and (
+        ie_cfg.weight_sync_local_shard or mcfg.weight_sync_from_offloaded_params
+    ):
+        raise ValueError(
+            "weight_sync_local_shard / weight_sync_from_offloaded_params do not support serialized FP8 weight sync yet."
+        )
+    if mcfg.weight_sync_from_offloaded_params:
+        if cfg.trainer.strategy != "megatron":
+            raise ValueError("weight_sync_from_offloaded_params requires trainer.strategy=megatron.")
+        if mcfg.ddp_config.overlap_param_gather:
+            # sync_params_for_export needs the params on the GPU to publish the
+            # optimizer's shards; the streamed export never reloads them.
+            raise ValueError("weight_sync_from_offloaded_params does not support ddp_config.overlap_param_gather.")
+    if ie_cfg.staged_weight_wake and not ie_cfg.selective_weight_sleep:
+        raise ValueError("staged_weight_wake requires selective_weight_sleep.")
+    if ie_cfg.staged_weight_wake and ie_cfg.fp8_weight_sync_mode is not None:
+        # The batched-MoE FP8 loader writes kernel tensors outside the layerwise hook.
+        raise ValueError("staged_weight_wake does not support serialized FP8 weight sync.")
+    if ie_cfg.selective_weight_sleep and cfg.trainer.policy.model.lora.rank > 0:
+        lora_cfg = mcfg.lora_config
+        if cfg.trainer.strategy != "megatron" or not lora_cfg.merge_lora:
+            raise ValueError("selective_weight_sleep is for full-weight sync; adapter-only LoRA sleeps at level 1.")

@@ -145,6 +145,66 @@ def _build_skyrl_ipc_trainer() -> "tuple[type, type]":
     ):
         init_info_cls = SkyrlIPCTrainerInitInfo
 
+        #: Colocated send options (docs/design/colocated_weight_sync.md, M2/M3), set by
+        #: build_trainer_engine. All off keeps vLLM's packed producer unchanged.
+        skyrl_num_buffers: int = 1
+        skyrl_layer_aligned: bool = False
+        skyrl_local_shard: bool = False
+        _skyrl_plan: Any = None
+        _skyrl_plan_resolved: bool = False
+        skyrl_last_send_stats: Optional[dict] = None
+
+        def _skyrl_ring_enabled(self) -> bool:
+            return self.skyrl_num_buffers > 1 or self.skyrl_layer_aligned or self.skyrl_local_shard
+
+        def _send_packed(self, source: WeightSource) -> None:
+            if not self._skyrl_ring_enabled():
+                return super()._send_packed(source)
+            from skyrl.backends.skyrl_train.weight_sync.colocated.slot_ring import (
+                SlotRingSender,
+            )
+
+            # The draft session sends a different (small) source: full tensors there.
+            plan = self._skyrl_local_shard_plan() if source is not self.skyrl_draft_source else None
+            sender = SlotRingSender(
+                self,
+                num_buffers=self.skyrl_num_buffers,
+                layer_aligned=self.skyrl_layer_aligned,
+                plan=plan,
+            )
+            sender.send(source)
+            self.skyrl_last_send_stats = dict(sender.stats, local_shard=plan is not None)
+
+        def _skyrl_local_shard_plan(self):
+            """Resolve (once, on every rank) which experts each rank's colocated worker serves."""
+            if not self.skyrl_local_shard or self._skyrl_plan_resolved:
+                return self._skyrl_plan
+            import torch.distributed as dist
+
+            from skyrl.backends.skyrl_train.weight_sync.colocated.slot_ring import (
+                build_local_shard_plan,
+            )
+
+            world = dist.get_world_size() if dist.is_initialized() else 1
+            uuids = [None] * world
+            if world > 1:
+                dist.all_gather_object(uuids, self.gpu_uuid)
+            else:
+                uuids = [self.gpu_uuid]
+            box = [None]
+            if self.is_sender:
+                infos = self.client.collective_rpc_per_server("skyrl_local_shard_info")
+                plan, reason = build_local_shard_plan(infos, uuids)
+                box = [(plan, reason)]
+            if world > 1:
+                dist.broadcast_object_list(box, src=0)
+            plan, reason = box[0]
+            if plan is None and self.is_sender:
+                logger.warning("weight_sync_local_shard: sending full tensors (%s)", reason)
+            self._skyrl_plan = plan
+            self._skyrl_plan_resolved = True
+            return plan
+
     return SkyrlIPCTrainerInitInfo, SkyrlIPCTrainerWeightTransferEngine
 
 
@@ -227,6 +287,11 @@ def build_trainer_engine(
         server_urls=server_urls,
         data_parallel_size=data_parallel_size,
         base_model_path=base_model_path,
+        wire_numel=getattr(source, "wire_numel", None),
+        # An adapter source sends LoRA tensors, not the checkpoint's: flooring its
+        # buffer at the checkpoint's largest tensor (Inkling2: one layer's 384 experts
+        # stacked, 15.2 GiB) allocated that much beside a woken colocated engine.
+        size_from_checkpoint=getattr(source, "sends_checkpoint_tensors", True),
     )
     client = SkyrlWeightSyncClient(
         server_urls,
@@ -253,6 +318,10 @@ def build_trainer_engine(
     else:
         engine = WeightTransferTrainerFactory.trainer_init(init_info, client=client, source=source)
     engine.skyrl_draft_source = draft_source
+    if backend == "ipc":
+        engine.skyrl_num_buffers = int(getattr(ie_cfg, "weight_sync_num_ipc_buffers", 1) or 1)
+        engine.skyrl_layer_aligned = bool(getattr(ie_cfg, "weight_sync_layer_aligned_chunks", False))
+        engine.skyrl_local_shard = bool(getattr(ie_cfg, "weight_sync_local_shard", False))
 
     if backend == "sharded_rdt":
         from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
@@ -261,7 +330,9 @@ def build_trainer_engine(
     return engine
 
 
-def _packed_buffer_size_bytes(base_model_path: Optional[str], threshold_in_gb: float, dtype: "torch.dtype") -> int:
+def _packed_buffer_size_bytes(
+    base_model_path: Optional[str], threshold_in_gb: float, dtype: "torch.dtype", wire_numel=None
+) -> int:
     """Packed-buffer size for both push backends: the configured size, floored to
     fit the model's largest single parameter.
 
@@ -276,12 +347,16 @@ def _packed_buffer_size_bytes(base_model_path: Optional[str], threshold_in_gb: f
     The floor comes from the checkpoint's safetensors headers rather than the
     live model, so it costs no GPU memory, no collective, and no residency: the
     policy may be offloaded when this runs. A checkpoint whose shapes cannot be
-    read contributes no floor and the configured size stands.
+    read contributes no floor and the configured size stands. A source that
+    splits tensors on the wire passes ``wire_numel`` (see ``max_param_numel``).
     """
     from skyrl.backends.skyrl_train.weight_sync.checkpoint_shapes import max_param_numel
 
     configured = int(threshold_in_gb * 1024**3) if threshold_in_gb and threshold_in_gb > 0 else 0
-    largest = max_param_numel(base_model_path) * dtype.itemsize if base_model_path else 0
+    largest = 0
+    if base_model_path:
+        numel = max_param_numel(base_model_path, wire_numel) if wire_numel else max_param_numel(base_model_path)
+        largest = numel * dtype.itemsize
     return max(DEFAULT_PACKED_BUFFER_SIZE_BYTES, configured, largest)
 
 
@@ -295,6 +370,8 @@ def _build_sender_init_info(
     server_urls: list,
     data_parallel_size: int,
     base_model_path: Optional[str],
+    wire_numel=None,
+    size_from_checkpoint: bool = True,
 ):
     """Return ``(init_info, init_payload_fn)`` for an already-resolved backend.
 
@@ -304,6 +381,7 @@ def _build_sender_init_info(
     from skyrl.backends.skyrl_train.weight_sync.register import register_trainer_engines
 
     register_trainer_engines()
+    floor_path = base_model_path if size_from_checkpoint else None
 
     if backend == "nccl":
         import ray
@@ -327,7 +405,7 @@ def _build_sender_init_info(
                 # the handshake, so the two sides cannot disagree.
                 packed=True,
                 packed_buffer_size_bytes=_packed_buffer_size_bytes(
-                    base_model_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype
+                    floor_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype, wire_numel
                 ),
                 rank=rank,
             ),
@@ -346,7 +424,7 @@ def _build_sender_init_info(
             ipc_init_info_cls(
                 packed=True,
                 packed_buffer_size_bytes=_packed_buffer_size_bytes(
-                    base_model_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype
+                    floor_path, ie_cfg.weight_transfer_threshold_cuda_ipc_GB, dtype, wire_numel
                 ),
                 rank=rank,
             ),

@@ -582,6 +582,36 @@ drafter aliases those two and its layerwise reload covers them. FSDP has no MTP 
 config validation (`_validate_draft_weight_sync_cfg`) requires Megatron. It also rejects
 serialized FP8 and adapter-only LoRA.
 
+## Bounded-memory colocated sync (opt-in)
+
+Design: `docs/design/colocated_weight_sync.md`. Code: `weight_sync/colocated/`. Every
+option defaults off and is colocated CUDA-IPC only; `_validate_colocated_weight_sync_cfg`
+rejects the rest.
+
+| option | milestone | what it changes |
+|---|---|---|
+| `trainer.policy.megatron_config.weight_sync_from_offloaded_params` | M1 / M5 | Dispatch keeps the policy offloaded and sleeps the engine first; `export_from_offloaded_params` (in `megatron_utils`) swaps Megatron-Bridge's `_gather_gtp_weight` for an H2D read of each param from its pinned CPU copy, one at a time. Full-weight sync only |
+| `generator.inference_engine.weight_sync_num_ipc_buffers` | M3 | `SlotRingSender`: N packed slots, rank 0 posts `update_weights` on a helper thread and joins the previous one before the next post; one barrier per chunk. Receiver uses `MultiSlotImporter` (one mapping per slot, released at finish) |
+| `generator.inference_engine.weight_sync_layer_aligned_chunks` | M3 | Cut chunks at `model.layers.<N>.` boundaries |
+| `generator.inference_engine.weight_sync_local_shard` | M2 (Phase A) | With vLLM expert parallelism, each trainer rank packs only the routed experts (`.experts.<id>.`) its GPU's worker serves; rank 0 ships per-server lists indexed by `dp_index * world_size + rank`. Chunk cuts are agreed across ranks from the shared plan (`iter_packed_chunks`). Falls back to full tensors (logged) without vLLM EP or if ranks and workers don't pair 1:1 by GPU UUID |
+| `generator.inference_engine.selective_weight_sleep` | M4a | Every full-weight reload records the byte ranges `layerwise._copy_and_restore_kernel_tensors` writes; a later level-2 sleep backs up (CPU) each `weights` allocation whose live blocks (torch allocator snapshot) are not all inside those ranges and discards the rest. `CuMemAllocator.wake_up` restores backed-up allocations unchanged. The first sleep after boot is plain level 2 |
+| `generator.inference_engine.staged_weight_wake` | M4b | Experimental; requires `selective_weight_sleep`. The pre-sync wake leaves the `weights` pool unmapped and maps each layer's allocations just before the reload writes it; the rest is mapped before finalize |
+
+Extension points relied on (vLLM 0.32 / 0.33): `CuMemAllocator.sleep` / `pointer_to_data` /
+`AllocationData.cpu_backup_tensor` / `unmap_and_release`; the module attribute
+`model_loader.reload.layerwise._copy_and_restore_kernel_tensors`; `GPUWorker.update_weights`
+list routing; `torch.cuda.memory._snapshot()` segment/block addresses for the CuMem pool;
+Megatron-Bridge `_gather_gtp_weight` and megatron-core `_ParamAndGradBuffer.param_data_cpu` /
+`param_index_map`.
+
+Debug: `SKYRL_COLOCATED_SYNC_DEBUG=1` records per-sync trainer memory/time and round-trip
+counts (`Worker.get_last_weight_sync_stats`); worker RPCs `skyrl_debug_weight_checksums`,
+`skyrl_debug_memory_stats`, `skyrl_debug_weight_allocation_map`,
+`skyrl_selective_sleep_stats`. GPU harness (byte parity vs a fresh vLLM load, plus
+after-train-step parity vs today's path):
+`tests/backends/skyrl_train/gpu/gpu_ci/megatron/test_colocated_weight_sync.py`; CPU:
+`tests/backends/skyrl_train/weight_sync/test_colocated_slot_ring.py`.
+
 ## KV offload during non-colocated weight sync
 
 Non-colocated normally keeps the engine fully awake and does `pause_generation → broadcast → resume_generation`. The opt-in `generator.inference_engine.offload_kv_for_weight_sync` flag sleeps the engine (freeing the KV cache from GPU) *during* the sync so `gpu_memory_utilization` can be pushed higher (no need to keep KV cache resident alongside the weight-transfer scratch buffers). It turns on `enable_sleep_mode` (via `inference_servers/utils.py`). Requires non-colocated and non-LoRA. Orchestrated in `WorkerDispatch.save_weights_for_sampler`; the flow depends on the trainer:
