@@ -17,7 +17,9 @@ def test_pi_branch_passes_valid_kwargs_to_math_equal(monkeypatch):
     """A misspelled kwarg (`tiemout`) raised TypeError, which the bare `except` turned into
     reward 0.0 for every answer containing `\\pi` that the first-stage grader rejected."""
     from skyrl_agent.tasks.verifiers import naive_dapo
-    from skyrl_agent.tasks.verifiers.prime_math.grader import math_equal as real_math_equal
+    from skyrl_agent.tasks.verifiers.prime_math.grader import (
+        math_equal as real_math_equal,
+    )
 
     real_signature = inspect.signature(real_math_equal)
     pis_seen = []
