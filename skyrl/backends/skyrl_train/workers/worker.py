@@ -746,9 +746,10 @@ class Worker(DistributedTorchRayActor):
             release(self.optimizer)
 
     def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
+        """Keep the live optimizer available to refresh master weights even when skipping optimizer history."""
         _, states = self.strategy.load_checkpoint(
             model=self.model,
-            optimizer=self.optimizer if load_optimizer_states else None,
+            optimizer=self.optimizer,
             scheduler=self.scheduler if load_lr_scheduler_states else None,
             ckpt_dir=ckpt_dir,
             load_optimizer_states=load_optimizer_states,

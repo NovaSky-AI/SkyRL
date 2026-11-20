@@ -126,6 +126,8 @@ class RayPPOTrainer:
         self.inference_engine_client = inference_engine_client
         self.generator = generator
         self.train_dataloader = None
+        self._dataloader_state_restored = False
+        self._resumed_epoch_steps_remaining: Optional[int] = None
         self.total_training_steps = None
         self._build_train_dataloader_and_compute_training_steps()
 
@@ -222,6 +224,25 @@ class RayPPOTrainer:
         """Build a CallbackInput and dispatch the given event to all callbacks."""
         cb_input = self._build_callback_input(**fields)
         getattr(self._callback_handler, event_name)(self, cb_input, self._training_control)
+
+    def _get_resumed_epoch_steps_remaining(self) -> Optional[int]:
+        """Recover the logical remainder when the data cursor and global step started at different offsets."""
+        if self.global_step == 0:
+            return None
+        if self._dataloader_state_restored:
+            return self._resumed_epoch_steps_remaining
+        steps_per_epoch = len(self.train_dataloader)
+        return steps_per_epoch - (self.global_step % steps_per_epoch)
+
+    def _restore_dataloader_cursor(self, state: dict, generator_state: Optional[torch.Tensor]) -> None:
+        """Materialize the saved iterator before restoring the RNG for subsequent shuffled epochs.
+
+        StatefulDataLoader.state_dict() prepares the lazy iterator for the next iter() without consuming a batch.
+        """
+        self.train_dataloader.load_state_dict(state)
+        if generator_state is not None:
+            self.train_dataloader.state_dict()
+            self.train_dataloader.generator.set_state(generator_state)
 
     @property
     def has_critic(self) -> bool:
@@ -331,6 +352,7 @@ class RayPPOTrainer:
         # Compute start_epoch up-front so callback metadata is ready before
         # any event fires (including the baseline eval below).
         start_epoch = self.global_step // len(self.train_dataloader)
+        self._resumed_epoch_steps_remaining = self._get_resumed_epoch_steps_remaining()
         self._current_epoch = start_epoch
         self._training_control.reset()
 
@@ -360,6 +382,7 @@ class RayPPOTrainer:
         will_save_ckpts = False
         hf_model_save = False
         self._profiler_start()
+        next_epoch_iterator = None
         try:
             for epoch in range(start_epoch, self.cfg.trainer.epochs):
                 self._current_epoch = epoch
@@ -368,7 +391,9 @@ class RayPPOTrainer:
                 # dynamic-sampling into account (which span multiple inner iterations
                 # before completing a logical step).
                 step_started = False
-                for _, rand_prompts in enumerate(self.train_dataloader):
+                epoch_iterator = next_epoch_iterator if next_epoch_iterator is not None else iter(self.train_dataloader)
+                next_epoch_iterator = None
+                for rand_prompts in epoch_iterator:
                     if not step_started:
                         self._fire("on_step_start")
                         step_started = True
@@ -493,6 +518,10 @@ class RayPPOTrainer:
                             # One profiler step per RL global step.
                             self._profiler_step()
 
+                        resumed_epoch_ended = self._resumed_epoch_steps_remaining == 1
+                        if self._resumed_epoch_steps_remaining is not None:
+                            self._resumed_epoch_steps_remaining -= 1
+
                         self._fire(
                             "on_step_end",
                             batch=training_input,
@@ -517,6 +546,8 @@ class RayPPOTrainer:
                         )
                         will_save_ckpts = force_save or ckpt_interval_save
                         if will_save_ckpts:
+                            if resumed_epoch_ended:
+                                next_epoch_iterator = iter(self.train_dataloader)
                             with Timer("save_checkpoints", self.all_timings):
                                 ckpt_path = self.save_checkpoints()
                             self._fire("on_save", ckpt_path=ckpt_path)
@@ -613,6 +644,9 @@ class RayPPOTrainer:
 
                     del training_input, generator_output
 
+                    if resumed_epoch_ended:
+                        break
+
                 # If dynamic sampling was still accumulating when the dataloader ran out, the step
                 # is left in flight with its `vllm/train` window open. Close it and drop the partial
                 # batch so the next epoch starts clean; otherwise `start('vllm/train')` raises
@@ -629,6 +663,7 @@ class RayPPOTrainer:
 
                 if stop_training:
                     break
+                self._resumed_epoch_steps_remaining = None
         finally:
             self._profiler_stop()
 
@@ -1802,6 +1837,12 @@ class RayPPOTrainer:
             "global_step": self.global_step,
             "config": asdict(self.cfg),
         }
+        if self._resumed_epoch_steps_remaining is not None:
+            if self._resumed_epoch_steps_remaining > 0:
+                trainer_state["resumed_epoch_steps_remaining"] = self._resumed_epoch_steps_remaining
+            generator = getattr(self.train_dataloader, "generator", None)
+            if generator is not None:
+                trainer_state["dataloader_generator_state"] = generator.get_state()
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
         with io.open_file(trainer_state_path, "wb") as f:
             torch.save(trainer_state, f)
@@ -1835,8 +1876,8 @@ class RayPPOTrainer:
 
     def load_checkpoints(self) -> Tuple[int, str]:
         """
-        Load complete checkpoint state and return the global_step to resume from.
-        Returns 0 if no checkpoint is loaded.
+        Load checkpoint state and return the configured starting global step.
+        Returns 0 if no checkpoint is loaded or global-step restore is disabled.
 
         If colocate_all is True, assumes that the policy model is currently on GPU.
 
@@ -1885,10 +1926,14 @@ class RayPPOTrainer:
         logger.info(f"Loading checkpoint from: {checkpoint_path}")
 
         # Extract global step from checkpoint path
-        global_step = extract_step_from_path(Path(checkpoint_path))
-        if global_step == -1:
+        checkpoint_global_step = extract_step_from_path(Path(checkpoint_path))
+        if checkpoint_global_step == -1:
             raise ValueError(f"Checkpoint path {checkpoint_path} is not a valid checkpoint path")
-        logger.info(f"Resuming from global_step: {global_step}")
+        global_step = checkpoint_global_step if self.cfg.trainer.resume_load_global_step else 0
+        if self.cfg.trainer.resume_load_global_step:
+            logger.info(f"Resuming from global_step: {global_step}")
+        else:
+            logger.info(f"Loading checkpoint weights from global_step_{checkpoint_global_step}; global step reset to 0")
 
         # Define paths for different checkpoint components
         policy_ckpt_dir = os.path.join(checkpoint_path, "policy")
@@ -1904,32 +1949,43 @@ class RayPPOTrainer:
         with io.open_file(trainer_state_path, "rb") as f:
             trainer_state = torch.load(f, map_location="cpu", weights_only=False)
         self._resumed_from_checkpoint = True
-        saved_global_step = trainer_state.get("global_step", global_step)
-        logger.info("Successfully loaded trainer state")
-        if saved_global_step != global_step:
-            logger.warning(f"Global step mismatch: path={global_step}, saved={saved_global_step}. Using path value.")
+        saved_global_step = trainer_state.get("global_step", checkpoint_global_step)
+        logger.info("Successfully loaded trainer metadata")
+        if saved_global_step != checkpoint_global_step:
+            logger.warning(
+                f"Global step mismatch: path={checkpoint_global_step}, saved={saved_global_step}. Using path value."
+            )
 
-        # 2. Load dataloader state if available
-        if io.exists(dataloader_state_path):
-            try:
-                with io.open_file(dataloader_state_path, "rb") as f:
-                    dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
-                self.train_dataloader.load_state_dict(dataloader_state)
-                logger.info("Successfully loaded dataloader state")
-            except Exception as e:
-                logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
-        else:
+        # 2. Load dataloader state if requested and available
+        self._dataloader_state_restored = False
+        self._resumed_epoch_steps_remaining = None
+        if not self.cfg.trainer.resume_load_dataloader_state:
+            logger.info("Skipping dataloader state restore; dataloader will start from beginning")
+        elif not io.exists(dataloader_state_path):
             logger.warning(
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
             )
+        elif self.train_dataloader is None:
+            logger.info("No train dataloader initialized; skipping dataloader state restore")
+        else:
+            try:
+                with io.open_file(dataloader_state_path, "rb") as f:
+                    dataloader_state = torch.load(f, map_location="cpu", weights_only=False)
+                self._restore_dataloader_cursor(dataloader_state, trainer_state.get("dataloader_generator_state"))
+                self._dataloader_state_restored = True
+                if self.cfg.trainer.resume_load_global_step:
+                    self._resumed_epoch_steps_remaining = trainer_state.get("resumed_epoch_steps_remaining")
+                logger.info("Successfully loaded dataloader state")
+            except Exception as e:
+                logger.warning(f"Failed to load dataloader state: {e}. Dataloader will start from beginning.")
 
         # 3. Load policy checkpoint (dispatch handles offload/backload)
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
         self.dispatch.load_checkpoint(
             "policy",
             policy_ckpt_dir,
-            load_optimizer_states=True,
-            load_lr_scheduler_states=True,
+            load_optimizer_states=self.cfg.trainer.resume_load_optimizer_states,
+            load_lr_scheduler_states=self.cfg.trainer.resume_load_lr_scheduler_states,
         )
         logger.info("Successfully loaded policy checkpoint")
 
@@ -1939,12 +1995,12 @@ class RayPPOTrainer:
             self.dispatch.load_checkpoint(
                 "critic",
                 critic_ckpt_dir,
-                load_optimizer_states=True,
-                load_lr_scheduler_states=True,
+                load_optimizer_states=self.cfg.trainer.resume_load_optimizer_states,
+                load_lr_scheduler_states=self.cfg.trainer.resume_load_lr_scheduler_states,
             )
             logger.info("Successfully loaded critic checkpoint")
 
-        logger.info(f"Successfully loaded complete checkpoint state from global_step_{global_step}")
+        logger.info(f"Successfully loaded checkpoint state from global_step_{checkpoint_global_step}")
         return global_step, str(checkpoint_path)
 
     def save_models(self):
