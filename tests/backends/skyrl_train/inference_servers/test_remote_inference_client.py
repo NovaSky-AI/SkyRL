@@ -1477,6 +1477,24 @@ class TestContextManager:
 class TestPerLoopSessions:
     """HTTP sessions are bound to the event loop that created them."""
 
+    @pytest.mark.asyncio
+    async def test_close_http_session_leaves_the_client_usable(self):
+        client = RemoteInferenceClient(
+            proxy_url="http://localhost:1",
+            server_urls=["http://localhost:1"],
+            data_parallel_size=1,
+        )
+        session = await client._get_session()
+
+        await client.close_http_session()
+
+        assert session.closed
+        # The next request opens a fresh session on the same loop.
+        reopened = await client._get_session()
+        assert reopened is not session and not reopened.closed
+        await client.teardown()
+        assert reopened.closed
+
     def test_sessions_are_isolated_per_loop(self):
         client = RemoteInferenceClient(
             proxy_url="http://localhost:1",

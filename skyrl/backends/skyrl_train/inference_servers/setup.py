@@ -293,7 +293,9 @@ def build_new_inference_client(
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
         candidate_top_k=ie_cfg.candidate_top_k,
-        enable_return_sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
+        enable_return_sample_support_logprobs=(
+            ie_cfg.enable_return_sample_support_logprobs or cfg.trainer.algorithm.enable_score_centering
+        ),
         uses_lora_weight_sync=_uses_lora_weight_sync(cfg),
     )
 

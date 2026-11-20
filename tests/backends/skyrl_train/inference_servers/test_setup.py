@@ -196,5 +196,9 @@ def test_build_new_inference_client_passes_the_candidate_width(monkeypatch):
     client, _ = build_new_inference_client(cfg, tokenizer=None)
 
     assert client.candidate_top_k == 16
-    # Member logprobs stay score centering's flag; the width does not imply them.
+    # The width does not imply member logprobs; their own flag or score centering does.
     assert client.enable_return_sample_support_logprobs is False
+
+    ie_cfg.enable_return_sample_support_logprobs = True
+    client, _ = build_new_inference_client(cfg, tokenizer=None)
+    assert client.enable_return_sample_support_logprobs is True

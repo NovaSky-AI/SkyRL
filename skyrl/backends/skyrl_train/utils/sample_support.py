@@ -141,6 +141,23 @@ class CompactSampleSupport(RaggedRows):
         hits = rows[self.token_ids == token_ids[rows]]
         return np.bincount(hits, minlength=self.num_rows) > 0
 
+    def _grid(self, column: np.ndarray, fill) -> np.ndarray:
+        """A ``[rows, top_k]`` view of a member column, in member order, ``fill`` past each row's end."""
+        rows = np.repeat(np.arange(self.num_rows), self.row_lengths)
+        grid = np.full((self.num_rows, self.top_k), fill, dtype=column.dtype)
+        grid[rows, np.arange(self.num_members) - self.offsets[rows]] = column
+        return grid
+
+    def candidate_grid(self) -> np.ndarray:
+        """``[rows, top_k]`` member token IDs, ``-1`` past each row's end."""
+        return self._grid(self.token_ids, -1)
+
+    def logprob_grid(self) -> np.ndarray:
+        """``[rows, top_k]`` member sampler logprobs matching ``candidate_grid``, ``-inf`` past each row's end."""
+        if self.logprobs is None:
+            raise ValueError("this support carries no member logprobs")
+        return self._grid(self.logprobs, -np.inf)
+
 
 def packed_support_logprobs(support: PackedSampleSupport) -> torch.Tensor | None:
     """The packed members' sampler logprobs, or None when the support carries only token IDs."""
