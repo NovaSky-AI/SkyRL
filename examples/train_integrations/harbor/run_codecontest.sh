@@ -61,8 +61,15 @@ ENABLE_RATE_LIMITING=true  # Enable rate/concurrency limiting for trajectory sub
 TRAJECTORIES_PER_SECOND=5  # Maximum trajectories per second (must be >= 1.0, fractional values like 1.5 are supported). null or omit to disable rate limiting
 MAX_CONCURRENCY=512        # Maximum concurrent trial.run() calls allowed (must be >= 1). null or omit to disable concurrency limiting
 
+# RAY_WHEEL=<url>: run on this Ray wheel instead of the locked Ray, layered on with `uv run --with`.
+# No spaces in the requirement: Ray's uv hook rejoins the uv run arguments without quoting (ray-project/ray#68156).
+UV_WITH=()
+if [[ -n "${RAY_WHEEL:-}" ]]; then
+  UV_WITH=(--with "ray[default]@$RAY_WHEEL")
+fi
+
 # Run SkyRL command
-uv run --isolated --extra fsdp --extra harbor -m examples.train_integrations.harbor.entrypoints.main_harbor \
+uv run --isolated --extra fsdp --extra harbor "${UV_WITH[@]}" -m examples.train_integrations.harbor.entrypoints.main_harbor \
   data.train_data=$TRAIN_DATA \
   data.val_data=$EVAL_DATA \
   trainer.policy.model.path=Qwen/Qwen3-8B \

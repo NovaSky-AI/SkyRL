@@ -247,6 +247,10 @@ miniswe = [
 ]
 harbor = [
     "harbor[daytona,modal]==0.14.0",
+    # The Ray sandbox environment reads the task Dockerfile's WORKDIR with
+    # Harbor's parse_dockerfile_workdir, which imports dockerfile_parse; only
+    # Harbor's e2b, islo, runloop and novita extras install it.
+    "dockerfile-parse>=2.0.1",
 ]
 # skycap, capturing each rollout's exact tokens in token mode (examples/train_integrations/harbor_skycap).
 skycap = [

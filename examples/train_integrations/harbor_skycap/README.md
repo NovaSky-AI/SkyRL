@@ -96,6 +96,28 @@ generator stops the run instead of taking zero-gradient steps. Each trial's
 `harbor_trial_config.trials_dir` say why. `skycap.check_first_batch=false`
 skips the check, e.g. for an agent that never calls the model.
 
+## Ray sandboxes
+
+`run_codecontests.sh` with `SANDBOX=ray` needs no provider account. It runs each
+trial in a gVisor sandbox on the run's own Ray cluster, through
+`skyrl.integration.ray_sandbox`. The node needs the tools in
+[Ray's sandbox docs](https://docs.ray.io/en/master/core/sandboxes.html), and the job needs
+Ray with the sandbox fixes. Until SkyRL's Ray has them, the script layers on the
+wheel of Ray master 78e4b1f713 (`RAY_WHEEL`), so the node must run that commit.
+`docker/Dockerfile.ray-sandbox` builds such a node image (experiments only, until
+Ray 2.61). Every task runs in one prebuilt image
+(`RAY_SANDBOX_IMAGE`), and each sandbox reserves `RAY_SANDBOX_CPUS` of the
+node's CPUs.
+
+A Ray sandbox with network reaches the public internet only, not the cluster.
+For an installed agent, expose skycap at the node's address and add that
+address to the sandbox's allowlist:
+
+```bash
+  skycap.exposure.type=external_host skycap.exposure.kwargs.host=$NODE_IP \
+  "harbor_trial_config.environment.kwargs.cidr_allowlist=[internet,$NODE_IP/32]"
+```
+
 ## Sharing a sandbox provider
 
 A remote sandbox counts against the provider account's quota, which other runs
