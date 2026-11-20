@@ -6,15 +6,17 @@ title: "Inkling2"
 |---|---|---|---|---|
 | [Inkling-2-Small](https://huggingface.co/thinkingmachines/Inkling-2-Small) | ✅ (4x8 B200) | ✅ (4x8 B200) | MXFP8 rollouts | 4x8 B200 |
 | [Inkling-2-Small-MXFP8](https://huggingface.co/thinkingmachines/Inkling-2-Small-MXFP8) | ✅ (4x8 B200) | ✅ (4x8 B200) | MXFP8 rollouts | 4x8 B200 |
+| [Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) | ✅ (1x8 B200) | ✅ (1x8 B200) | MXFP8 rollouts | 1x8 B200 |
 
 SkyRL has Day 0 support for [Inkling2](https://huggingface.co/thinkingmachines/Inkling-2-Small), Thinking Machines'
-~594B-parameter MoE (~17B active): full fine-tuning and LoRA, with BF16 or MXFP8 rollouts. The examples run DAPO on
-DAPO-Math-17K and evaluate on AIME24 and AIME25.
+~594B-parameter MoE (~17B active), and for [Inkling 2 Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini), a
+~26B-parameter (~3B active) looped variant that trains on a single node: full fine-tuning and LoRA, with BF16 or MXFP8
+rollouts. The examples run DAPO on DAPO-Math-17K and evaluate on AIME24 and AIME25.
 
 <Callout type="warn">
 Inkling2 support lives on the [`inkling2-support`](https://github.com/erictang000/SkyRL/tree/inkling2-support) branch
 ([#2730](https://github.com/NovaSky-AI/SkyRL/pull/2730)) until a vLLM release ships the model. The branch pins vLLM to a
-[build of the Inkling2 vLLM branch](https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/vllm-inkling2-b6efe5297-cu13torch2.14)
+[build of the Inkling2 vLLM branch](https://github.com/NovaSky-AI/skyrl-wheels/releases/tag/vllm-inkling2-76a43a186-cu13torch2.14)
 (torch 2.14, CUDA 13, x86_64), which replaces SkyRL's vLLM for every model in that environment.
 </Callout>
 
@@ -26,13 +28,23 @@ Inkling2 support lives on the [`inkling2-support`](https://github.com/erictang00
   residual stream.
 - **Short convolutions** on the attention and MLP paths.
 - **MoE:** 384 routed experts, top-8, sigmoid router with a selection-only bias.
-- **Precision:** the releases ship the routed experts in NVFP4 (`Inkling-2-Small`) or MXFP8 (`Inkling-2-Small-MXFP8`). Megatron trains them in BF16 (dequantized on
+- **Precision:** the releases ship the routed experts in NVFP4 (`Inkling-2-Small`, `Inkling-2-Mini`) or MXFP8 (`Inkling-2-Small-MXFP8`). Megatron trains them in BF16 (dequantized on
   import), and vLLM serves them in BF16 or MXFP8, quantized from the synced BF16 weights.
+
+**Inkling 2 Mini** (`Inkling2LoopForConditionalGeneration`) has the same layer design at a smaller width: 24 layers and
+128 routed experts (top-8). Its middle layers form a loop core that runs three times with shared weights, so each token
+passes through 48 layers. Each pass after the first restarts from the state before the core, reads the previous pass's
+block outputs and mixes them into every sub-layer through small per-layer low-rank controllers. In SkyRL:
+
+- Megatron runs the prelude, every pass of the core and the coda, and recomputes per layer pass under full activation
+  recompute.
+- vLLM serves the loop natively.
+- R3 routing replay records and replays one routing per layer pass.
 
 ## Setup
 
-The examples run on 4 nodes of 8x B200 connected with InfiniBand, launched from the head node of a Ray cluster that
-spans them. Check out the branch:
+The Inkling-2-Small examples run on 4 nodes of 8x B200 connected with InfiniBand, launched from the head node of a Ray
+cluster that spans them; the Inkling-2-Mini example runs on one node of 8x B200. Check out the branch:
 
 ```bash
 git clone -b inkling2-support https://github.com/erictang000/SkyRL.git && cd SkyRL
@@ -47,12 +59,15 @@ and all commands run from the repo root. `uv run` installs the pinned vLLM build
 ```bash
 # NVFP4 routed experts, ~390 GB (or thinkingmachines/Inkling-2-Small-MXFP8, ~620 GB)
 hf download thinkingmachines/Inkling-2-Small --local-dir /path/to/models/Inkling-2-Small
+# or Inkling 2 Mini, ~20 GB
+hf download thinkingmachines/Inkling-2-Mini --local-dir /path/to/models/Inkling-2-Mini
 
 # writes dapo-math-17k-cleaned.parquet, aime-2024-cleaned.parquet and aime-2025-cleaned.parquet
 DATA_DIR=$HOME/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 ```
 
-The scripts read `MODEL_PATH` (default `thinkingmachines/Inkling-2-Small`) and `DATA_DIR` (default `$HOME/data/dapo`).
+The scripts read `MODEL_PATH` (default `thinkingmachines/Inkling-2-Small`, or `thinkingmachines/Inkling-2-Mini` for the
+Mini script) and `DATA_DIR` (default `$HOME/data/dapo`).
 Either release works as is: Megatron and vLLM dequantize the routed experts to BF16 as they load, and the release's own
 chat template is used.
 
@@ -62,8 +77,9 @@ chat template is used.
 |---|---|---|---|
 | Full FT (MXFP8 or BF16 rollouts) | 4x8 B200 | colocated | [`run_dapo_inkling2_fullft_colocated.sh`](https://github.com/erictang000/SkyRL/blob/inkling2-support/examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_fullft_colocated.sh) |
 | LoRA | 4x8 B200 | colocated | [`run_dapo_inkling2_lora_colocated.sh`](https://github.com/erictang000/SkyRL/blob/inkling2-support/examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_lora_colocated.sh) |
+| Inkling-2-Mini: full FT (BF16 or MXFP8 rollouts) or LoRA | 1x8 B200 | colocated | [`run_dapo_inkling2_mini_colocated.sh`](https://github.com/erictang000/SkyRL/blob/inkling2-support/examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_mini_colocated.sh) |
 
-Both scripts share these settings:
+All scripts share these settings:
 
 - GRPO advantages, token-mean loss and the DAPO overlong penalty over the last 2,048 tokens of a 4,096-token response
   budget
@@ -108,6 +124,23 @@ MODEL_PATH=/path/to/models/Inkling-2-Small \
   bash examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_lora_colocated.sh
 ```
 
+### Inkling 2 Mini
+
+One script covers the three configurations above on a single 8x B200 node, picked with `PRESET`:
+
+- `bf16_fft`: full FT with BF16 rollouts
+- `mxfp8_sc`: full FT with MXFP8 rollouts, R3, sample-support replay and score centering, like the 4-node full-FT
+  defaults
+- `lora`: LoRA, rank 128 / alpha 32, LR `2e-5`
+
+Megatron (EP8) and eight vLLM engines (TP1, one per GPU) share the GPUs, as in the 4-node scripts. Batch sizes, response
+budget and evaluation match them.
+
+```bash
+MODEL_PATH=/path/to/models/Inkling-2-Mini PRESET=bf16_fft \
+  bash examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_mini_colocated.sh
+```
+
 ## Results
 
 Inkling-2-Small on DAPO-Math-17K at reasoning effort 0.1 with the length penalty, 50 steps. Bold lines are EMA-smoothed,
@@ -123,6 +156,18 @@ Score centering with top-p sampling cuts the gap roughly in half (0.011-0.017) a
 
 ![Inkling-2-Small DAPO-Math-17K with MXFP8 rollouts: reward and rollout/trainer logprob gap, with and without score centering and top-p](/images/models/inkling2/inkling2_small_dapo_math_17k_mxfp8_reward_and_logprob_diff.png)
 
+**Inkling 2 Mini**, same task and settings, one node.
+
+| Run | Train reward, step 1 → mean of last 5 steps | Rollout/trainer logprob gap |
+|---|---|---|
+| Full FT, BF16 rollouts | 0.24 → 0.62 | 0.017-0.020 |
+| LoRA, rank 128 | 0.26 → 0.61 | 0.017-0.020 |
+| Full FT, MXFP8 + score centering + top-p | 0.23 → 0.67 | 0.015-0.018 |
+
+AIME eval peaks around steps 5-25 and then drifts down as responses get shorter.
+
+![Inkling-2-Mini DAPO-Math-17K: reward and rollout/trainer logprob gap for full fine-tuning (BF16), LoRA (rank 128) and full fine-tuning with MXFP8 rollouts and score centering](/images/models/inkling2/inkling2_mini_dapo_math_17k_reward_and_logprob_diff.png)
+
 ## Known limitations
 
 - No pipeline or context parallelism in Megatron.
@@ -131,7 +176,7 @@ Score centering with top-p sampling cuts the gap roughly in half (0.011-0.017) a
 
 ## How it works
 
-- **Megatron-Bridge.** SkyRL adds an Inkling2 bridge with custom megatron-core modules for the block attention
+- **Megatron-Bridge.** SkyRL adds an Inkling2 bridge (and one for the looped `Inkling2LoopForConditionalGeneration`) with custom megatron-core modules for the block attention
   residuals, the relative-bias attention (FlexAttention), the short convolutions and the softcapped SiTU-GLU experts,
   checked against a plain PyTorch reference.
 - **vLLM.** A `vllm.general_plugins` entry point serves the model through SkyRL's `Inkling2ForRL`, which takes the BF16
