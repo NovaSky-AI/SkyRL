@@ -553,18 +553,19 @@ DEFAULT_TRANSFORMER_CONFIG_KWARGS = {
 
 @dataclass
 class QatRoundingConfig(BaseConfig):
-    """How the trainer's QAT rounds one quantized tensor class (``expert_nvfp4``'s routed-expert weights or inputs).
-    Trainer-only: the rollouts keep their own quantizer settings, so a setting that differs from theirs makes the
-    trainer round differently from the rollouts it emulates (logged at startup)."""
+    """How the trainer's QAT rounds one quantized tensor class (``expert_nvfp4``'s routed-expert weights or inputs, or
+    ``kv_cache_qat``'s cache rows). Trainer-only: the rollouts keep their own quantizer settings, so a setting that
+    differs from theirs makes the trainer round differently from the rollouts it emulates (logged at startup)."""
 
     four_over_six: Optional[bool] = None
     """NVFP4 4/6 block scales: per 16-block amax/6 or amax/4, whichever has the lower squared error.
     FlashInfer's 4over6, instead of amax/6. ``None``: the rollouts' setting."""
     stochastic_rounding: bool = False
-    """Round each scaled value stochastically to one of its two E2M1 neighbours.
-    Up with probability equal to its distance from the lower one: unbiased, where round-to-nearest repeats the same
-    error every time. Scales stay the round-to-nearest grid's, one E4M3 step larger where a block's largest value would
-    saturate. On sm_100 / sm_103 the hardware's ``cvt.rs`` conversions round (8 random bits per value)."""
+    """Round each scaled value stochastically to one of its two neighbours on its grid.
+    The grid is E2M1 (E4M3 for the KV cache's RoPE and ``fp8_ds_mla`` values); up with probability equal to its
+    distance from the lower one: unbiased, where round-to-nearest repeats the same error every time. Scales stay the
+    round-to-nearest grid's, one E4M3 step larger where an NVFP4 block's largest value would saturate. On sm_100 /
+    sm_103 the hardware's ``cvt.rs`` conversions round (8 random bits per value)."""
 
 
 @dataclass
@@ -764,6 +765,25 @@ class MegatronConfig(BaseConfig):
     unexpected shapes). NCCL or CUDA-IPC backend only. The BF16 layers are unaffected. On by default (parity with
     the per-expert path is bitwise, see ``tests/backends/skyrl_train/gpu/gpu_ci/test_nvfp4_stacked_sync.py``); set
     ``false`` to use the per-expert path. Ignored without ``expert_nvfp4``."""
+    kv_cache_qat: bool = False
+    """Attend over the rollouts' quantized KV cache in every absorbed-MLA (DSA) layer.
+    Each layer's keys and values become the dequantized cache rows the engines hold
+    (``engine_init_kwargs.kv_cache_dtype``: ``nvfp4_ds_mla`` or ``fp8_ds_mla``), built with vLLM's own cache writer
+    and reader arithmetic, so they are bit-identical to what the rollouts' attention reads. The rounding is
+    straight-through: the backward runs on the rounded keys and values, and their gradient reaches the unrounded key
+    unchanged. DeepSeek-V3.2 / GLM-5.x geometry; needs vLLM in the trainer env (and Blackwell for ``nvfp4_ds_mla``)
+    and ``engine_init_kwargs.attention_config.sparse_mla_force_mqa: true``, which makes every engine prefill read the
+    cache. Not supported with prefill-decode disaggregation (``enable_pd``). The ref model mirrors the policy's setting.
+    See
+    ``skyrl.backends.skyrl_train.workers.megatron.quantization.fake_kv_cache_qat``."""
+    kv_cache_qat_format: Optional[Literal["nvfp4_ds_mla", "fp8_ds_mla"]] = None
+    """The emulated KV cache format, set during config validation; leave unset.
+    Copied from ``generator.inference_engine.engine_init_kwargs.kv_cache_dtype``."""
+    kv_cache_qat_rounding: QatRoundingConfig = field(default_factory=QatRoundingConfig)
+    """How ``kv_cache_qat`` rounds the cache rows.
+    ``four_over_six`` (``nvfp4_ds_mla`` only) defaults to the rollouts' absmax (vLLM's cache writer has no 4/6).
+    Stochastic rows draw afresh in every forward (activation recompute redraws the same), on the E2M1 latent and E4M3
+    RoPE (``nvfp4_ds_mla``) or the E4M3 latent (``fp8_ds_mla``)."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
     Used for bridge resolution. Not a general HF-config override -- use

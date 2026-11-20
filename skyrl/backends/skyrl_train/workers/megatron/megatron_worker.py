@@ -324,6 +324,26 @@ class MegatronWorker:
             seed=self.cfg.seed,
         )
 
+    def _maybe_setup_kv_cache_qat(self) -> None:
+        """``kv_cache_qat``: this worker's absorbed-MLA attention reads the rollouts' dequantized KV cache rows
+        (``quantization.fake_kv_cache_qat``). Reads the *policy's* ``megatron_config``; the ref mirrors it."""
+        mc = self.cfg.policy.megatron_config
+        if not mc.kv_cache_qat:
+            return
+        from skyrl.backends.skyrl_train.workers.megatron.quantization.fake_kv_cache_qat import (
+            absorbed_mla_attentions,
+            check_kv_cache_qat_config,
+            install_kv_cache_qat,
+        )
+
+        attentions = absorbed_mla_attentions(self.actor_module)
+        if not attentions:
+            raise ValueError("kv_cache_qat needs absorbed-MLA (DSA) attention; this model has none")
+        check_kv_cache_qat_config(attentions[0].config)
+        rounding = mc.kv_cache_qat_rounding
+        install_kv_cache_qat(mc.kv_cache_qat_format, bool(rounding.four_over_six), rounding.stochastic_rounding)
+        logger.info(f"KV cache QAT: rank {self._rank}, {len(attentions)} attention layers, {mc.kv_cache_qat_format}.")
+
     def init_configs(
         self,
         model_path,
@@ -1220,6 +1240,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bf16=self.cfg.bf16,
         )
         self._maybe_setup_expert_nvfp4()
+        self._maybe_setup_kv_cache_qat()
 
         if self._local_rank == 0 and not os.path.exists(
             model_path
@@ -2379,6 +2400,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             bf16=self.cfg.bf16,
         )
         self._maybe_setup_expert_nvfp4()
+        self._maybe_setup_kv_cache_qat()
 
         # download model weights from huggingface (need to be done for ref worker as well, else errors when colocate_all=False)
         if self._local_rank == 0 and not os.path.exists(
