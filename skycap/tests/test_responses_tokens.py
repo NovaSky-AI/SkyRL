@@ -3,6 +3,7 @@ the fake renderer and the mock engine."""
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import openai
@@ -10,7 +11,9 @@ import orjson
 import pytest
 
 from skycap import hashing
+from skycap import server as server_module
 from skycap.hashing import MatchKey
+from skycap.server import KEEPALIVE
 from tests.conftest import openai_client
 from tests.fake_renderer import END, decode, encode
 from tests.test_tokens import TokenStack, client, token_stack, user
@@ -246,6 +249,74 @@ async def test_a_marked_retry_gets_the_original_reply_without_sampling_again() -
         _, retried, _ = await post(stack, created, body, **{"x-stainless-retry-count": "1"})
 
     assert retried == first and len(stack.engine.requests) == 1
+
+
+# -- answering a stream before its turn is sampled ------------------------------------------------------------
+STREAMED = {"model": "policy", "input": "hi", "stream": True}
+
+
+@pytest.fixture
+def fast_keepalive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server_module, "KEEPALIVE_SECONDS", 0.05)
+    monkeypatch.setattr(server_module, "EARLY_AFTER_SECONDS", 0.05)
+
+
+async def test_a_stream_answers_at_once_and_keeps_alive_until_its_turn_is_sampled(fast_keepalive) -> None:
+    async with token_stack() as stack:
+        stack.engine.delay = 0.5
+        created = await stack.create()
+        started = time.monotonic()
+        async with stack.http.post(f"{created['base_url']}/responses", json=STREAMED) as response:
+            first = await response.content.readany()
+            first_at = time.monotonic() - started
+            body = first + await response.content.read()
+        # Every SSE client skips the comments: the SDK reads the same stream as before.
+        stream = await client(created["base_url"]).responses.create(model="policy", input="again", stream=True)
+        events = [event async for event in stream]
+
+    assert response.status == 200 and first.startswith(KEEPALIVE) and first_at < stack.engine.delay
+    assert body.count(KEEPALIVE) >= 3 and event_types(body)[-1] == "response.completed"
+    assert events[-1].type == "response.completed" and events[-1].response.output_text
+
+
+async def test_a_failure_after_the_stream_started_is_a_failed_response(fast_keepalive) -> None:
+    async with token_stack(completion=lambda prompt, sampling: None) as stack:
+        stack.engine.delay = 0.2
+        status, body, _ = await post(stack, await stack.create(), STREAMED)
+
+    assert status == 200 and event_types(body) == ["response.created", "response.failed"]
+    assert b"engine returned HTTP 500" in body
+
+
+async def test_a_streamed_call_skycap_refuses_keeps_its_status(fast_keepalive) -> None:
+    async with token_stack() as stack:
+        status, body, content_type = await post(stack, await stack.create(), {**STREAMED, "truncation": "auto"})
+
+    assert status == 400 and content_type == "application/json" and b"truncation" in body
+
+
+@pytest.mark.parametrize("leaves", [False, True], ids=["first client waits", "first client leaves"])
+async def test_a_retry_during_the_wait_gets_the_original_reply(fast_keepalive, leaves: bool) -> None:
+    async with token_stack() as stack:
+        stack.engine.delay = 0.3
+        created = await stack.create()
+        async with stack.http.post(f"{created['base_url']}/responses", json=STREAMED) as original:
+            await original.content.readany()
+            if leaves:
+                original.close()
+            _, retried, _ = await post(stack, created, STREAMED, **{"x-stainless-retry-count": "1"})
+
+    assert event_types(retried)[-1] == "response.completed" and len(stack.engine.requests) == 1
+
+
+async def test_chat_streams_are_still_one_body_sent_when_the_turn_is_sampled(fast_keepalive) -> None:
+    async with token_stack() as stack:
+        created = await stack.create()
+        streamed = {"model": "policy", "messages": [user("hi")], "stream": True}
+        async with stack.http.post(f"{created['base_url']}/chat/completions", json=streamed) as response:
+            body = await response.read()
+
+    assert body.startswith(b"data: ") and KEEPALIVE not in body
 
 
 # -- the record and the developer role ------------------------------------------------------------------------

@@ -92,6 +92,16 @@ parsed items. A `developer` message is folded into the leading `system` message
 when the tokenizer's chat template has no such role, as vLLM does, for either
 API. Each call records its API as `calls[].dialect`.
 
+Token mode samples a whole turn before it answers. A streamed Responses call is
+answered at once anyway: its headers and an SSE comment go out immediately, then
+a comment every `SKYCAP_STREAM_KEEPALIVE_SECONDS` (15) while the turn samples,
+then the reply's events. A long turn would otherwise send nothing for minutes,
+and whatever sits in between gives up first: a quick tunnel's 524, a client's
+stream idle timeout. The status is sent before the call has an outcome, so a
+failure arrives as a `response.failed` event. A retry still gets the original
+reply. Chat Completions streams are unchanged: one body, sent once the turn is
+sampled.
+
 A reply cut off at its token limit goes back as the API defines it,
 `status: "incomplete"` with reason `max_output_tokens`, and is recorded with
 `finish_reason: "length"`. What a client does with it is the harness's
@@ -195,7 +205,7 @@ service.stop()                   # closes the tunnel, then writes what is still 
 
 | `--expose` | Reached at | Limits |
 | --- | --- | --- |
-| `cloudflare` | a random `https://*.trycloudflare.com` URL | development only: at most 200 requests in flight per tunnel (more get 429), a response that hasn't started within ~125 s gets 524, no SLA. Adds ~20 ms per call. |
+| `cloudflare` | a random `https://*.trycloudflare.com` URL | development only: at most 200 requests in flight per tunnel (more get 429), a response that hasn't started within ~125 s gets 524 (a streamed Responses call starts at once; a Chat Completions call doesn't), no SLA. Adds ~20 ms per call. |
 | `external_host` | `http://{host}:{port}` | plain HTTP; the address has to route to this node |
 | `pkg.module:Class` | whatever the class returns | an `skycap.exposure.Exposure` subclass, built with `--expose-kwargs` |
 

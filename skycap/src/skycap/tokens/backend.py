@@ -41,6 +41,9 @@ def _error(message: str, status: int, *, kind: str = "invalid_request_error", co
 
 
 class TokensBackend:
+    # A turn is sampled whole before it is answered, so a stream is one body sent at the end.
+    buffers_streams = True
+
     def __init__(
         self,
         engine_url: str,
