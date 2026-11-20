@@ -113,6 +113,10 @@ bash examples/train/sft/run_sft_dummy_fsdp.sh
 
 # Megatron dummy run
 bash examples/train/sft/run_sft_dummy_megatron.sh
+
+# Qwen3.8-Flash-Next full fine-tune at 131K tokens, 4 x 8 B200 (TP1 x CP8 x EP8)
+MODEL_PATH=/path/to/Qwen3.8-Flash-Next QSA_CUDNN_WHEEL=/path/to/nvidia_cudnn_frontend-*.whl \
+  bash examples/train/sft/run_sft_dummy_qwen3_8_flash_next_megatron.sh
 ```
 
 Override the number of steps with:

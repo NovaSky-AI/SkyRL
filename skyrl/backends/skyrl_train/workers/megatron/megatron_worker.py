@@ -86,6 +86,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_grad_accum_fusion_fallback import (
+    apply_grad_accum_fusion_fallback_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
 )
@@ -181,6 +184,8 @@ apply_dist_optim_te_load_state_dict_patch()
 apply_dsa_head_full_patch()
 # megatron-core Triton kernels (fused mHC, MLA RoPE): int64 row offsets for long sequences (DSv4 / V4.1 at >64k).
 apply_triton_kernels_int64_offsets_patch()
+# transformer_config_kwargs.gradient_accumulation_fusion without apex: a torch wgrad-GEMM fallback.
+apply_grad_accum_fusion_fallback_patch()
 # Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_distopt_mixed_dtype_group_index_patch()
