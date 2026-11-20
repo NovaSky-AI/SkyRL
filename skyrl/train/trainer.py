@@ -3,6 +3,7 @@ import math
 import os
 import shutil
 from collections import defaultdict
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -11,7 +12,7 @@ import numpy as np
 import torch
 from jaxtyping import Float
 from loguru import logger
-from ray.util.placement_group import placement_group
+from ray.util.placement_group import placement_group, remove_placement_group
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
@@ -720,11 +721,17 @@ class RayPPOTrainer:
         kept_prompts = (len(entries) // stride) * stride
         return entries[:kept_prompts]
 
-    def build_models(self, PolicyWorker, CriticWorker, RefWorker):
-        """
-        Initialize the actors for training, and handle colocation logic
-        """
-        cfg = self.cfg
+    @staticmethod
+    def _start_model_groups(
+        cfg, colocate_pg, pad_token_id, total_training_steps, PolicyWorker, CriticWorker, RefWorker, startup
+    ):
+        """Initialize training actors independently of the sampler and its router."""
+
+        def new_group(*args, **kwargs):
+            group = PPORayActorGroup(*args, **kwargs)
+            startup.callback(group.shutdown)
+            return group
+
         pg = None
 
         use_ref_model = cfg.trainer.algorithm.use_kl_loss or cfg.trainer.algorithm.use_kl_in_reward
@@ -743,9 +750,9 @@ class RayPPOTrainer:
             assert (
                 num_policy_gpus == num_rollout_gpus
             ), "num_policy_gpus and num_rollout_gpus must be the same when colocating all models"
-            pg = self.colocate_pg
+            pg = colocate_pg
 
-            policy_model = PPORayActorGroup(
+            policy_model = new_group(
                 cfg.trainer,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
@@ -760,7 +767,7 @@ class RayPPOTrainer:
                 assert (
                     num_policy_gpus == num_ref_gpus
                 ), "num_policy_gpus and num_ref_gpus must be the same when colocating policy and ref model"
-                ref_model = PPORayActorGroup(
+                ref_model = new_group(
                     cfg.trainer,
                     cfg.trainer.placement.ref_num_nodes,
                     cfg.trainer.placement.ref_num_gpus_per_node,
@@ -777,7 +784,7 @@ class RayPPOTrainer:
                 assert (
                     num_policy_gpus == num_critic_gpus
                 ), "num_policy_gpus and num_critic_gpus must be the same when colocating policy and critic model"
-                critic_model = PPORayActorGroup(
+                critic_model = new_group(
                     cfg.trainer,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
@@ -806,9 +813,10 @@ class RayPPOTrainer:
                 ]
                 raw_pg = placement_group(bundles, strategy="PACK")
                 get_ray_pg_ready_with_timeout(raw_pg, timeout=SKYRL_RAY_PG_TIMEOUT_IN_S)
+                startup.callback(remove_placement_group, raw_pg)
                 pg = ResolvedPlacementGroup(raw_pg)
 
-            policy_model = PPORayActorGroup(
+            policy_model = new_group(
                 cfg.trainer,
                 cfg.trainer.placement.policy_num_nodes,
                 cfg.trainer.placement.policy_num_gpus_per_node,
@@ -819,7 +827,7 @@ class RayPPOTrainer:
                 sequence_parallel_size=cfg.trainer.policy.sequence_parallel_size,
             )
             if use_ref_model:
-                ref_model = PPORayActorGroup(
+                ref_model = new_group(
                     cfg.trainer,
                     cfg.trainer.placement.ref_num_nodes,
                     cfg.trainer.placement.ref_num_gpus_per_node,
@@ -839,7 +847,7 @@ class RayPPOTrainer:
                 ref_model = None
 
             if cfg.trainer.critic.model.path:
-                critic_model = PPORayActorGroup(
+                critic_model = new_group(
                     cfg.trainer,
                     cfg.trainer.placement.critic_num_nodes,
                     cfg.trainer.placement.critic_num_gpus_per_node,
@@ -860,13 +868,13 @@ class RayPPOTrainer:
                 cfg.trainer.train_batch_size // cfg.trainer.critic_mini_batch_size * cfg.trainer.update_epochs_per_batch
             )
         policy_num_training_steps = (
-            self.total_training_steps * policy_steps_per_train_batch if self.total_training_steps is not None else None
+            total_training_steps * policy_steps_per_train_batch if total_training_steps is not None else None
         )
         critic_num_training_steps = (
-            self.total_training_steps * critic_steps_per_train_batch if self.total_training_steps is not None else None
+            total_training_steps * critic_steps_per_train_batch if total_training_steps is not None else None
         )
+        refs = []
         if not cfg.trainer.placement.colocate_all:
-            refs = []
             if ref_model is not None:
                 refs.extend(ref_model.async_init_model(cfg.trainer.ref.model.path))
             refs.extend(
@@ -882,11 +890,6 @@ class RayPPOTrainer:
                         num_training_steps=critic_num_training_steps,
                     )
                 )
-            deadline.ray_get(refs, "init_models")
-            deadline.ray_get(
-                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
-                "set_pad_token_id",
-            )
         else:
             if ref_model is not None:
                 deadline.ray_get(ref_model.async_init_model(cfg.trainer.ref.model.path), "init_ref_model")
@@ -899,7 +902,7 @@ class RayPPOTrainer:
                 "init_policy_model",
             )
             deadline.ray_get(
-                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", pad_token_id),
                 "set_pad_token_id",
             )
             policy_model.offload_to_cpu()
@@ -913,9 +916,35 @@ class RayPPOTrainer:
                 )
                 critic_model.offload_to_cpu()
 
-        self.policy_model: PPORayActorGroup = policy_model
-        self.critic_model: Optional[PPORayActorGroup] = critic_model
-        self.ref_model: Optional[PPORayActorGroup] = ref_model
+        return policy_model, critic_model, ref_model, refs
+
+    def build_models(self, PolicyWorker, CriticWorker, RefWorker):
+        """Initialize the training actors and connect them to inference."""
+        with ExitStack() as startup:
+            groups = self._start_model_groups(
+                self.cfg,
+                self.colocate_pg,
+                self.tokenizer.pad_token_id,
+                self.total_training_steps,
+                PolicyWorker,
+                CriticWorker,
+                RefWorker,
+                startup,
+            )
+            self._attach_model_groups(*groups)
+            startup.pop_all()
+
+    def _attach_model_groups(self, policy_model, critic_model, ref_model, init_refs):
+        if not self.colocate_all:  # colocated startup waits for each model and sets the pad token itself
+            deadline.ray_get(init_refs, "init_models")
+            deadline.ray_get(
+                policy_model.async_run_ray_method("pass_through", "_set_pad_token_id", self.tokenizer.pad_token_id),
+                "set_pad_token_id",
+            )
+
+        self.policy_model = policy_model
+        self.critic_model = critic_model
+        self.ref_model = ref_model
 
         # Create unified dispatch that manages all actor groups
         self.dispatch = WorkerDispatch(

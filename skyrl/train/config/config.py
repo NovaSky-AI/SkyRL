@@ -1388,6 +1388,10 @@ class FullyAsyncConfig(BaseConfig):
     """Wall-clock seconds generation stays paused to stand in for the (skipped) weight broadcast.
     0.0 = pause then immediately resume."""
 
+    overlap_model_startup: bool = True
+    """Start training models while managed inference servers warm up on separate GPUs.
+    Disable for custom trainer factories that own model initialization or use a custom optimizer schedule."""
+
 
 # ---------------------------------------------------------------------------
 # Sampling / Chat Template
