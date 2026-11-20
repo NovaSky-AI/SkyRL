@@ -175,6 +175,32 @@ def _hybrid_to_decoder_layer_indices(model_config, global_num_layers: int, layer
     return [sum(attention[: h + 1]) - 1 for h in layer_indices]
 
 
+def _check_replay_expert_ids(rollout_expert_indices: PackedTensor, num_experts: int | None) -> None:
+    """Reject expert ids the router cannot hold before they reach its ``gather``.
+
+    An id >= ``num_experts`` otherwise surfaces as an opaque CUDA device-side assert in
+    ``RouterReplay.get_replay_topk`` (``scores.gather``), possibly several kernels later. The
+    error names the offending sample, token, layer and value, so a bad capture can be traced
+    back to the rollout that produced it.
+    """
+    if not num_experts:
+        return
+    values = rollout_expert_indices.values
+    bad = values >= num_experts
+    if not bool(bad.any()):
+        return
+    token, layer, _ = (int(i) for i in bad.nonzero()[0].tolist())
+    cu_seqlens = rollout_expert_indices.cu_seqlens.to(torch.long).cpu()
+    sample = int(torch.searchsorted(cu_seqlens, torch.tensor(token), right=True)) - 1
+    position = token - int(cu_seqlens[sample])
+    length = int(cu_seqlens[sample + 1] - cu_seqlens[sample])
+    raise ValueError(
+        f"Router replay expert ids out of range for {num_experts} experts: {int(bad.sum())} of "
+        f"{values.numel()} entries (max id {int(values.max())}); first at sample {sample}, token "
+        f"{position} of {length}, captured layer {layer}, ids {values[token, layer].tolist()}"
+    )
+
+
 def setup_per_microbatch_replay_forward(
     rollout_expert_indices: PackedTensor,
     router_padding_mask: torch.Tensor | None,
@@ -234,6 +260,7 @@ def setup_per_microbatch_replay_forward(
         raise ValueError("rollout_expert_indices and router_padding_mask must be on the same device")
 
     num_captured_layers, topk = rollout_expert_indices.row_shape
+    _check_replay_expert_ids(rollout_expert_indices, getattr(model_config, "num_moe_experts", None))
     instances = RouterReplay.global_router_replay_instances
     local_layer_indices = _get_local_router_layer_indices(
         model_config,
