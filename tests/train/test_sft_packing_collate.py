@@ -71,6 +71,24 @@ def _make_example(seq_len: int, num_actions: int, base_token: int = 100) -> dict
 
 
 class TestPackingCollator:
+    def test_uses_modified_first_fit_decreasing(self):
+        lengths = [14, 91, 25, 37, 33, 22, 34, 99, 30]
+        collator = _make_collator(
+            num_gpus=1,
+            batch_size=len(lengths),
+            max_length=100,
+            max_tokens_per_microbatch=100,
+        )
+
+        batch = collator([_make_example(length, length) for length in lengths], batch_size=len(lengths))
+
+        assert [row.tolist() for row in batch["sub_seq_lengths"]] == [
+            [99],
+            [91],
+            [37, 34, 25],
+            [33, 30, 22, 14],
+        ]
+
     def test_bin_count_is_multiple_of_dp(self):
         collator = _make_collator(num_gpus=4, batch_size=8)
         examples = [_make_example(10, 5, base_token=100 + 100 * i) for i in range(8)]
@@ -83,7 +101,7 @@ class TestPackingCollator:
         assert len(batch["sub_seq_lengths"]) == 4
 
     def test_bin_capacity_is_token_budget(self):
-        # max_tokens_per_microbatch is the FFD bin capacity. With dp_size=1 and
+        # max_tokens_per_microbatch is the MFFD bin capacity. With dp_size=1 and
         # four length-100 seqs: a 128-token budget fits one seq per bin (4
         # bins); a 256-token budget fits two seqs per bin (2 bins).
         examples = [_make_example(100, 50, base_token=100 + 100 * i) for i in range(4)]
@@ -184,7 +202,7 @@ class TestPackingCollator:
     def test_pp_padding_makes_rows_uniform(self):
         """With pp_size > 1, all packed rows are padded to the global max."""
         collator = _make_collator(num_gpus=2, batch_size=4, max_length=64, pp=2)
-        # Two different-sized bins after FFD.
+        # Two different-sized bins after MFFD.
         examples = [
             _make_example(30, 15),
             _make_example(28, 14),
