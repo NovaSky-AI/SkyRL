@@ -5,7 +5,8 @@ run loads the release. ``forward`` logprobs on left-padded sequences must match 
 model run on the unpadded sequences, packed (``remove_microbatch_padding``) and unpacked, and a
 ``forward_backward`` + ``optim_step`` (default full activation recompute) must produce finite
 metrics. Tensor parallelism runs with sequence parallelism (SkyRL enables it with TP), which
-exercises the short convolutions across sequence-slice boundaries.
+exercises the short convolutions across sequence-slice boundaries. The looped rows run the looped checkpoint (the
+train step's full recompute then checkpoints layer runs of the loop block).
 
 Run with:
 uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/inkling2/test_worker.py
@@ -122,13 +123,29 @@ def _config(path: str, tp: int, ep: int, remove_microbatch_padding: bool) -> Sky
 
 
 @pytest.mark.parametrize(
-    "tp, ep, remove_microbatch_padding",
-    [(1, 2, True), (1, 2, False), (2, 1, True), (2, 2, False)],
-    ids=["ep2_packed", "ep2_unpacked", "tp2_packed", "tp2_ep2_unpacked"],
+    "tp, ep, remove_microbatch_padding, looped",
+    [
+        (1, 2, True, False),
+        (1, 2, False, False),
+        (2, 1, True, False),
+        (2, 2, False, False),
+        (1, 2, True, True),
+        (2, 1, True, True),
+        (2, 2, False, True),
+    ],
+    ids=[
+        "ep2_packed",
+        "ep2_unpacked",
+        "tp2_packed",
+        "tp2_ep2_unpacked",
+        "looped_ep2_packed",
+        "looped_tp2_packed",
+        "looped_tp2_ep2_unpacked",
+    ],
 )
-def test_worker_forward_and_train_step(ray_init_fixture, tp, ep, remove_microbatch_padding):
+def test_worker_forward_and_train_step(ray_init_fixture, tp, ep, remove_microbatch_padding, looped):
     with tempfile.TemporaryDirectory() as path:
-        write_checkpoint(path, tokenizer="Qwen/Qwen3-0.6B")
+        write_checkpoint(path, tokenizer="Qwen/Qwen3-0.6B", looped=looped)
         cfg = _config(path, tp, ep, remove_microbatch_padding)
         batch = _batch()
         actor_group = init_worker_with_type(
@@ -150,8 +167,9 @@ def test_worker_forward_and_train_step(ray_init_fixture, tp, ep, remove_microbat
     mask = batch["attention_mask"][:, -NUM_ACTIONS:].bool()
     diff = (megatron[mask] - reference[mask]).abs()
     print(f"tp={tp} ep={ep} packed={remove_microbatch_padding}: |dlp| mean {diff.mean():.5f} max {diff.max():.5f}")
-    assert diff.mean() < 0.006
-    assert diff.max() < 0.03
+    # The looped model's 24 layer runs drift further (0.010-0.014 mean); a single-site loop bug costs >= 0.07.
+    assert diff.mean() < (0.025 if looped else 0.006)
+    assert diff.max() < (0.08 if looped else 0.03)
     for result in results:
         assert math.isfinite(result.metrics["policy_loss"])
         assert result.metrics["policy_entropy"] > 0

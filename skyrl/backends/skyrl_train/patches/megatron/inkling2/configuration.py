@@ -1,4 +1,4 @@
-"""Hugging Face config classes for Inkling2 (``model_type: inkling2``).
+"""Hugging Face config classes for Inkling2 (``model_type: inkling2``, and ``inkling2_loop`` for looped checkpoints).
 
 The release ships no ``transformers`` implementation, so these classes give ``AutoConfig`` (and
 through it Megatron-Bridge) a typed view of ``config.json``. Field defaults are the released
@@ -14,6 +14,8 @@ accepts only the release names: :func:`release_config` converts such a checkpoin
 from transformers import AutoConfig, PretrainedConfig
 
 MODEL_TYPE = "inkling2"
+# Looped checkpoints (``text_config.loop_config``) have their own model type; plain ones have no loop_config.
+LOOP_MODEL_TYPE = "inkling2_loop"
 LEGACY_MODEL_TYPE = "inkling2_mm_model"
 TEXT_MODEL_TYPE = "inkling2_model"
 # Renamed in the release config.
@@ -68,6 +70,7 @@ class Inkling2TextConfig(PretrainedConfig):
         use_gate_bias=True,
         model_max_length=1048576,
         tie_word_embeddings=False,
+        loop_config=None,
         **kwargs,
     ):
         if "n_layers_per_attnres_block" in kwargs:
@@ -113,15 +116,94 @@ class Inkling2TextConfig(PretrainedConfig):
         self.route_scale = route_scale
         self.use_gate_bias = use_gate_bias
         self.model_max_length = model_max_length
+        self.loop_config = validate_loop_config(
+            loop_config, num_hidden_layers, n_layers_per_attn_res_block, attn_res_normalize_values
+        )
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
     def is_local_layer(self, layer_idx: int) -> bool:
         return layer_idx in self.local_layer_ids
 
+    @property
+    def loop_core_layers(self) -> range:
+        """The looped layers (empty without ``loop_config``)."""
+        return loop_core_layers(self.loop_config)
+
+    @property
+    def num_layer_visits(self) -> int:
+        """Layer runs per forward pass: each core layer runs ``num_passes`` times."""
+        return num_layer_visits(self.loop_config, self.num_hidden_layers)
+
+
+LOOP_CONFIG_FIELDS = ("core_start", "core_end", "num_passes", "gate_rank")
+# Whether the checkpoint was trained to run with other pass counts (a serving option of variable-loop checkpoints).
+# Training here always runs the checkpoint's ``num_passes``, so both values train the same way.
+LOOP_CONFIG_FLAGS = ("is_varloop",)
+
+
+def validate_loop_config(loop_config, num_layers: int, block_size: int, normalize_values: bool):
+    """``loop_config`` (``{core_start, core_end, num_passes, gate_rank, is_varloop}`` or None) checked as the SGLang
+    fork does (``tml/config.py``): layers ``[core_start, core_end)`` run ``num_passes`` times with shared weights, and
+    the core starts and ends on attn-res block boundaries."""
+    if loop_config is None:
+        return None
+    loop_config = dict(loop_config)
+    if (
+        set(loop_config) != set(LOOP_CONFIG_FIELDS) | set(LOOP_CONFIG_FLAGS)
+        or any(type(loop_config[k]) is not int for k in LOOP_CONFIG_FIELDS)
+        or any(type(loop_config[k]) is not bool for k in LOOP_CONFIG_FLAGS)
+    ):
+        raise ValueError(
+            f"loop_config requires integer fields {sorted(LOOP_CONFIG_FIELDS)} and boolean "
+            f"{sorted(LOOP_CONFIG_FLAGS)}, got {loop_config} (configs from before is_varloop need re-downloading)"
+        )
+    if not normalize_values:
+        raise ValueError("Loop K/V messages require attn_res_normalize_values=True")
+    start, end = loop_config["core_start"], loop_config["core_end"]
+    if not 0 <= start < end <= num_layers:
+        raise ValueError(f"Loop core [{start}, {end}) must be within the {num_layers} layers")
+    if start % block_size or end % block_size:
+        raise ValueError(f"Loop core boundaries must align with attention residual blocks of {block_size}")
+    if loop_config["num_passes"] < 2 or loop_config["gate_rank"] <= 0:
+        raise ValueError("Looping requires at least two passes and a positive gate rank")
+    return loop_config
+
+
+def loop_core_layers(loop_config) -> range:
+    return range(0) if loop_config is None else range(loop_config["core_start"], loop_config["core_end"])
+
+
+def num_layer_visits(loop_config, num_layers: int) -> int:
+    if loop_config is None:
+        return num_layers
+    return num_layers + (loop_config["num_passes"] - 1) * len(loop_core_layers(loop_config))
+
+
+def layer_run_order(loop_config, num_layers: int):
+    """``(layer_idx, pass_idx)`` of every layer run, in execution order: prelude, core x passes, coda."""
+    core = loop_core_layers(loop_config)
+    if not core:
+        return [(i, 0) for i in range(num_layers)]
+    runs = [(i, 0) for i in range(core.start)]
+    for p in range(loop_config["num_passes"]):
+        runs += [(i, p) for i in core]
+    return runs + [(i, 0) for i in range(core.stop, num_layers)]
+
 
 def _set_sub_configs(config, text_config, vision_config, mtp_config) -> None:
+    # A bare ``cls()`` (Transformers builds one to diff against when serializing) is not checked.
+    given = text_config is not None
     if isinstance(text_config, dict) or text_config is None:
         text_config = Inkling2TextConfig(**(text_config or {}))
+    if (
+        given
+        and config.model_type != LEGACY_MODEL_TYPE
+        and (text_config.loop_config is not None) != (config.model_type == LOOP_MODEL_TYPE)
+    ):
+        raise ValueError(
+            f"Looped Inkling2 checkpoints use model_type {LOOP_MODEL_TYPE} with a loop_config; "
+            f"model_type {MODEL_TYPE} has none"
+        )
     config.text_config = text_config
     config.vision_config = vision_config
     config.mtp_config = mtp_config
@@ -137,6 +219,20 @@ class Inkling2Config(PretrainedConfig):
     language model is ported."""
 
     model_type = MODEL_TYPE
+    sub_configs = {"text_config": Inkling2TextConfig}
+
+    def __init__(self, text_config=None, vision_config=None, mtp_config=None, **kwargs):
+        _set_sub_configs(self, text_config, vision_config, mtp_config)
+        super().__init__(**kwargs)
+
+    def get_text_config(self, *args, **kwargs):
+        return self.text_config
+
+
+class Inkling2LoopConfig(PretrainedConfig):
+    """A looped checkpoint (``model_type: inkling2_loop``); same fields, ``text_config.loop_config`` required."""
+
+    model_type = LOOP_MODEL_TYPE
     sub_configs = {"text_config": Inkling2TextConfig}
 
     def __init__(self, text_config=None, vision_config=None, mtp_config=None, **kwargs):
@@ -165,6 +261,7 @@ def register() -> None:
     """Register the config classes with ``AutoConfig`` (idempotent)."""
     for model_type, cls in (
         (MODEL_TYPE, Inkling2Config),
+        (LOOP_MODEL_TYPE, Inkling2LoopConfig),
         (LEGACY_MODEL_TYPE, Inkling2LegacyConfig),
         (TEXT_MODEL_TYPE, Inkling2TextConfig),
     ):
@@ -178,9 +275,9 @@ def release_config(config: dict) -> dict:
     """A ``config.json`` dict with the release's names: ``model_type: inkling2``, the text
     config's ``inkling2_model`` and ``n_layers_per_attn_res_block``. Values are kept."""
     config = dict(config)
-    if config.get("model_type") == LEGACY_MODEL_TYPE:
-        config["model_type"] = MODEL_TYPE
     text = dict(config.get("text_config") or {})
+    if config.get("model_type") == LEGACY_MODEL_TYPE:
+        config["model_type"] = LOOP_MODEL_TYPE if text.get("loop_config") is not None else MODEL_TYPE
     for old, new in LEGACY_KEYS.items():
         if old in text:
             text[new] = text.pop(old)

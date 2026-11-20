@@ -19,6 +19,13 @@ the MTP draft (which reads hidden states of layers up to 48) is left out.
 (with their attn-res queries and local/global type). Like ``--num-experts``, this builds a
 different, smaller model for parity tests, e.g. a shallow model that contains a global layer.
 
+Looped checkpoints (``loop_config``): a slice keeps the loop if it keeps core layers, which must then stay one
+contiguous run of output layers starting and ending on attn-res block boundaries (``--num-layers`` may cut the core
+at a block boundary); ``loop_config`` is rewritten to the output indices and the rows of the cross-pass message
+queries (``middle_cycle_cross_pass_{,kv_}queries``, two per core layer) follow the kept core layers. A slice
+without core layers drops the loop: its controllers go with their layers, and the queries and ``loop_config`` are
+removed.
+
 ``--num-experts E`` keeps only the first E routed experts of every layer (expert weights, router
 rows and router bias). The result is a smaller model with the same layer structure, for
 fast parity tests and CI slices; it is not a pruned version of the full model.
@@ -75,6 +82,27 @@ EOS_TOKEN = "<|content_model_end_sampling|>"
 _EXPERT_CHUNK = 32
 # Tensors with a leading routed-expert axis (sliced by ``--num-experts``).
 _EXPERT_AXIS_RE = re.compile(r"\.mlp\.(experts\.w(13|2)_weight(_scale|_amax)?|gate\.(weight|bias))$")
+_LOOP_QUERY_NAMES = ("model.llm.middle_cycle_cross_pass_queries", "model.llm.middle_cycle_cross_pass_kv_queries")
+
+
+def slice_loop(text_config: dict, layers: list):
+    """``(loop_config, query_rows)`` of the slice keeping source ``layers`` (in output order): the rewritten
+    ``loop_config`` (None: the slice has no loop) and the rows of the cross-pass queries to keep (None: drop them)."""
+    loop = text_config.get("loop_config")
+    if loop is None:
+        return None, None
+    core = range(loop["core_start"], loop["core_end"])
+    kept = [(dst, src) for dst, src in enumerate(layers) if src in core]
+    if not kept:
+        return None, None
+    block = text_config.get("n_layers_per_attn_res_block", text_config.get("n_layers_per_attnres_block"))
+    start, end = kept[0][0], kept[-1][0] + 1
+    if [dst for dst, _ in kept] != list(range(start, end)) or start % block or end % block:
+        raise ValueError(
+            f"the kept loop core layers {[src for _, src in kept]} must be one block-aligned run of output layers"
+        )
+    rows = [r for _, src in kept for r in (2 * (src - core.start), 2 * (src - core.start) + 1)]
+    return dict(loop, core_start=start, core_end=end), rows
 
 
 def rename(name: str, layer_map: dict):
@@ -131,7 +159,7 @@ def convert_file(job):
     """Write one output file. ``sources`` maps every tensor to load (including the scale tensors
     of quantized expert weights, which are consumed and not written) to its input file, and
     ``names`` maps each written tensor to its output name."""
-    out_name, sources, names, input_dir, output_dir, verify, num_experts, gpu = job
+    out_name, sources, names, input_dir, output_dir, verify, num_experts, gpu, query_rows = job
     device = torch.device("cuda", gpu) if torch.cuda.is_available() else torch.device("cpu")
     by_src = defaultdict(list)
     for tensor, src in sources.items():
@@ -143,6 +171,8 @@ def convert_file(job):
                 tensors[n] = f.get_tensor(n)
                 if num_experts is not None and _EXPERT_AXIS_RE.search(n):
                     tensors[n] = tensors[n][:num_experts].contiguous()
+                if n in _LOOP_QUERY_NAMES:
+                    tensors[n] = tensors[n][query_rows].contiguous()
     out, report = {}, []
     for n in sorted(sources):
         if is_expert_scale_tensor(n):
@@ -170,6 +200,15 @@ def rewrite_config(config: dict, layers: list, num_experts) -> dict:
     config = json.loads(json.dumps(config))
     text = config["text_config"]
     is_full = layers == list(range(text["num_hidden_layers"]))
+    if "loop_config" in text:
+        loop, _ = slice_loop(text, layers)
+        if loop is None:
+            text.pop("loop_config")
+            # A plain checkpoint: looped ones have their own model type.
+            if config.get("model_type") == "inkling2_loop":
+                config["model_type"] = "inkling2"
+        else:
+            text["loop_config"] = loop
     if num_experts is not None:
         text["n_routed_experts"] = num_experts
     if not is_full:
@@ -211,10 +250,11 @@ def main():
         raise ValueError(f"--num-experts must be in [num_experts_per_tok, {total_experts}]")
 
     weight_map = json.loads((args.input / "model.safetensors.index.json").read_text())["weight_map"]
+    _, query_rows = slice_loop(config["text_config"], layers)
     files, names = defaultdict(dict), defaultdict(dict)
     for name, src in weight_map.items():
         new_name = rename(name, layer_map)
-        if new_name is None:
+        if new_name is None or (name in _LOOP_QUERY_NAMES and query_rows is None):
             continue
         out_file = output_file(new_name)
         files[out_file][name] = src
@@ -236,6 +276,7 @@ def main():
             args.verify,
             args.num_experts,
             i % max(num_gpus, 1),
+            query_rows,
         )
         for i, (out_name, sources) in enumerate(sorted(files.items()))
     ]

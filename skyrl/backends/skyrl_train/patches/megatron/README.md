@@ -38,12 +38,14 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
 | `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
 | `patches/megatron/inkling2/test_quant.py` (CPU) | `inkling2/quant.py` NVFP4 / MXFP8 dequantization vs the formats' element formulas |
-| `gpu_ci/patches/megatron/inkling2/test_model_vs_reference.py` | `inkling2/modules.py` + `provider.py` vs `reference.py` (dense and FlexAttention), backward |
+| `gpu_ci/patches/megatron/inkling2/test_model_vs_reference.py` | `inkling2/modules.py` + `provider.py` vs `reference.py` (dense and FlexAttention), backward; looped model, per-layer-run recompute |
+| `gpu_ci/patches/megatron/inkling2/test_loop_replay.py` | looped model's routing replay (R3): per-run slices, also in recompute reruns |
 | `gpu_ci/patches/megatron/inkling2/test_bridge.py` | `inkling2/bridge.py` import parity and exact export on a synthetic BF16 / NVFP4 / MXFP8 checkpoint |
 | `gpu_ci/patches/megatron/inkling2/test_lora.py` | LoRA targets on every Inkling2 linear, merged export vs `reference.py`, unmerged adapter export vs the merge |
 | `gpu_ci/patches/megatron/inkling2/test_worker.py` | Megatron policy worker forward / train step, EP and TP (sequence-parallel convolutions), packed and unpacked |
 | `gpu_ci/patches/megatron/inkling2/test_fused_elementwise.py` | `inkling2/modules.py` compiled elementwise pieces (`modules.fused`) vs their eager versions, values and gradients |
-| `gpu_ci/patches/vllm/test_inkling2_mxfp8_experts.py` (B200) | vLLM plugin's MXFP8 rollout experts: BF16 load bitwise equal to the branch's layout, forward, routed-experts capture (R3) |
+| `gpu_ci/patches/vllm/test_inkling2_mxfp8_experts.py` (B200) | vLLM plugin's MXFP8 rollout experts: BF16 load bitwise equal to the branch's layout, forward, routed-experts capture (R3); shapes the build's kernels assume away (`_fit_mxfp8_kernels_to_shapes`: unrolled GEMMs on unaligned K, expert combine and few-row SwiGLU quantize blocks) |
+| `gpu_ci/patches/vllm/test_inkling2_loop.py` (B200) | vLLM plugin on looped checkpoints (`Inkling2LoopModel`): prompt logprobs vs `reference.py` at TP 1 / 2 (and against loop bugs), R3 capture per layer run in execution order, in-place reload with CUDA graphs |
 | `patches/megatron/test_dist_optim_te_load_state_dict.py` (CPU) | `patch_dist_optim_te_load_state_dict.py` |
 | `patches/megatron/test_dist_ckpt_exchange_wait.py` (CPU) | `patch_dist_ckpt_exchange_wait.py` |
 
@@ -220,6 +222,14 @@ Megatron-Core, Megatron-Bridge or Transformers support: `inkling2/` is the whole
   `configuration.py` (registers the HF config with `AutoConfig`) and `reference.py` (plain-PyTorch
   forward used as the test oracle; transcribed from the SGLang fork shipped with the checkpoint).
   `examples/train/megatron/dequantize_inkling2.py` writes BF16 checkpoints and slices.
+- **Looped checkpoints** (`model_type: inkling2_loop`, registered with Transformers by `configuration.py` and with
+  vLLM builds that lack it by `patches/vllm/inkling2/loop_config.py`; `loop_config`: core layers run `num_passes` times with shared weights, cross-pass
+  messages mixed in by low-rank controllers): `Inkling2LoopBlockMixin` (mixed into the decoder `TransformerBlock`
+  by the provider) replaces `TransformerBlock.forward` -- it runs prelude / core x passes / coda over the packed
+  attn-res state and checkpoints layer runs (not physical layers) under full recompute. Megatron-core changes to
+  `TransformerBlock.forward` (new contexts, offloading, CUDA graphs) do not reach looped models until mirrored
+  there. Routing replay: one routing per layer run, replayed from the run's closure (`modules.replay_target`), not
+  through megatron-core's per-call recompute FIFO.
 - **Landed?** Megatron-Bridge ships an Inkling2 bridge, or Megatron-Core an attn-res
   (block attention residual) transformer layer.
 - **Remove:** switch `model_bridges.py` to the upstream bridge and delete `inkling2/` and its

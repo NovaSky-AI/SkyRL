@@ -7,7 +7,8 @@ output. Every attention projection and expert linear must carry an adapter, and 
 exported with the adapters merged (what full-weight sync sends to an inference engine), loaded
 into the reference model, must reproduce the LoRA model's logprobs. The adapter exported unmerged
 (what ``merge_lora=false`` syncs) must reproduce the merge, in the HF layout (``w13`` rows
-interleaved).
+interleaved). The looped variant checks the same on the looped checkpoint (LoRA on the shared layers applies in
+every pass; the loop's controllers are not LoRA targets and are exported as they are).
 
 Run with:
 uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/inkling2/test_lora.py
@@ -24,7 +25,7 @@ import torch
 
 from tests.backends.skyrl_train.gpu.gpu_ci.patches.megatron.inkling2.synthetic_checkpoint import (
     UNPADDED_V,
-    L,
+    shape,
     write_checkpoint,
 )
 
@@ -34,7 +35,7 @@ STANDARD_TARGETS = ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2", "in
 
 
 @ray.remote(num_gpus=1)
-def _lora_merge_parity():
+def _lora_merge_parity(looped: bool = False):
     import torch.distributed as dist
     from megatron.bridge import AutoBridge
     from megatron.bridge.peft.lora import LoRA
@@ -58,7 +59,8 @@ def _lora_merge_parity():
 
     stats = {}
     with tempfile.TemporaryDirectory() as path, tempfile.TemporaryDirectory() as merged_path:
-        write_checkpoint(path)
+        write_checkpoint(path, looped=looped)
+        L = shape(looped)[0]
         bridge = AutoBridge.from_hf_pretrained(path, trust_remote_code=True)
         provider = bridge.to_megatron_provider(load_weights=True)
         provider.sequence_parallel = False
@@ -141,14 +143,18 @@ def _lora_merge_parity():
     return stats
 
 
-def test_lora_targets_and_merged_export(ray_init_fixture):
-    stats = ray.get(_lora_merge_parity.remote())
+@pytest.mark.parametrize("looped", [False, True], ids=["unlooped", "looped"])
+def test_lora_targets_and_merged_export(ray_init_fixture, looped):
+    stats = ray.get(_lora_merge_parity.remote(looped))
     print(stats)
+    L = shape(looped)[0]
     assert stats["missing_adapters"] == []
     # 7 attention projections + 2 expert linears per layer; relative error of the BF16 merge.
     assert stats["num_adapters"] == 9 * L
     assert stats["adapter_vs_merge"] < 2e-2
     # The adapters move the logprobs well past the parity tolerance, so the merge is checked.
     assert stats["lora_effect_mean"] > 0.05
-    assert stats["token_mean"] < 0.006
-    assert stats["token_max"] < 0.025
+    # As in test_bridge.py: FP32 params against the BF16-rounding reference drift further over the loop's 24 runs.
+    # (0.024 measured; the adapters move the looped model by 0.30 and a single-site loop bug by >= 0.07.)
+    assert stats["token_mean"] < (0.04 if looped else 0.006)
+    assert stats["token_max"] < (0.15 if looped else 0.025)

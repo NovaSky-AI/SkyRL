@@ -32,6 +32,10 @@ SkyRL uses Megatron-Bridge for HF-to-Megatron model conversion. Installed from g
   (`pyproject.toml`). LoRA syncs merged (`merge_lora=true`) or as an adapter
   (`merge_lora=false`, served by the build's `vllm/models/inkling2/lora.py`; use
   `normalize_moe_lora=true`, as the full-rank 384-expert adapter is ~19 GiB per vLLM GPU).
+  Looped checkpoints (`model_type: inkling2_loop`, `text_config.loop_config` incl. `is_varloop`; training always
+  runs the checkpoint's `num_passes`) run a block-aligned core of layers several times with shared
+  weights: `Inkling2LoopBlockMixin` drives the passes, `Inkling2LoopController` mixes the cross-pass messages,
+  and R3 carries one routing per layer run in execution order (`configuration.layer_run_order`).
 
 ## Optimizer state on disk
 

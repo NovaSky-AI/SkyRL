@@ -15,6 +15,12 @@ Per layer (``Inkling2TransformerLayer``)::
     m     = mlp_sconv(MoE(mlp_norm(attn_res(state + a, mlp_query))))
     state = (blocks + [partial], a + m) at a block boundary, else (blocks, partial + a + m)
 
+Looped checkpoints (``loop_num_passes > 1``) run the core layers ``[loop_core_start, loop_core_end)`` several times
+with shared weights: :class:`Inkling2LoopBlockMixin` (mixed into the decoder ``TransformerBlock``) runs the prelude
+once, restarts the attn-res state from the prelude's at every pass, and from the second pass on hands each core layer
+the previous pass's block outputs (the "bank", the state's chunks after the prelude's). The layer mixes a message read
+from the bank into each sub-layer input with a low-rank controller (:class:`Inkling2LoopController`).
+
 The math follows the SGLang fork's ``sglang/tml`` model; ``reference.py`` in this package is the
 plain-PyTorch transcription it is tested against.
 
@@ -113,6 +119,24 @@ def is_local_layer(config: TransformerConfig, layer_idx: int) -> bool:
 
 def is_block_boundary(config: TransformerConfig, layer_idx: int) -> bool:
     return layer_idx % config.n_layers_per_attn_res_block == 0
+
+
+def loop_core(config: TransformerConfig) -> range:
+    """The looped layers (empty for an unlooped model)."""
+    if getattr(config, "loop_num_passes", 1) <= 1:
+        return range(0)
+    return range(config.loop_core_start, config.loop_core_end)
+
+
+def layer_runs(config: TransformerConfig) -> List[Tuple[int, int]]:
+    """``(layer_idx, pass_idx)`` of every layer run of a forward pass, in execution order."""
+    core = loop_core(config)
+    if not core:
+        return [(i, 0) for i in range(config.num_layers)]
+    runs = [(i, 0) for i in range(core.start)]
+    for p in range(config.loop_num_passes):
+        runs += [(i, p) for i in core]
+    return runs + [(i, 0) for i in range(core.stop, config.num_layers)]
 
 
 # --------------------------------------------------------------------------------------------
@@ -668,10 +692,16 @@ class Inkling2Attention(TPShardedParamsCheckpointMixin, MegatronModule):
         the column-parallel projections gather the full sequence."""
         cfg = self.config
         s, b = layout.s, layout.b
-        if self.is_local:  # one input
+        if self.is_local and xk is xq and xv is xq:  # one input
             q, r, gate, sink, k, v = self._project(
                 xq, [self.linear_q, self.linear_r, self.linear_gate, self.linear_sink, self.linear_k, self.linear_v]
             )
+            k = self.k_sconv(k, layout.positions)
+            v = self.v_sconv(v, layout.positions)
+        elif self.is_local:  # looped passes: separate query / key / value inputs, static convolutions
+            q, r, gate, sink = self._project(xq, [self.linear_q, self.linear_r, self.linear_gate, self.linear_sink])
+            (k,) = self._project(xk, [self.linear_k])
+            (v,) = self._project(xv, [self.linear_v])
             k = self.k_sconv(k, layout.positions)
             v = self.v_sconv(v, layout.positions)
         else:
@@ -757,6 +787,51 @@ def split_state(hidden_states: Tensor, hidden_size: int) -> Tuple[List[Tensor], 
     return list(chunks[:-1]), chunks[-1]
 
 
+# Order of a core layer's controllers and of its rows in the loop-query tensor the block passes it.
+LOOP_MODULES = ("attn", "k", "v", "mlp")
+
+
+class Inkling2LoopController(MegatronModule):
+    """Mixes a cross-pass message into a sub-layer input (``tml/kernels/loop.py``):
+    ``(1 - tanh(f)) * dest + tanh(g) * msg`` with ``[g, f] = h @ [gain, forget]^T`` (FP32 output) and
+    ``h = [rmsnorm(dest), rmsnorm(msg)] @ down^T`` (no gain, BF16). Rank ``gate_rank`` does not split over TP: the
+    weights are replicated, and their gradients summed over the sequence-parallel slices."""
+
+    def __init__(self, config: TransformerConfig):
+        super().__init__(config=config)
+        H, r = config.hidden_size, config.loop_gate_rank
+        device, dtype = torch.cuda.current_device(), config.params_dtype
+        self.down_weight = nn.Parameter(torch.empty(r, 2 * H, dtype=dtype, device=device))
+        self.gain_weight = nn.Parameter(torch.empty(H, r, dtype=dtype, device=device))
+        self.forget_weight = nn.Parameter(torch.empty(H, r, dtype=dtype, device=device))
+        for p in (self.down_weight, self.gain_weight, self.forget_weight):
+            config.init_method(p)
+            if config.sequence_parallel:
+                mark_sequence_parallel(p)
+
+    def forward(self, dest: Tensor, message: Tensor) -> Tensor:
+        """``dest``, ``message``: ``[s, b, H]`` FP32. Returns FP32."""
+        normalized = pick(self.config, loop_controller_norm)(dest, message, self.down_weight.dtype)
+        hidden = F.linear(normalized, self.down_weight)  # activation dtype (BF16)
+        gates = F.linear(hidden.float(), torch.cat([self.gain_weight, self.forget_weight]).float())
+        return pick(self.config, loop_controller_mix)(dest, message, gates)
+
+
+@fused
+def loop_controller_norm(dest: Tensor, message: Tensor, dtype: torch.dtype) -> Tensor:
+    """``[rmsnorm(dest), rmsnorm(message)]`` (each over the hidden dim, eps 1e-6, no gain) in ``dtype``, ``[..., 2H]``."""
+    x = torch.stack([dest.float(), message.float()], dim=-2)
+    y = x * torch.rsqrt(x.square().mean(-1, keepdim=True) + 1e-6)
+    return y.to(dtype).flatten(-2)
+
+
+@fused
+def loop_controller_mix(dest: Tensor, message: Tensor, gates: Tensor) -> Tensor:
+    """``(1 - tanh(forget)) * dest + tanh(gain) * message`` in FP32; ``gates`` is ``[..., 2H]`` (gain, forget)."""
+    gain, forget = gates.float().chunk(2, dim=-1)
+    return (1.0 - torch.tanh(forget)) * dest.float() + torch.tanh(gain) * message.float()
+
+
 class Inkling2TransformerLayer(TransformerLayer):
     """One Inkling2 decoder layer over the packed attn-res state ``[s, b, (n + 1) * hidden]``.
 
@@ -782,6 +857,8 @@ class Inkling2TransformerLayer(TransformerLayer):
         self.mlp_query = nn.Parameter(torch.zeros(H, dtype=torch.float32, device=device))
         self.attn_sconv = Inkling2ShortConv(config, H, self.tp_group, "sequence")
         self.mlp_sconv = Inkling2ShortConv(config, H, self.tp_group, "sequence")
+        if self.layer_idx in loop_core(config):
+            self.controllers = nn.ModuleDict({m: Inkling2LoopController(config) for m in LOOP_MODULES})
         for p in (getattr(self, "attn_query", None), self.mlp_query):
             if p is not None:
                 # Float16Module would otherwise cast these to the activation dtype.
@@ -795,8 +872,13 @@ class Inkling2TransformerLayer(TransformerLayer):
         attention_mask: Optional[Tensor] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
         padding_mask: Optional[Tensor] = None,
+        loop_bank: Optional[Tensor] = None,
+        loop_queries: Optional[Tensor] = None,
         **kwargs,
     ):
+        """``loop_bank`` (core layers after the first pass): the previous pass's block outputs ``[s, b, n * H]``, and
+        ``loop_queries`` ``[4, H]`` (FP32) the attn-res queries reading this layer's messages from it, in
+        :data:`LOOP_MODULES` order."""
         cfg = self.config
         H, normalize = cfg.hidden_size, cfg.attn_res_normalize_values
         layout = get_layout(hidden_states, packed_seq_params, cfg, self.tp_group)
@@ -807,7 +889,14 @@ class Inkling2TransformerLayer(TransformerLayer):
             streams = (partial,) * n_streams
         else:
             streams = pick(cfg, block_attn_res)([*blocks, partial], None, self.attn_query, normalize)
-        if self.is_local:
+        messages = None
+        if loop_bank is not None:
+            messages = pick(cfg, block_attn_res)(loop_bank.split(H, dim=-1), None, loop_queries, True)
+            streams = tuple(streams) * 3 if self.is_local else tuple(streams)
+            streams = tuple(self.controllers[m](x, messages[j]) for j, (m, x) in enumerate(zip(LOOP_MODULES, streams)))
+        if self.is_local and messages is not None:  # three distinct inputs, one norm
+            xq, xk, xv = (self.input_layernorm(x) for x in streams)
+        elif self.is_local:
             xq = xk = xv = self.input_layernorm(streams[0])
         else:
             xq = self.input_layernorm(streams[0])
@@ -820,6 +909,8 @@ class Inkling2TransformerLayer(TransformerLayer):
             mix = attn_res([*blocks, partial, attn], None, self.mlp_query, normalize)[0]
         else:
             mix = attn_res([*blocks, partial], attn, self.mlp_query, normalize)[0]
+        if messages is not None:
+            mix = self.controllers["mlp"](mix, messages[3])
         mlp_in = self.pre_mlp_layernorm(mix)
         mlp_in, moe_padding_mask, _, unflatten = self._maybe_unflatten_for_moe(
             mlp_in, padding_mask, None, packed_seq_params
@@ -844,6 +935,224 @@ def next_attn_res_state(blocks: List[Tensor], partial: Tensor, attn: Tensor, mlp
     else:
         partial = (partial.float() + attn.float() + mlp.float()).to(attn.dtype)
     return torch.cat([*blocks, partial], dim=-1)
+
+
+class Inkling2LoopQueries(MegatronModule):
+    """The cross-pass message queries (FP32): ``middle_cycle_cross_pass_queries [2 n_core, H]`` (rows ``2l`` / ``2l + 1``:
+    core layer ``l``'s attention / MoE input) and ``middle_cycle_cross_pass_kv_queries`` (its key / value inputs)."""
+
+    def __init__(self, config: TransformerConfig):
+        super().__init__(config=config)
+        shape = (2 * len(loop_core(config)), config.hidden_size)
+        device = torch.cuda.current_device()
+        self.middle_cycle_cross_pass_queries = nn.Parameter(torch.zeros(*shape, dtype=torch.float32, device=device))
+        self.middle_cycle_cross_pass_kv_queries = nn.Parameter(torch.zeros(*shape, dtype=torch.float32, device=device))
+        for p in (self.middle_cycle_cross_pass_queries, self.middle_cycle_cross_pass_kv_queries):
+            p.keep_in_fp32 = True  # Float16Module would otherwise cast them to the activation dtype.
+            if config.sequence_parallel:
+                mark_sequence_parallel(p)
+
+
+class Inkling2LoopBlockMixin:
+    """The decoder ``TransformerBlock`` of a looped model (mixed into the instance by the provider).
+
+    Runs the prelude layers once, the core ``loop_num_passes`` times and the coda once over the packed attn-res state.
+    Every pass starts from the state after the prelude; from the second pass on, each core layer also gets the bank
+    (the previous pass's final state minus the prelude's chunks) and its four rows of the cross-pass queries:
+    (:class:`Inkling2LoopQueries`).
+
+    Activation recompute (``recompute_granularity="full"``) checkpoints layer runs, not physical layers:
+    ``uniform`` groups ``recompute_num_layers`` consecutive runs of one segment (prelude, a pass, coda), ``block``
+    checkpoints the first ``recompute_num_layers`` runs one by one.
+    """
+
+    def init_loop(self) -> None:
+        # A child module: TransformerBlock.sharded_state_dict saves its layers and its children, not its own params.
+        self.loop_queries = Inkling2LoopQueries(self.config)
+
+    def _loop_queries(self, layer_idx: int) -> Tensor:
+        """``[4, H]``: the attn, k, v, mlp message queries of core layer ``layer_idx`` (:data:`LOOP_MODULES`)."""
+        l = layer_idx - self.config.loop_core_start
+        q = self.loop_queries.middle_cycle_cross_pass_queries
+        kv = self.loop_queries.middle_cycle_cross_pass_kv_queries
+        return torch.stack([q[2 * l], kv[2 * l], kv[2 * l + 1], q[2 * l + 1]])
+
+    def forward(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Optional[Tensor],
+        packed_seq_params: Optional[PackedSeqParams] = None,
+        padding_mask: Optional[Tensor] = None,
+        inference_context=None,
+        extract_layer_indices=None,
+        **kwargs,
+    ):
+        from contextlib import nullcontext
+
+        from megatron.core import tensor_parallel
+        from megatron.core.fp8_utils import get_fp8_context
+        from megatron.core.transformer.utils import precision_aware_checkpoint
+        from megatron.core.utils import WrappedTensor
+
+        cfg = self.config
+        if inference_context is not None or extract_layer_indices:
+            raise NotImplementedError("Looped Inkling2 supports neither inference contexts nor layer extraction.")
+        if cfg.fp4 or (cfg.fp8 and cfg.fp8_recipe == "delayed"):
+            raise NotImplementedError("Looped Inkling2 supports FP8 only with per-layer recipes (not delayed / FP4).")
+        if isinstance(hidden_states, WrappedTensor):
+            hidden_states = hidden_states.unwrap()
+        if not self.pre_process:
+            hidden_states = self.input_tensor
+        hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
+
+        core = loop_core(cfg)
+        H = cfg.hidden_size
+        checkpointing = cfg.recompute_granularity == "full" and self.training
+
+        def run(layer_idx: int, pass_idx: int):
+            layer = self.layers[layer_idx]
+            looped = pass_idx > 0
+            replay = replay_target(layer, pass_idx)
+
+            def fn(state, bank, queries):
+                quant = get_fp8_context(cfg, layer.layer_number - 1) if cfg.fp8 else nullcontext()
+                with quant, replaying(layer, replay):
+                    out, _ = layer(
+                        hidden_states=state,
+                        attention_mask=attention_mask,
+                        packed_seq_params=packed_seq_params,
+                        padding_mask=padding_mask,
+                        loop_bank=bank if looped else None,
+                        loop_queries=queries if looped else None,
+                    )
+                return out
+
+            return fn
+
+        # Segments: (runs, bank source). The bank of pass p >= 1 is the state after pass p - 1 minus the prelude's chunks.
+        def segment(runs, state, bank):
+            if not runs:
+                return state
+            fns = [(run(i, p), self._loop_queries(i) if p else None) for i, p in runs]
+            if not checkpointing:
+                for fn, q in fns:
+                    state = fn(state, bank, q)
+                return state
+            n = cfg.recompute_num_layers or 1
+            if cfg.recompute_method == "block":
+                groups = [[f] for f in fns]
+                use_ckpt = [segment.done + k < n for k in range(len(fns))]
+            else:
+                groups = [fns[k : k + n] for k in range(0, len(fns), n)]
+                use_ckpt = [True] * len(groups)
+            segment.done += len(fns)
+            for group, ckpt in zip(groups, use_ckpt):
+
+                def chunk(state, bank, *queries, group=group):
+                    for (fn, _), q in zip(group, queries):
+                        state = fn(state, bank, q)
+                    return state
+
+                qs = [q for _, q in group]
+                if ckpt:
+                    # Checkpointed functions take tensors only; an absent bank / query is an empty placeholder.
+                    empty = state.new_empty(0)
+                    args = [bank if bank is not None else empty, *[q if q is not None else empty for q in qs]]
+
+                    def ckpt_fn(state, bank, *queries, chunk=chunk):
+                        bank = bank if bank.numel() else None
+                        return chunk(state, bank, *[q if q.numel() else None for q in queries])
+
+                    state = precision_aware_checkpoint(
+                        ckpt_fn,
+                        cfg,
+                        self.pg_collection.tp,
+                        state,
+                        *args,
+                        distribute_saved_activations=cfg.distribute_saved_activations,
+                    )
+                else:
+                    state = chunk(state, bank, *qs)
+            return state
+
+        segment.done = 0
+        drop_replay_backward_entries(self.layers)
+        rng = tensor_parallel.get_cuda_rng_tracker().fork() if cfg.sequence_parallel else nullcontext()
+        with rng:
+            state = segment([(i, 0) for i in range(core.start)], hidden_states, None)
+            prelude, prelude_width = state, state.shape[-1]
+            bank = None
+            for p in range(cfg.loop_num_passes):
+                if p:
+                    bank = state[..., prelude_width:]
+                    state = prelude
+                state = segment([(i, p) for i in core], state, bank)
+            state = segment([(i, 0) for i in range(core.stop, len(self.layers))], state, None)
+
+        if self.final_layernorm is not None:
+            state = self.final_layernorm(state)
+            state = make_viewless_tensor(inp=state, requires_grad=True, keep_graph=True)
+        return state
+
+
+def _router_replay(layer):
+    return getattr(getattr(layer.mlp, "router", None), "router_replay", None)
+
+
+def replay_target(layer, pass_idx: int) -> Optional[Tensor]:
+    """Routing replay (R3) of a looped model: the expert indices ``[tokens, topk]`` this layer run replays, or None.
+
+    ``replay_utils.setup_per_microbatch_replay_forward`` sets each router's target to ``[passes, tokens, topk]`` (one
+    slice per run of the layer). Called while the forward builds the run, so the slice is fixed in the run's closure:
+    an activation-recompute rerun replays the same slice whatever order backward reruns the layer runs in. (Megatron's
+    own recompute replay pops one entry per router call from a FIFO, one entry per micro-batch and layer.)"""
+    from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+    replay = _router_replay(layer)
+    if replay is None or replay.router_replay_action != RouterReplayAction.REPLAY_FORWARD:
+        return None
+    target = replay.target_topk_idx
+    if target is None:
+        return None
+    if target.ndim != 3:
+        raise ValueError(f"Looped routing replay expects [passes, tokens, topk] targets, got {tuple(target.shape)}")
+    return target[pass_idx]
+
+
+def drop_replay_backward_entries(layers) -> None:
+    """The micro-batch's entry ``set_target_indices`` queued for Megatron's recompute FIFO: the loop's recomputes
+    replay their own slices (:func:`replay_target`), so nothing would pop it."""
+    from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+    for layer in layers:
+        replay = _router_replay(layer)
+        if replay is None or replay.router_replay_action != RouterReplayAction.REPLAY_FORWARD:
+            continue
+        backward = replay.replay_backward_list
+        if backward and backward[-1] is replay.target_topk_idx:
+            backward.pop()
+
+
+class replaying:
+    """Route ``layer``'s MoE through ``indices`` (``[tokens, topk]``) for one call, if set."""
+
+    def __init__(self, layer, indices: Optional[Tensor]):
+        self.replay = _router_replay(layer) if indices is not None else None
+        self.indices = indices
+
+    def __enter__(self):
+        if self.replay is not None:
+            from megatron.core.transformer.moe.router_replay import RouterReplayAction
+
+            self.saved = self.replay.target_topk_idx, self.replay.router_replay_action
+            self.replay.target_topk_idx = self.indices
+            self.replay.router_replay_action = RouterReplayAction.REPLAY_FORWARD
+        return self
+
+    def __exit__(self, *exc):
+        if self.replay is not None:
+            self.replay.target_topk_idx, self.replay.router_replay_action = self.saved
+        return False
 
 
 class Inkling2FinalNorm(MegatronModule):
@@ -909,6 +1218,9 @@ __all__ = [
     "Inkling2AttentionSubmodules",
     "Inkling2EmbeddingNormMixin",
     "Inkling2FinalNorm",
+    "Inkling2LoopBlockMixin",
+    "Inkling2LoopController",
+    "Inkling2LoopQueries",
     "Inkling2OutputLayerMixin",
     "Inkling2RMSNorm",
     "Inkling2ShortConv",

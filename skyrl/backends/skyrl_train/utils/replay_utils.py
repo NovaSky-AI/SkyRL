@@ -83,6 +83,28 @@ def _split_replay_indices(rollout_expert_indices: torch.Tensor) -> list[torch.Te
     return list(per_layer.flatten(1, 2).unbind(0))
 
 
+def _looped_layer_runs(model_config):
+    """``(layer_idx, pass_idx)`` per layer run of a looped model (some layers run several times with shared weights,
+    e.g. a looped Inkling2), in execution order, or None. The inference engine reports one routing per layer run in
+    this order."""
+    if getattr(model_config, "loop_num_passes", 1) <= 1:
+        return None
+    from skyrl.backends.skyrl_train.patches.megatron.inkling2.modules import (
+        layer_runs,
+    )
+
+    return layer_runs(model_config)
+
+
+def _group_runs_by_layer(per_run: list[torch.Tensor], runs) -> list[torch.Tensor]:
+    """Per-run indices ``[tokens, topk]`` -> one ``[passes, tokens, topk]`` tensor per layer (pass order); the model
+    replays pass ``p``'s slice in that layer's ``p``-th run."""
+    by_layer: dict[int, list] = {}
+    for (layer, pass_idx), indices in zip(runs, per_run, strict=True):
+        by_layer.setdefault(layer, []).append((pass_idx, indices))
+    return [torch.stack([t for _, t in sorted(by_layer[layer], key=lambda x: x[0])]) for layer in sorted(by_layer)]
+
+
 def scatter_router_padding_mask_for_model(
     router_padding_mask: torch.Tensor | None,
     model,
@@ -235,11 +257,21 @@ def setup_per_microbatch_replay_forward(
 
     num_captured_layers, topk = rollout_expert_indices.row_shape
     instances = RouterReplay.global_router_replay_instances
-    local_layer_indices = _get_local_router_layer_indices(
-        model_config,
-        num_captured_layers,
-        instances,
-    )
+    looped_runs = _looped_layer_runs(model_config)
+    if looped_runs is not None:
+        # One captured routing per layer run (no pipeline parallelism: every layer is local).
+        if num_captured_layers != len(looped_runs) or len({i for i, _ in looped_runs}) != len(instances):
+            raise ValueError(
+                f"Looped model: {num_captured_layers} captured routings for {len(looped_runs)} layer runs "
+                f"and {len(instances)} routers"
+            )
+        local_layer_indices = list(range(num_captured_layers))
+    else:
+        local_layer_indices = _get_local_router_layer_indices(
+            model_config,
+            num_captured_layers,
+            instances,
+        )
     layer_index = torch.tensor(local_layer_indices, dtype=torch.long, device=rollout_expert_indices.device)
     local_rollout_expert_indices = PackedTensor(
         rollout_expert_indices.values.index_select(1, layer_index),
@@ -269,7 +301,10 @@ def setup_per_microbatch_replay_forward(
         aligned_rollout_expert_indices = aligned_rollout_expert_indices[
             :, tp_rank * chunk_size : (tp_rank + 1) * chunk_size, :, :
         ]
-    RouterReplay.set_replay_data(_split_replay_indices(aligned_rollout_expert_indices))
+    per_layer = _split_replay_indices(aligned_rollout_expert_indices)
+    if looped_runs is not None:
+        per_layer = _group_runs_by_layer(per_layer, looped_runs)
+    RouterReplay.set_replay_data(per_layer)
     RouterReplay.set_global_router_replay_action(RouterReplayAction.REPLAY_FORWARD)
 
     model_router_padding_mask = scatter_router_padding_mask_for_model(

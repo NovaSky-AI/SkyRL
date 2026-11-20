@@ -3,12 +3,15 @@
 The checkpoint (``synthetic_checkpoint.py``) has one layer group per expert storage format of the
 release (BF16, NVFP4, MXFP8). Loading it through
 ``AutoBridge`` must give a model whose logprobs match the reference model loaded from the same
-directory, and exporting must reproduce every tensor (expert weights dequantized to BF16).
+directory, and exporting must reproduce every tensor (expert weights dequantized to BF16). The looped variant adds the loop's
+controllers and cross-pass queries; with its ``loop_config`` deleted from the config the load must fail (the
+checkpoint has tensors no mapping reads) instead of silently building an unlooped model.
 
 Run with:
 uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/inkling2/test_bridge.py
 """
 
+import json
 import os
 import tempfile
 
@@ -25,7 +28,7 @@ pytestmark = pytest.mark.megatron
 
 
 @ray.remote(num_gpus=1)
-def _bridge_roundtrip():
+def _bridge_roundtrip(looped: bool = False, drop_loop_config: bool = False):
     import torch.distributed as dist
     from megatron.bridge import AutoBridge
     from megatron.core import parallel_state as mpu
@@ -50,15 +53,25 @@ def _bridge_roundtrip():
 
     stats = {}
     with tempfile.TemporaryDirectory() as path:
-        write_checkpoint(path)
+        write_checkpoint(path, looped=looped)
+        if drop_loop_config:
+            config_path = os.path.join(path, "config.json")
+            config = json.load(open(config_path))
+            del config["text_config"]["loop_config"]
+            config["model_type"] = "inkling2"  # a plain checkpoint, with the loop tensors left in
+            json.dump(config, open(config_path, "w"))
         bridge = AutoBridge.from_hf_pretrained(path, trust_remote_code=True)
-        provider = bridge.to_megatron_provider(load_weights=True)
-        provider.sequence_parallel = False
-        provider.gradient_accumulation_fusion = False
-        provider.inkling2_attention_backend = "dense"
-        provider.attention_backend = "flash"
-        provider.finalize()
-        model = provider.provide_distributed_model(wrap_with_ddp=False)[0].eval()
+        try:
+            provider = bridge.to_megatron_provider(load_weights=True)
+            provider.sequence_parallel = False
+            provider.gradient_accumulation_fusion = False
+            provider.inkling2_attention_backend = "dense"
+            provider.attention_backend = "flash"
+            provider.finalize()
+            model = provider.provide_distributed_model(wrap_with_ddp=False)[0].eval()
+        except ValueError as e:
+            dist.destroy_process_group()
+            return {"load_error": str(e)}
         ref = load_reference(path, [torch.device("cuda", 0)])
 
         torch.manual_seed(0)
@@ -88,11 +101,20 @@ def _bridge_roundtrip():
     return stats
 
 
-def test_bridge_import_export(ray_init_fixture):
-    stats = ray.get(_bridge_roundtrip.remote())
+@pytest.mark.parametrize("looped", [False, True], ids=["unlooped", "looped"])
+def test_bridge_import_export(ray_init_fixture, looped):
+    stats = ray.get(_bridge_roundtrip.remote(looped))
     print(stats)
-    # A single-site bug (see test_model_vs_reference.py) raises the mean error to >= 0.013.
-    assert stats["token_mean"] < 0.006
-    assert stats["token_max"] < 0.025
+    assert "load_error" not in stats, stats
+    # A single-site bug (see test_model_vs_reference.py) raises the mean error to >= 0.013 (>= 0.07 in the loop). The
+    # bridge's model keeps FP32 params here against the BF16-rounding reference: 24 layer runs drift to ~0.011.
+    assert stats["token_mean"] < (0.02 if looped else 0.006)
+    assert stats["token_max"] < (0.08 if looped else 0.025)
     assert stats["missing"] == [] and stats["unexpected"] == []
     assert stats["mismatched"] == []
+
+
+def test_bridge_rejects_unmapped_tensors(ray_init_fixture):
+    stats = ray.get(_bridge_roundtrip.remote(looped=True, drop_loop_config=True))
+    print(stats)
+    assert "no Megatron counterpart" in stats.get("load_error", ""), stats

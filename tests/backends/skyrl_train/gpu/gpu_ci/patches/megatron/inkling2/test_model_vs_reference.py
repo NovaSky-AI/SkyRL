@@ -10,6 +10,13 @@ wrong. The thresholds sit a factor >= 3 below the error of any of these single-s
 flipped relative bias, a swapped q/k/v attn-res query, an off-by-one convolution lag, a wrong
 block boundary.
 
+The looped variant (12 layers, core = layers 3-8 run 3 times, rank-8 controllers scaled so that messages move the
+output) checks the loop the same way, and that full activation recompute (per layer run) gives the gradients of the
+plain backward up to the gradients' sensitivity to rounding (:func:`_rounding_sensitivity`). Its 24 layer runs accumulate more rounding: its thresholds
+are higher, and still a factor >= 7 below the error of a single-site loop bug in the reference (swapped k / v message
+queries 0.072, swapped attn / mlp queries 0.092, a bank keeping the prelude's partial sum 0.21, a missing MoE-input
+message 0.18, swapped gain / forget 0.24, two passes instead of three 0.19; clean 0.002, dense backend).
+
 Run with:
 uv run --isolated --extra dev --extra megatron pytest -s tests/backends/skyrl_train/gpu/gpu_ci/patches/megatron/inkling2/test_model_vs_reference.py
 """
@@ -22,9 +29,15 @@ import torch
 
 pytestmark = pytest.mark.megatron
 
-L, H, HEADS, KV, HEAD_DIM, E, FFN, V, UNPADDED_V = 7, 256, 4, 2, 64, 8, 128, 512, 500
-LOCAL = [i for i in range(L) if i % 3 != 2]
+H, HEADS, KV, HEAD_DIM, E, FFN, V, UNPADDED_V = 256, 4, 2, 64, 8, 128, 512, 500
 COMMON = dict(sliding_window_size=16, rel_extent=16, d_rel=8, log_scaling_n_floor=20, n_layers_per_attn_res_block=3)
+LOOP = dict(core_start=3, core_end=9, num_passes=3, gate_rank=8, is_varloop=False)
+
+
+def _shape(looped: bool):
+    """``(num_layers, local_layer_ids, loop_config)``."""
+    L = 12 if looped else 7
+    return L, [i for i in range(L) if i % 3 != 2], (LOOP if looped else None)
 
 
 def _init_single_rank_megatron():
@@ -40,13 +53,17 @@ def _init_single_rank_megatron():
     tensor_parallel.model_parallel_cuda_manual_seed(0)
 
 
-def _build_megatron(backend: str):
+def _build_megatron(backend: str, looped: bool = False, topk: int = E, **overrides):
     from megatron.core.process_groups_config import ProcessGroupCollection
 
     from skyrl.backends.skyrl_train.patches.megatron.inkling2.provider import (
         Inkling2ModelProvider,
     )
 
+    L, LOCAL, loop = _shape(looped)
+    loop_kwargs = {}
+    if loop:
+        loop_kwargs = {f"loop_{k}": v for k, v in loop.items() if k != "is_varloop"}
     provider = Inkling2ModelProvider(
         num_layers=L,
         hidden_size=H,
@@ -58,7 +75,7 @@ def _build_megatron(backend: str):
         unpadded_vocab_size=UNPADDED_V,
         seq_length=128,
         num_moe_experts=E,
-        moe_router_topk=E,
+        moe_router_topk=topk,
         moe_ffn_hidden_size=FFN,
         local_layer_ids=LOCAL,
         inkling2_attention_backend=backend,
@@ -70,13 +87,20 @@ def _build_megatron(backend: str):
         sequence_parallel=False,
         gradient_accumulation_fusion=False,
         **COMMON,
+        **loop_kwargs,
+        **overrides,
     )
     provider.finalize()
     provider._pg_collection = ProcessGroupCollection.use_mpu_process_groups()
     model = provider.provide().cuda()
     with torch.no_grad():
         for name, p in model.named_parameters():
-            if "norm" in name:
+            if "controllers" in name:
+                # Unit-scale gates: tanh(g), tanh(f) ~ O(1), so the messages move the output.
+                p.copy_(torch.randn_like(p.float()) / p.shape[1] ** 0.5)
+            elif "cross_pass" in name:
+                p.copy_(0.5 * torch.randn_like(p.float()))
+            elif "norm" in name:
                 p.copy_(1 + 0.2 * torch.randn_like(p.float()))
             elif "query" in name:
                 p.copy_(0.5 * torch.randn_like(p.float()))
@@ -91,7 +115,7 @@ def _build_megatron(backend: str):
     return model
 
 
-def _build_reference(model):
+def _build_reference(model, looped: bool = False):
     """The reference with ``model``'s weights (Megatron names -> checkpoint names)."""
     from skyrl.backends.skyrl_train.patches.megatron.inkling2.configuration import (
         Inkling2TextConfig,
@@ -100,7 +124,9 @@ def _build_reference(model):
         Inkling2Reference,
     )
 
+    L, LOCAL, loop = _shape(looped)
     cfg = Inkling2TextConfig(
+        loop_config=loop,
         vocab_size=V,
         unpadded_vocab_size=UNPADDED_V,
         hidden_size=H,
@@ -123,7 +149,7 @@ def _build_reference(model):
     sd.update({n: b for n, b in model.named_buffers() if "expert_bias" in n})
 
     def put(ref_name, tensor):
-        parent, attr = ref_name.rsplit(".", 1)
+        parent, _, attr = ref_name.rpartition(".")
         getattr(ref.get_submodule(parent), attr).data = tensor.detach().clone()
 
     put("embed.weight", sd["embedding.word_embeddings.weight"])
@@ -131,7 +157,15 @@ def _build_reference(model):
     put("norm.weight", sd["decoder.final_layernorm.norm.weight"])
     put("attn_res.output_query", sd["decoder.final_layernorm.output_query"])
     put("unembed.weight", sd["output_layer.weight"])
+    if loop:
+        for name in ("middle_cycle_cross_pass_queries", "middle_cycle_cross_pass_kv_queries"):
+            put(name, sd[f"decoder.loop_queries.{name}"])
     for i in range(L):
+        if loop and loop["core_start"] <= i < loop["core_end"]:
+            for module in ("attn", "k", "v", "mlp"):
+                for weight in ("down_weight", "gain_weight", "forget_weight"):
+                    c = f"controllers.{module}.{weight}"
+                    put(f"layers.{i}.{c}", sd[f"decoder.layers.{i}.{c}"])
         m, r, local = f"decoder.layers.{i}.", f"layers.{i}.", i in LOCAL
         put(r + ("attn_norm.weight" if local else "q_input_norm.weight"), sd[m + "input_layernorm.weight"])
         if not local:
@@ -173,16 +207,35 @@ def _build_reference(model):
     return ref.eval()
 
 
+def grad_rel(a: dict, b: dict) -> float:
+    """Relative difference of two sets of gradients, over all parameters."""
+    num = sum(((a[n].float() - g.float()) ** 2).sum() for n, g in b.items())
+    return (num.sqrt() / sum((g.float() ** 2).sum() for g in b.values()).sqrt()).item()
+
+
+def _rounding_sensitivity(cfg, backward, plain: dict) -> float:
+    """How far the gradients move under a rounding-level change of the forward: the plain backward with the eager
+    elementwise pieces instead of the compiled ones (both correct; they round differently). Recompute reruns each
+    checkpointed forward in grad mode, which torch.compile builds as a different graph than the checkpoint's no-grad
+    forward (one BF16 ulp apart in the logits), so recomputed gradients may differ by this much. The 24 layer runs of the
+    tiny random looped model make its gradients sensitive: ~5% between the two plain backwards."""
+    cfg.inkling2_fuse_elementwise = False
+    try:
+        return grad_rel(backward(), plain)
+    finally:
+        cfg.inkling2_fuse_elementwise = True
+
+
 @ray.remote(num_gpus=1)
-def _parity(backend: str):
+def _parity(backend: str, looped: bool = False):
     from megatron.core.packed_seq_params import PackedSeqParams
 
     import skyrl.backends.skyrl_train.workers.megatron  # noqa: F401  (FA4 import guard)
 
     _init_single_rank_megatron()
     torch.manual_seed(0)
-    model = _build_megatron(backend).eval()
-    ref = _build_reference(model)
+    model = _build_megatron(backend, looped).eval()
+    ref = _build_reference(model, looped)
 
     def ref_logprobs(x):
         return torch.log_softmax(ref.logits(ref.hidden_states(x), torch.bfloat16), -1)
@@ -212,22 +265,46 @@ def _parity(backend: str):
             stats["padded_vocab_max"] = max(stats["padded_vocab_max"], meg[:, UNPADDED_V:].max().item())
 
     # Backward through the packed forward (FlexAttention's captured relative bias included).
-    logits = model(torch.cat(ids).view(1, -1), None, None, packed_seq_params=psp)
-    torch.log_softmax(logits.float(), -1)[0, :-1].gather(-1, torch.cat(ids)[1:, None]).sum().backward()
-    grads = {n: p.grad for n, p in model.named_parameters() if any(k in n for k in ("rel_proj", "query", "sconv"))}
+    def backward():
+        model.zero_grad(set_to_none=True)
+        logits = model(torch.cat(ids).view(1, -1), None, None, packed_seq_params=psp)
+        torch.log_softmax(logits.float(), -1)[0, :-1].gather(-1, torch.cat(ids)[1:, None]).sum().backward()
+        return {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+
+    keys = ("rel_proj", "query", "sconv", "controllers", "cross_pass")
+    model.train()
+    plain = backward()
+    checked = [n for n, _ in model.named_parameters() if any(k in n for k in keys)]
     stats["grads_finite_nonzero"] = all(
-        g is not None and torch.isfinite(g).all() and g.abs().sum() > 0 for g in grads.values()
+        n in plain and torch.isfinite(plain[n]).all() and plain[n].abs().sum() > 0 for n in checked
     )
+    if looped:  # full recompute, one layer run per checkpoint
+        cfg = model.config
+        stats["rounding_sensitivity"] = _rounding_sensitivity(cfg, backward, plain)
+        cfg.recompute_granularity, cfg.recompute_method, cfg.recompute_num_layers = "full", "uniform", 1
+        recomputed = backward()
+        cfg.recompute_granularity = None
+        stats["recompute_grad_rel"] = grad_rel(recomputed, plain)
+        stats["recompute_same_params"] = set(recomputed) == set(plain)
     return stats
 
 
 @pytest.mark.parametrize(
-    "backend, token_mean, token_max",
-    [("dense", 0.004, 0.02), ("flex", 0.005, 0.025)],
+    "backend, looped, token_mean, token_max",
+    [
+        ("dense", False, 0.004, 0.02),
+        ("flex", False, 0.005, 0.025),
+        ("dense", True, 0.006, 0.025),
+        ("flex", True, 0.01, 0.04),
+    ],
 )
-def test_megatron_matches_reference(ray_init_fixture, backend, token_mean, token_max):
-    stats = ray.get(_parity.remote(backend))
-    print(backend, stats)
+def test_megatron_matches_reference(ray_init_fixture, backend, looped, token_mean, token_max):
+    stats = ray.get(_parity.remote(backend, looped))
+    print(backend, looped, stats)
+    if looped:
+        assert stats["recompute_same_params"]
+        # A wrong recompute (bank, pass or prelude state) moves the gradients by O(1).
+        assert stats["recompute_grad_rel"] < 2 * stats["rounding_sensitivity"] + 1e-3
     assert stats["token_mean"] < token_mean
     assert stats["token_max"] < token_max
     assert stats["padded_vocab_max"] < -1e20  # padded ids are masked out of the softmax

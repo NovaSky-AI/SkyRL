@@ -5,6 +5,9 @@ per expert storage format of the release: BF16, NVFP4 (``_scale`` / ``_amax`` /
 ``_outer_scale_denominator``) and MXFP8 (UE8M0 scales). Every expert is selected per token
 (``num_experts_per_tok == n_routed_experts``): with fewer, BF16 rounding flips near-tied expert
 choices and comparisons against the reference become noisy without anything being wrong.
+
+``looped=True`` writes a looped checkpoint (``model_type: inkling2_loop``, ``loop_config``): 12 layers, core =
+layers 3-8 (two attn-res blocks of 3) run 3 times, rank-8 controllers and the cross-pass message queries, scaled so the messages move the output.
 """
 
 import json
@@ -16,6 +19,16 @@ import torch
 L, H, HEADS, KV, HEAD_DIM, E, FFN, V, UNPADDED_V, D_REL, WINDOW = 7, 256, 4, 2, 64, 8, 128, 512, 500, 8, 16
 LOCAL = [i for i in range(L) if i % 3 != 2]
 EXPERT_FORMAT = {0: "bf16", 1: "nvfp4", 2: "nvfp4", 3: "nvfp4", 4: "mxfp8", 5: "mxfp8", 6: "mxfp8"}
+LOOPED_L = 12
+LOOP = dict(core_start=3, core_end=9, num_passes=3, gate_rank=8, is_varloop=False)
+LOOPED_EXPERT_FORMAT = {i: ("bf16", "nvfp4", "mxfp8")[i % 3] for i in range(LOOPED_L)}
+
+
+def shape(looped: bool):
+    """``(num_layers, local_layer_ids, expert formats, loop_config)`` of the checkpoint."""
+    if looped:
+        return LOOPED_L, [i for i in range(LOOPED_L) if i % 3 != 2], LOOPED_EXPERT_FORMAT, LOOP
+    return L, LOCAL, EXPERT_FORMAT, None
 
 
 def _expert_tensors(name: str, out: int, inp: int, fmt: str, g: torch.Generator) -> dict:
@@ -35,12 +48,13 @@ def _expert_tensors(name: str, out: int, inp: int, fmt: str, g: torch.Generator)
     }
 
 
-def write_checkpoint(path: str, tokenizer: Optional[str] = None) -> None:
+def write_checkpoint(path: str, tokenizer: Optional[str] = None, looped: bool = False) -> None:
     """Write the checkpoint to ``path``; ``tokenizer`` (a Hugging Face name) adds its files, which
     SkyRL's workers load. The tiny vocabulary means token ids from it must not be fed to the model."""
     from safetensors.torch import save_file
 
     g = torch.Generator().manual_seed(0)
+    num_layers, local_ids, expert_format, loop = shape(looped)
 
     def w(*shape, std=0.02, mean=0.0, dtype=torch.bfloat16):
         return (mean + std * torch.randn(*shape, generator=g)).to(dtype)
@@ -53,8 +67,20 @@ def write_checkpoint(path: str, tokenizer: Optional[str] = None) -> None:
         p + "unembed.weight": w(V, H),
         p + "attn_res.output_query": w(H, std=0.5, dtype=torch.float32),
     }
-    for i in range(L):
-        local, lp = i in LOCAL, f"{p}layers.{i}."
+    if loop:
+        n_core = loop["core_end"] - loop["core_start"]
+        for name in ("middle_cycle_cross_pass_queries", "middle_cycle_cross_pass_kv_queries"):
+            t[p + name] = w(2 * n_core, H, std=0.5, dtype=torch.float32)
+    for i in range(num_layers):
+        local, lp = i in local_ids, f"{p}layers.{i}."
+        if loop and loop["core_start"] <= i < loop["core_end"]:
+            r = loop["gate_rank"]
+            for module in ("attn", "k", "v", "mlp"):
+                c = f"{lp}controllers.{module}."
+                # Unit-scale gates: tanh(gain), tanh(forget) ~ O(1).
+                t[c + "down_weight"] = w(r, 2 * H, std=(2 * H) ** -0.5)
+                t[c + "gain_weight"] = w(H, r, std=r**-0.5)
+                t[c + "forget_weight"] = w(H, r, std=r**-0.5)
         if i > 0:
             t[f"{p}attn_res.attn_queries.{i - 1}"] = (
                 w(H, std=0.5, dtype=torch.float32) if local else w(3, H, std=0.5, dtype=torch.float32)
@@ -84,8 +110,8 @@ def write_checkpoint(path: str, tokenizer: Optional[str] = None) -> None:
         t[lp + "mlp_sconv.weight"] = w(H, 1, 4, std=0.3)
         t[lp + "mlp.gate.weight"] = w(E, H)
         t[lp + "mlp.gate.bias"] = w(E, std=0.05, dtype=torch.float32)
-        t.update(_expert_tensors(lp + "mlp.experts.w13_weight", 2 * FFN, H, EXPERT_FORMAT[i], g))
-        t.update(_expert_tensors(lp + "mlp.experts.w2_weight", H, FFN, EXPERT_FORMAT[i], g))
+        t.update(_expert_tensors(lp + "mlp.experts.w13_weight", 2 * FFN, H, expert_format[i], g))
+        t.update(_expert_tensors(lp + "mlp.experts.w2_weight", H, FFN, expert_format[i], g))
 
     save_file(t, os.path.join(path, "model.safetensors"), metadata={"format": "pt"})
     index = {"metadata": {}, "weight_map": {name: "model.safetensors" for name in t}}
@@ -95,14 +121,14 @@ def write_checkpoint(path: str, tokenizer: Optional[str] = None) -> None:
         vocab_size=V,
         unpadded_vocab_size=UNPADDED_V,
         hidden_size=H,
-        num_hidden_layers=L,
+        num_hidden_layers=num_layers,
         num_attention_heads=HEADS,
         num_key_value_heads=KV,
         head_dim=HEAD_DIM,
         swa_num_attention_heads=HEADS,
         swa_num_key_value_heads=KV,
         swa_head_dim=HEAD_DIM,
-        local_layer_ids=LOCAL,
+        local_layer_ids=local_ids,
         sliding_window_size=WINDOW,
         rel_extent=WINDOW,
         d_rel=D_REL,
@@ -114,9 +140,11 @@ def write_checkpoint(path: str, tokenizer: Optional[str] = None) -> None:
         intermediate_size=FFN,
         model_max_length=4096,
     )
+    if loop:
+        text_config["loop_config"] = loop
     config = {
         "architectures": ["Inkling2ForConditionalGeneration"],
-        "model_type": "inkling2_mm_model",
+        "model_type": "inkling2_loop" if loop else "inkling2_mm_model",
         "text_config": text_config,
         "vision_config": None,
     }

@@ -73,16 +73,20 @@ def dist_init():
     cleanup_dist_env_and_memory()
 
 
-def _bf16_weights() -> dict[str, torch.Tensor]:
+def _bf16_weights(config=CONFIG) -> dict[str, torch.Tensor]:
     torch.manual_seed(0)
     weights = {
-        "gate.weight": (torch.randn(CONFIG.n_routed_experts, CONFIG.hidden_size, device="cuda") * 0.05).bfloat16(),
-        "gate.bias": torch.randn(CONFIG.n_routed_experts, device="cuda") * 0.01,
+        "gate.weight": (torch.randn(config.n_routed_experts, config.hidden_size, device="cuda") * 0.05).bfloat16(),
+        "gate.bias": torch.randn(config.n_routed_experts, device="cuda") * 0.01,
     }
-    for name, (n, k) in SHAPES.items():
+    shapes = {
+        "w13": (2 * config.intermediate_size, config.hidden_size),
+        "w2": (config.hidden_size, config.intermediate_size),
+    }
+    for name, (n, k) in shapes.items():
         # Spread magnitudes over blocks so the scales differ between blocks and experts.
-        spread = torch.exp2(torch.randint(-6, 3, (CONFIG.n_routed_experts, n, k // 32, 1), device="cuda").float())
-        w = torch.randn(CONFIG.n_routed_experts, n, k // 32, 32, device="cuda") * spread * 0.02
+        spread = torch.exp2(torch.randint(-6, 3, (config.n_routed_experts, n, k // 32, 1), device="cuda").float())
+        w = torch.randn(config.n_routed_experts, n, k // 32, 32, device="cuda") * spread * 0.02
         weights[f"experts.{name}_weight"] = w.flatten(-2).bfloat16()
     return weights
 
@@ -192,3 +196,40 @@ def test_routed_experts_capture(dist_init, cls, tokens):
     scores = torch.sigmoid(x.float() @ bf16["gate.weight"].float().T) + bf16["gate.bias"]
     ref = scores.topk(CONFIG.num_experts_per_tok, dim=-1).indices
     assert torch.equal(ids.long().sort(-1).values, ref.sort(-1).values)
+
+
+# K dims the build's MXFP8 kernel table does not fit: the gate / up GEMM's K (hidden) is not a multiple of 512, which
+# its loop-unrolled kernels need, and the down GEMM's K (intermediate) not a multiple of its 256-wide K tile.
+UNALIGNED = SimpleNamespace(**{**vars(CONFIG), "hidden_size": 768, "intermediate_size": 384})
+
+
+@pytest.mark.parametrize("tokens", [5, 100, 600, 2000])  # token tiles 8, 16, 64, 128
+def test_unaligned_k_shapes(dist_init, monkeypatch, tokens):
+    """``_fit_mxfp8_kernels_to_shapes`` swaps the unrolled kernels it cannot run for their plain siblings and
+    refits the combine and SwiGLU quantize blocks: the MXFP8 layer then loads and matches the BF16 layer on the
+    same weights like the aligned shapes above."""
+    from vllm.models.inkling2.ops import trtllm_bmm
+
+    from skyrl.backends.skyrl_train.patches.vllm.inkling2.model import (
+        _fit_mxfp8_kernels_to_shapes,
+    )
+
+    monkeypatch.setattr(trtllm_bmm, "_KERNELS", dict(trtllm_bmm._KERNELS))
+    trtllm_bmm.expert_plan.cache_clear()
+    _fit_mxfp8_kernels_to_shapes(UNALIGNED.hidden_size, UNALIGNED.intermediate_size)
+    bf16 = _bf16_weights(UNALIGNED)
+    with torch.device("cuda"):
+        moe, bf16_moe = _MXFP8MoE(UNALIGNED, "mxfp8"), _BF16MoE(UNALIGNED, "bf16")
+    for layer in (moe, bf16_moe):
+        for name, param in layer.named_parameters():
+            if not name.endswith("_weight_scale"):
+                (
+                    param.weight_loader(param, bf16[name])
+                    if hasattr(param, "weight_loader")
+                    else param.data.copy_(bf16[name])
+                )
+    x = torch.randn(tokens, UNALIGNED.hidden_size, device="cuda").bfloat16()
+    ref = bf16_moe(x).float()
+    rel = ((moe(x).float() - ref).norm() / ref.norm()).item()
+    trtllm_bmm.expert_plan.cache_clear()
+    assert rel < 0.08, rel

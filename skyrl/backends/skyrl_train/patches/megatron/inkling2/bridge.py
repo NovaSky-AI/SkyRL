@@ -269,10 +269,19 @@ class Inkling2Bridge(MegatronModelBridge):
         provider.n_layers_per_attn_res_block = text.n_layers_per_attn_res_block
         provider.attn_res_normalize_values = text.attn_res_normalize_values
         provider.final_logit_softcapping = text.final_logit_softcapping
+        loop = getattr(text, "loop_config", None)
+        if loop is not None:
+            provider.loop_core_start = loop["core_start"]
+            provider.loop_core_end = loop["core_end"]
+            provider.loop_num_passes = loop["num_passes"]
+            provider.loop_gate_rank = loop["gate_rank"]
         provider.mtp_num_layers = None
         return provider
 
     def maybe_modify_loaded_hf_weight(self, hf_param, hf_state_dict: Mapping[str, torch.Tensor]):
+        consumed = getattr(self, "_consumed_hf_names", None)
+        if consumed is not None:
+            consumed.update([hf_param] if isinstance(hf_param, str) else hf_param.values())
         if isinstance(hf_param, str) and _EXPERT_WEIGHT_RE.search(hf_param):
             return PackedExperts(hf_param, hf_state_dict, self._expert_cache)
         return super().maybe_modify_loaded_hf_weight(hf_param, hf_state_dict)
@@ -327,11 +336,37 @@ class Inkling2Bridge(MegatronModelBridge):
             return 2 * math.prod(shape[1:])
         return math.prod(shape)
 
-    def load_weights_hf_to_megatron(self, *args, **kwargs):
+    def load_weights_hf_to_megatron(self, hf_pretrained, *args, **kwargs):
+        """Load, then check that every language-model tensor of the checkpoint was read: Megatron-Bridge drives the
+        load from the Megatron parameters and skips HF tensors no mapping names, so a checkpoint with tensors this
+        port does not know (a newer variant's) would otherwise load as a different model without an error."""
+        self._consumed_hf_names = set()
         try:
-            return super().load_weights_hf_to_megatron(*args, **kwargs)
+            out = super().load_weights_hf_to_megatron(hf_pretrained, *args, **kwargs)
+            state = getattr(hf_pretrained, "state", None)
+            if state is not None:
+                self._check_all_consumed(state.keys(), self._consumed_hf_names)
+            return out
         finally:
             self._expert_cache.clear()
+            self._consumed_hf_names = None
+
+    @staticmethod
+    def _check_all_consumed(names, consumed) -> None:
+        unread = []
+        for name in names:
+            if not name.startswith(HF_PREFIX + ".") or name in consumed:
+                continue
+            base = name
+            for suffix in _QUANT_SUFFIXES:  # an expert weight's scale tensors are read with it
+                base = base.removesuffix(suffix)
+            if base != name and base in consumed:
+                continue
+            unread.append(name)
+        if unread:
+            raise ValueError(
+                f"Inkling2 checkpoint tensors with no Megatron counterpart ({len(unread)}): {sorted(unread)[:8]}"
+            )
 
     def mapping_registry(self) -> MegatronMappingRegistry:
         hf_layer = f"{HF_PREFIX}.layers.*"
@@ -391,4 +426,14 @@ class Inkling2Bridge(MegatronModelBridge):
         for conv in ("k_sconv", "v_sconv"):
             mappings.append(TransposedColumnParallelMapping(f"{attn}.{conv}.static_w", f"{hf_attn}.{conv}.static_w"))
         mappings.append(ReplicatedMapping(f"{attn}.rel_proj", f"{hf_attn}.rel_logits_proj.proj"))
+        # Loop (core layers only have controllers; the queries exist only in looped models).
+        for module in ("attn", "k", "v", "mlp"):
+            for weight in ("down_weight", "gain_weight", "forget_weight"):
+                mappings.append(
+                    ReplicatedMapping(
+                        f"{layer}.controllers.{module}.{weight}", f"{hf_layer}.controllers.{module}.{weight}"
+                    )
+                )
+        for name in ("middle_cycle_cross_pass_queries", "middle_cycle_cross_pass_kv_queries"):
+            mappings.append(ReplicatedMapping(f"decoder.loop_queries.{name}", f"{HF_PREFIX}.{name}"))
         return MegatronMappingRegistry(*mappings)

@@ -14,6 +14,8 @@ fused MXFP8 kernels (:class:`Inkling2MXFP8Experts`) while still taking BF16 weig
 is quantized to MXFP8 as it is loaded, at boot and on every weight sync, in place. The fused
 MXFP8 Triton kernels need Triton >= 3.8 (they miscompute under 3.7.1 on B200).
 
+Looped checkpoints (``loop_config``) are served by :class:`Inkling2LoopModel` (see its docstring).
+
 The BF16 experts run their own kernels (``ops.py``, vendored from an earlier revision of the branch) and
 implement the branch's expert LoRA hook (``moe.ExpertsLoRA``, from the LoRA PR).
 """
@@ -39,8 +41,10 @@ from vllm.models.inkling2 import model as inkling2_model
 from vllm.models.inkling2 import moe as inkling2_moe
 from vllm.models.inkling2.attention import Inkling2Attention
 from vllm.models.inkling2.model import Inkling2ForConditionalGeneration
+from vllm.models.inkling2.ops.attention import compute_log_scaling_tau
 from vllm.models.inkling2.ops.block_scales import shuffle_rows, swizzle_block_scales
 from vllm.models.inkling2.ops.sconv import shift_rel_proj
+from vllm.models.inkling2.sconv import Inkling2ShortConv
 
 from skyrl.backends.skyrl_train.patches.megatron.inkling2.quant import (
     dequantize_expert_weight,
@@ -233,10 +237,21 @@ class Inkling2MXFP8Experts(inkling2_moe.Inkling2Experts):
 class _CapturedRouting:
     """A vLLM routed-experts capture source (``RoutedExpertsCaptureSource``): with
     ``enable_return_routed_experts``, vLLM binds ``capture_fn`` to record each token's expert ids
-    at ``layer_id`` (the decoder layer, set by :class:`Inkling2ForRL`), for rollout router replay."""
+    at ``layer_id`` (the decoder layer, set by :class:`Inkling2ForRL`), for rollout router replay.
+
+    A looped model runs a core layer's MoE once per pass: :class:`Inkling2LoopModel` sets ``run_id``
+    (the layer run's index in execution order) before each call, and the ids are recorded there."""
 
     layer_id: int = -1
     capture_fn = None
+    run_id: int | None = None
+
+    def _capture(self, ids: torch.Tensor) -> None:
+        fn = self.capture_fn
+        if self.run_id is not None and isinstance(fn, functools.partial):
+            fn.func(self.run_id, ids)  # vLLM binds partial(capturer.capture, layer_id)
+        else:
+            fn(ids)
 
 
 class _MXFP8MoE(_CapturedRouting, inkling2_moe.Inkling2MoE):
@@ -255,7 +270,7 @@ class _MXFP8MoE(_CapturedRouting, inkling2_moe.Inkling2MoE):
             x = x.contiguous()
             gate = self.gate
             _, ids = select_experts(linear_k_groups(x, gate.weight), gate.bias, gate.topk, gate.route_scale)
-            self.capture_fn(ids)
+            self._capture(ids)
         return super().forward(x, *args, **kwargs)
 
 
@@ -291,7 +306,7 @@ class _BF16MoE(_CapturedRouting, inkling2_moe.Inkling2MoE):
         logits = linear_k_groups(x, gate.weight)
         weights, ids = select_experts(logits, gate.bias, gate.topk, gate.route_scale)
         if self.capture_fn is not None:
-            self.capture_fn(ids)
+            self._capture(ids)
         return self.experts(x, weights, ids, lora=lora, reduce=reduce, push=push)
 
 
@@ -375,6 +390,145 @@ def _serialize_trtllm_bmm_build() -> None:
 _serialize_trtllm_bmm_build()
 
 
+_UNROLLED_KERNEL_RE = re.compile(r"^t\d+x\d+x(\d+)u2_")
+
+
+def _fit_mxfp8_kernels_to_shapes(hidden: int, intermediate: int) -> None:
+    """Pick MXFP8 expert GEMM kernels that support this model's K dims.
+
+    The build's ``ops.trtllm_bmm._KERNELS`` uses, for the MXFP8 gate / up projection at token tiles 16, 64 and 128, a
+    kernel with a 256-wide K tile and its main loop unrolled twice (``...x256u2_...``). TRT-LLM-gen's config check
+    (``GemmOptions.h``, "Size K / splitK must be a multiple of TileK * 2") rejects the unrolled loop unless
+    K is a multiple of 2 * TileK: not true of every hidden size; when it fails ``expert_plan`` asserts
+    (``bmm_workspace_size`` returns -1) as soon as the MoE loads its kernels. Each such kernel is swapped for its
+    non-unrolled sibling (the same name without ``u2``; the table already uses it for the down projection), which
+    accepts any K whose scale-factor count is a multiple of 4 (TMA zero-fills the K tail). No-op for shapes the
+    table already fits. Must run before the first MoE is built (``load_kernels``)."""
+    try:
+        from vllm.models.inkling2.ops import trtllm_bmm
+    except ImportError:  # a build without the TRT-LLM batched GEMM path
+        return
+    ks = (hidden, intermediate)  # K of the gate / up and of the down projection
+    changed = False
+    for (nvfp4, tile), names in list(trtllm_bmm._KERNELS.items()):
+        if nvfp4:
+            continue
+        fitted = []
+        for name, k in zip(names, ks):
+            m = _UNROLLED_KERNEL_RE.match(name)
+            if m is not None and k % (2 * int(m.group(1))):
+                name = name.replace("u2_", "_", 1)
+                changed = True
+            fitted.append(name)
+        trtllm_bmm._KERNELS[(nvfp4, tile)] = tuple(fitted)
+    if changed:
+        trtllm_bmm.expert_plan.cache_clear()
+    _fit_combine_block(hidden)
+    _fit_swiglu_quantize_block(intermediate)
+
+
+def _fit_combine_block(hidden: int) -> None:
+    """Let the expert combine run on hidden sizes that are not a multiple of 512.
+
+    ``ops.moe._combine`` (behind ``combine`` / ``combine_push``) sums each token's top-k expert rows in
+    512-column blocks and asserts ``hidden % 512 == 0``. The kernel is elementwise over columns, so any
+    power-of-two block that divides ``hidden`` gives the same sums; the largest one up to 512 is used.
+    No-op when 512 divides ``hidden``."""
+    if hidden % 512 == 0:
+        return
+    from vllm.models.inkling2.ops import moe as moe_ops
+
+    block = 512
+    while block > 16 and hidden % block:
+        block //= 2
+    if hidden % block:
+        raise ValueError(f"Inkling2 expert combine needs a hidden size divisible by 16, got {hidden}")
+    if getattr(moe_ops._combine, "_skyrl_block", None) == block:
+        return
+
+    def _combine(down, src2dst, topk, out, sp):
+        tokens = src2dst.numel() // topk
+        moe_ops._combine_kernel[(tokens, hidden // block)](
+            down,
+            src2dst,
+            out,
+            None if sp is None else sp.slot_bases,
+            tokens,
+            1 if sp is None else sp.shard(tokens)[2],
+            hidden,
+            topk,
+            block,
+            tokens <= moe_ops.LAUNCH_DEPENDENTS_MAX_TOKENS,
+            sp is not None,
+            moe_ops.HALO_ROWS,
+            num_warps=2,
+            launch_pdl=True,
+        )
+
+    _combine._skyrl_block = block
+    moe_ops._combine = _combine
+
+
+def _fit_swiglu_quantize_block(intermediate: int) -> None:
+    """Let the MXFP8 SwiGLU quantize run on few rows when ``intermediate`` is not a multiple of 256.
+
+    With at most 512 routed rows, ``ops.activation.swiglu_quantize`` launches a program per 256 columns
+    and asserts ``n % 256 == 0`` (MXFP8 only; more rows, and NVFP4, quantize whole rows as a power-of-two
+    head and tail, which fits sizes like 3 * 2**k). The kernel quantizes in 32-column scale blocks,
+    so any power-of-two column chunk of at least 32 that divides ``n`` gives the same values and scales;
+    that case is launched here with the largest such chunk up to 256, everything else goes to the
+    branch's function. No-op when 256 divides ``intermediate``."""
+    if intermediate % 256 == 0:
+        return
+    from vllm.models.inkling2 import moe as moe_module
+    from vllm.models.inkling2.ops import activation
+
+    original = getattr(activation.swiglu_quantize, "_skyrl_original", activation.swiglu_quantize)
+    head = 256
+    while head > 32 and intermediate % head:
+        head //= 2
+    if intermediate % head:
+        raise ValueError(f"Inkling2 MXFP8 experts need an intermediate size divisible by 32, got {intermediate}")
+
+    def swiglu_quantize(x, gammas, gate_cap, up_cap, rows, tile, weight_amax=None, weight_denominator=None):
+        num_rows, n = x.shape[0], x.shape[1] // 2
+        routed, num_routed, cta_expert = rows
+        max_rows = routed.numel()
+        if weight_amax is not None or max_rows > 512 or n % 256 == 0 or n % head:
+            return original(x, gammas, gate_cap, up_cap, rows, tile, weight_amax, weight_denominator)
+        values = torch.empty((num_rows, n), dtype=torch.float8_e4m3fn, device=x.device)
+        scales = torch.empty((num_rows, n // 32), dtype=torch.uint8, device=x.device)
+        activation._situ_quantize_kernel[(max_rows, n // head)](
+            x,
+            gammas,
+            values,
+            scales,
+            None,
+            routed,
+            num_routed,
+            cta_expert,
+            None,
+            None,
+            N=n,
+            GATE_CAP=gate_cap,
+            UP_CAP=up_cap,
+            HEAD=head,
+            TAIL=0,
+            TILE=tile,
+            NVFP4=False,
+            LAUNCH_DEPENDENTS=max_rows <= activation.LAUNCH_DEPENDENTS_MAX_ROWS,
+            num_warps=2,
+            maxnreg=None,
+            enable_fp_fusion=False,
+            launch_pdl=True,
+        )
+        return values, scales, None
+
+    swiglu_quantize._skyrl_original = original
+    activation.swiglu_quantize = swiglu_quantize
+    moe_module.swiglu_quantize = swiglu_quantize
+
+
 def _install_local_expert_lora() -> None:
     """Let the branch's MoE LoRA layer take expert adapters already cut to this rank's experts.
 
@@ -406,6 +560,303 @@ def _install_local_expert_lora() -> None:
 _install_local_expert_lora()
 
 
+# --------------------------------------------------------------------------------------------
+# Looped checkpoints
+# --------------------------------------------------------------------------------------------
+
+LOOP_MODULES = ("attn", "k", "v", "mlp")
+
+
+def loop_core(text_config) -> range:
+    loop = getattr(text_config, "loop_config", None)
+    return range(0) if loop is None else range(loop["core_start"], loop["core_end"])
+
+
+def num_layer_visits(text_config) -> int:
+    loop = getattr(text_config, "loop_config", None)
+    n = text_config.num_hidden_layers
+    return n if loop is None else n + (loop["num_passes"] - 1) * len(loop_core(text_config))
+
+
+def cache_layer_id(text_config, layer: int, pass_idx: int) -> int:
+    """The KV / conv-state cache index of a layer run (the SGLang fork's ``cache_layer_id``): the layer itself in
+    the first pass, ``num_hidden_layers + (pass - 1) * n_core + (layer - core_start)`` after."""
+    if pass_idx == 0:
+        return layer
+    core = loop_core(text_config)
+    return text_config.num_hidden_layers + (pass_idx - 1) * len(core) + layer - core.start
+
+
+class _SharedFromBase:
+    """Non-data descriptor: the attribute of the module's ``_loop_base`` once set (before, the module's own,
+    so that the base class's ``__init__`` can build and use it)."""
+
+    def __set_name__(self, owner, name):
+        self.name = name
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        base = obj.__dict__.get("_loop_base")
+        if base is not None:
+            return getattr(base, self.name)
+        return nn.Module.__getattr__(obj, self.name)
+
+
+def _share_base(module: nn.Module, base: nn.Module, names) -> None:
+    """Drop ``module``'s own ``names`` (submodules / parameters) and read them from ``base`` from now on."""
+    for name in names:
+        for store in (module._modules, module._parameters, module._buffers):
+            store.pop(name, None)
+    object.__setattr__(module, "_loop_base", base)
+
+
+class _PassAttention(Inkling2Attention):
+    """A later pass of a looped core layer's attention: its own KV cache and conv state (registered under the
+    pass's cache-layer name), the base layer's weights (and their LoRA wrappers and derived tables)."""
+
+    _SHARED = ("qkvr", "wo_ud", "k_sconv", "v_sconv", "rel_logits_proj", "q_scale", "r_scale", "rel_proj_shifted")
+    qkvr = _SharedFromBase()
+    wo_ud = _SharedFromBase()
+    k_sconv = _SharedFromBase()
+    v_sconv = _SharedFromBase()
+    rel_logits_proj = _SharedFromBase()
+    q_scale = _SharedFromBase()
+    r_scale = _SharedFromBase()
+    rel_proj_shifted = _SharedFromBase()
+
+    def __init__(self, base: Inkling2Attention, config, conv_state, prefix: str) -> None:
+        super().__init__(config, base.is_local, conv_state, prefix=prefix)
+        _share_base(self, base, self._SHARED)
+
+    def process_weights_after_loading(self, *args, **kwargs) -> None:
+        pass  # derived from the base layer's weights by the base layer
+
+
+class _PassShortConv(Inkling2ShortConv):
+    """A later pass's attn- / mlp-output short convolution: its own conv state, the base layer's taps."""
+
+    weight = _SharedFromBase()
+
+    def __init__(self, base: Inkling2ShortConv, owner) -> None:
+        super().__init__(base.weight.shape[0], base.weight.shape[-1], owner, base.stream)
+        _share_base(self, base, ("weight",))
+
+
+class Inkling2LoopController(nn.Module):
+    """``(1 - tanh(f)) * dest + tanh(g) * msg`` (FP32), ``[g, f] = h @ [gain, forget]^T`` (FP32 output),
+    ``h = [rmsnorm(dest), rmsnorm(msg)] @ down^T`` (no gain, BF16); the SGLang fork's ``tml/kernels/loop.py``.
+    Rank ``gate_rank`` is not split over TP: replicated weights."""
+
+    def __init__(self, hidden: int, rank: int) -> None:
+        super().__init__()
+        for name, shape in (
+            ("down_weight", (rank, 2 * hidden)),
+            ("gain_weight", (hidden, rank)),
+            ("forget_weight", (hidden, rank)),
+        ):
+            self.register_parameter(name, nn.Parameter(torch.empty(*shape, dtype=torch.bfloat16), requires_grad=False))
+
+    def forward(self, dest: torch.Tensor, message: torch.Tensor) -> torch.Tensor:
+        x = torch.stack((dest.float(), message.float()), dim=1)
+        normalized = (x * torch.rsqrt(x.square().mean(-1, keepdim=True) + 1e-6)).to(torch.bfloat16).flatten(1)
+        hidden = torch.nn.functional.linear(normalized, self.down_weight)
+        gates = hidden.float() @ torch.cat([self.gain_weight, self.forget_weight]).float().t()
+        gain, forget = gates.chunk(2, dim=-1)
+        return (1.0 - torch.tanh(forget)) * dest.float() + torch.tanh(gain) * message.float()
+
+
+def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """FP32 RMSNorm, one rounding to BF16 (``reference.rms_norm``)."""
+    u = x.float()
+    return (u * torch.rsqrt(u.square().mean(-1, keepdim=True) + eps) * weight.float()).to(torch.bfloat16)
+
+
+def _mix_fp32(sources: list, addend, queries: torch.Tensor, normalize: bool) -> torch.Tensor:
+    """FP32 attn-res mixtures ``[Q, T, H]`` of ``sources`` (``[T, H]`` each; ``addend`` added to the last in FP32)
+    with ``queries [Q, H]`` already scaled by ``H**-0.5`` -- the fused ``attn_res`` before its norm."""
+    values = torch.stack([s.float() for s in sources])
+    if addend is not None:
+        values = torch.cat([values[:-1], (values[-1] + addend.float()).unsqueeze(0)])
+    inv_rms = torch.rsqrt(values.square().mean(-1) + 1e-6)  # [n, T]
+    logits = torch.einsum("nth,qh,nt->qtn", values, queries.float(), inv_rms)
+    probs = torch.softmax(logits, dim=-1)
+    if normalize:
+        values = values * inv_rms.unsqueeze(-1)
+    return torch.einsum("qtn,nth->qth", probs, values)
+
+
+class Inkling2LoopModel(inkling2_model.Inkling2Model):
+    """The branch's ``Inkling2Model`` running a looped checkpoint (``loop_config``), the SGLang fork's ``_run_loop``.
+
+    The prelude layers run once, the core layers ``[core_start, core_end)`` ``num_passes`` times with shared weights,
+    the coda once. Every pass restarts the attn-res state from the prelude's; from the second pass on each core layer
+    mixes messages read from the bank (the previous pass's block outputs, without the prelude's) into its attention
+    q / k / v and MoE inputs (FP32, before their norms) through its controllers; local layers then project q, k and v
+    from three different inputs (all through ``attn_norm``). Each later pass has its own attention KV cache and
+    short-convolution state (``_PassAttention``, ``_PassShortConv``, cache index ``cache_layer_id``).
+
+    The forward is the branch's unfused single-GPU path with explicit all-reduces (as the SGLang fork runs loops
+    under tensor parallelism): no fused all-reduce / mix, no sequence-parallel token sharding. Routed-expert capture
+    records every layer run, in execution order (``num_layer_visits`` entries per token).
+    """
+
+    def install_loop(self, config, root: str) -> None:
+        core, hidden = loop_core(config), config.hidden_size
+        loop = config.loop_config
+        self.middle_cycle_cross_pass_queries = nn.Parameter(
+            torch.zeros(2 * len(core), hidden, dtype=torch.float32), requires_grad=False
+        )
+        self.middle_cycle_cross_pass_kv_queries = nn.Parameter(
+            torch.zeros(2 * len(core), hidden, dtype=torch.float32), requires_grad=False
+        )
+        for i in core:
+            layer = self.layers[i]
+            layer.controllers = nn.ModuleDict(
+                {m: Inkling2LoopController(hidden, loop["gate_rank"]) for m in LOOP_MODULES}
+            )
+            passes = nn.ModuleList()
+            for p in range(1, loop["num_passes"]):
+                cid = cache_layer_id(config, i, p)
+                base_state = layer.conv_state
+                conv_state = type(base_state)(
+                    num_kv_heads=base_state.num_kv_heads * get_tensor_model_parallel_world_size(),
+                    head_dim=layer.attn.head_dim,
+                    hidden_size=hidden,
+                    kernel_size=config.sconv_kernel_size,
+                    prefix=f"{root}.layers.{cid}.conv_state",
+                    replicate_hidden=True,
+                )
+                assert conv_state.head_size == base_state.head_size
+                run = nn.Module()
+                run.conv_state = conv_state
+                run.attn = _PassAttention(layer.attn, config, conv_state, f"{root}.layers.{cid}.attn")
+                run.attn_sconv = _PassShortConv(layer.attn_sconv, conv_state)
+                run.mlp_sconv = _PassShortConv(layer.mlp_sconv, conv_state)
+                passes.append(run)
+            layer.loop_passes = passes
+
+    def _bank_messages(self, bank: torch.Tensor, offset: int) -> torch.Tensor:
+        """``[4, T, H]`` FP32: the attn, k, v, mlp messages of core layer ``offset`` read from ``bank [m, T, H]``."""
+        q, kv = self.middle_cycle_cross_pass_queries, self.middle_cycle_cross_pass_kv_queries
+        queries = torch.stack([q[2 * offset], kv[2 * offset], kv[2 * offset + 1], q[2 * offset + 1]])
+        return _mix_fp32(list(bank.unbind(0)), None, queries * self.config.hidden_size**-0.5, True)
+
+    @staticmethod
+    def _attend(attn, positions, inputs, tau):
+        """``attn``'s partial output; local layers with three different inputs project like global ones."""
+        if not attn.is_local:
+            return attn(positions, inputs[0], inputs[1], inputs[2], tau)
+        if len(inputs) == 1:
+            return attn(positions, inputs[0])
+        from vllm.models.inkling2.lora import add_linear_lora
+        from vllm.models.inkling2.ops.linear import linear
+
+        x_q, x_k, x_v = inputs
+        weight = attn.qkvr.weight
+        q_side, kv_size = sum(attn.split_sizes[:4]), attn.split_sizes[4]
+        k_end = q_side + kv_size
+        projected = linear(x_q, weight[: sum(attn.q_side_splits)])
+        k = linear(x_k, weight[q_side:k_end])
+        v = linear(x_v, weight[k_end : k_end + kv_size])
+        add_linear_lora(attn.qkvr, projected, x_q, range(4))
+        add_linear_lora(attn.qkvr, k, x_k, [4])
+        add_linear_lora(attn.qkvr, v, x_v, [5])
+        q, r, gate, sinks = projected.split(attn.q_side_splits, dim=-1)[:4]
+        output = torch.empty(gate.shape, dtype=q.dtype, device=q.device)
+        attn._attention(positions, q, r, gate, sinks, k, v, None, None, None, output)
+        out = linear(output, attn.wo_ud.weight)
+        add_linear_lora(attn.wo_ud, out, output)
+        return out
+
+    def forward(self, positions: torch.Tensor, inputs_embeds: torch.Tensor):
+        if self.aux_hidden_state_layers:
+            raise NotImplementedError("Looped Inkling2 does not support draft-model hidden-state capture")
+        config = self.config
+        loop, core = config.loop_config, loop_core(config)
+        num_tokens, hidden = inputs_embeds.shape
+        num_layers = len(self.layers)
+        normalize = self.normalize_values
+        tau = None
+        if config.log_scaling_n_floor is not None:
+            tau = compute_log_scaling_tau(positions, config.log_scaling_n_floor, config.log_scaling_alpha)
+        max_blocks = -(-num_layers // self.block_size)
+        stack = inputs_embeds.new_empty((max_blocks + 1, num_tokens, hidden))
+        stack[0].copy_(inputs_embeds)
+        num_blocks = 0
+
+        def run_layer(i: int, p: int, run_id: int, bank) -> int:
+            """One layer run on ``stack[:num_blocks + 1]``; returns the new block count."""
+            layer = self.layers[i]
+            nb = num_blocks_box[0]
+            partial = stack[nb]
+            mods = layer if p == 0 else layer.loop_passes[p - 1]
+            attn = layer.attn if p == 0 else mods.attn
+            messages = None
+            if bank is None:
+                if nb == 0:
+                    inputs = [layer.attn_norm(partial, j) for j in range(layer.num_attn_inputs)]
+                else:
+                    inputs = self._mix(stack[:nb], partial, self.attn_res.attn_queries[i - 1], layer.attn_norm)
+            else:
+                messages = self._bank_messages(bank, i - core.start)
+                streams = list(
+                    _mix_fp32(list(stack[: nb + 1].unbind(0)), None, self.attn_res.attn_queries[i - 1], normalize)
+                )
+                if layer.is_local:
+                    streams = streams * 3
+                streams = [layer.controllers[m](x, messages[j]) for j, (m, x) in enumerate(zip(LOOP_MODULES, streams))]
+                w = layer.attn_norm.weight
+                inputs = [
+                    _rms_norm(x, w[0 if layer.is_local else j], layer.attn_norm.eps) for j, x in enumerate(streams)
+                ]
+            attn_partial = self._attend(attn, positions, inputs, None if layer.is_local else tau)
+            attn_out = mods.attn_sconv(tensor_model_parallel_all_reduce(attn_partial), positions)
+            first = i % self.block_size == 0
+            mlp_query = self.attn_res.mlp_queries[i]
+            if messages is None:
+                if first:
+                    mlp_in = self._mix(stack[: nb + 1], attn_out, mlp_query, layer.mlp_norm)[0]
+                else:
+                    mlp_in = self._mix(stack[:nb], partial, mlp_query, layer.mlp_norm, attn_out)[0]
+            else:
+                if first:
+                    mix = _mix_fp32([*stack[: nb + 1].unbind(0), attn_out], None, mlp_query, normalize)[0]
+                else:
+                    mix = _mix_fp32([*stack[: nb + 1].unbind(0)], attn_out, mlp_query, normalize)[0]
+                mix = layer.controllers["mlp"](mix, messages[3])
+                mlp_in = _rms_norm(mix, layer.mlp_norm.weight[0], layer.mlp_norm.eps)
+            residual = None if first else partial
+            if first:
+                nb += 1
+            moe = getattr(layer.mlp, "base_layer", layer.mlp)
+            moe.run_id = run_id
+            mods.mlp_sconv(layer.mlp(mlp_in), positions, addend=attn_out, residual=residual, out=stack[nb])
+            num_blocks_box[0] = nb
+            return nb
+
+        num_blocks_box = [num_blocks]
+        run_id = 0
+        for i in range(core.start):
+            run_layer(i, 0, run_id, None)
+            run_id += 1
+        prelude_blocks = num_blocks_box[0]  # stack[:prelude_blocks + 1] is never overwritten by the core
+        bank = None
+        for p in range(loop["num_passes"]):
+            if p:
+                # The previous pass's block outputs; the next pass overwrites them in place.
+                bank = stack[prelude_blocks + 1 : num_blocks_box[0] + 1].clone()
+                num_blocks_box[0] = prelude_blocks
+            for i in core:
+                run_layer(i, p, run_id, bank)
+                run_id += 1
+        for i in range(core.stop, num_layers):
+            run_layer(i, 0, run_id, None)
+            run_id += 1
+        nb = num_blocks_box[0]
+        return self._mix(stack[:nb], stack[nb], self.attn_res.output_query, self.norm)[0]
+
+
 class Inkling2ForRL(Inkling2ForConditionalGeneration):
     """``Inkling2ForConditionalGeneration`` with BF16 experts and a ``load_weights`` that takes any
     subset of the checkpoint (weight sync streams chunks)."""
@@ -422,6 +873,9 @@ class Inkling2ForRL(Inkling2ForConditionalGeneration):
         if os.environ.get("SKYRL_INKLING2_QUANTIZED_EXPERTS") == "1":
             super().__init__(vllm_config=vllm_config, prefix=prefix)
         else:
+            if ROLLOUT_EXPERTS == "mxfp8":
+                text = vllm_config.model_config.hf_config.text_config
+                _fit_mxfp8_kernels_to_shapes(text.hidden_size, text.intermediate_size)
             with _rollout_experts():
                 super().__init__(vllm_config=vllm_config, prefix=prefix)
         for module in self.modules():
@@ -430,6 +884,14 @@ class Inkling2ForRL(Inkling2ForConditionalGeneration):
         for index, layer in enumerate(self.model.layers):
             if isinstance(layer.mlp, _CapturedRouting):
                 layer.mlp.layer_id = index
+        if loop_core(self.text_config):
+            # Before the comm-state registration below (it only reads the model's existing attributes).
+            self.model.__class__ = Inkling2LoopModel
+            root = self.model.layers[0].conv_state.prefix.rsplit(".layers.", 1)[0]
+            self.model.install_loop(self.text_config, root)
+            for module in self.modules():
+                if isinstance(module, Inkling2Attention) and not isinstance(module, _PassAttention):
+                    _make_reloadable(module)
         self._keep_comm_state_across_sleep()
 
     # Small device state of the tensor-parallel communication kernels: generation flags, barrier

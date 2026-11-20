@@ -13,6 +13,7 @@ from skyrl.backends.skyrl_train.patches.megatron.inkling2.layer_specs import (
 )
 from skyrl.backends.skyrl_train.patches.megatron.inkling2.modules import (
     Inkling2EmbeddingNormMixin,
+    Inkling2LoopBlockMixin,
     Inkling2OutputLayerMixin,
     Inkling2RMSNorm,
     extend_instance,
@@ -90,6 +91,13 @@ class Inkling2ModelProvider(GPTModelProvider):
     sconv_kernel_size: int = 4
     n_layers_per_attn_res_block: int = 6
     attn_res_normalize_values: bool = True
+    # Loop (``loop_config`` of looped checkpoints): layers [loop_core_start, loop_core_end) run loop_num_passes times
+    # with shared weights; passes after the first mix in cross-pass messages through rank-loop_gate_rank controllers.
+    # loop_num_passes = 1 is the unlooped model.
+    loop_core_start: int = 0
+    loop_core_end: int = 0
+    loop_num_passes: int = 1
+    loop_gate_rank: int = 0
     # Output.
     final_logit_softcapping: float = 30.0
     unpadded_vocab_size: int = 200058
@@ -112,4 +120,7 @@ class Inkling2ModelProvider(GPTModelProvider):
             extend_instance(model.embedding, Inkling2EmbeddingNormMixin)
         if model.post_process:
             extend_instance(model.output_layer, Inkling2OutputLayerMixin)
+        if self.loop_num_passes > 1:
+            extend_instance(model.decoder, Inkling2LoopBlockMixin)
+            model.decoder.init_loop()
         return model

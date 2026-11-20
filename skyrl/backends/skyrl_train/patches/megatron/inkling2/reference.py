@@ -15,6 +15,11 @@ Parameter names mirror the checkpoint (``model.llm.*``), so the state dict loads
 experts are kept in their stored format (NVFP4 / MXFP8 / BF16) and dequantized one expert at a
 time, so the full quantized release fits across a node's GPUs.
 
+Looped checkpoints (``loop_config``) run the core layers ``[core_start, core_end)`` ``num_passes`` times with shared
+weights (``tml/model.py`` ``_run_loop``): every pass restarts the attn-res state from the prelude's, and passes after
+the first mix a message from the previous pass's block outputs into each sub-layer input through a low-rank
+controller (``tml/layers/loop.py``, ``tml/kernels/loop.py``).
+
 ``act_quant=True`` additionally emulates the serving path's activation quantization of both
 expert GEMM inputs (``hf_quant_config.json``: NVFP4 per-token "four over six" for NVFP4 experts,
 MXFP8 for MXFP8 experts), with FP32 dequantized operands. ``act_quant=False`` is the BF16 model
@@ -68,7 +73,7 @@ def linear(x: torch.Tensor, weight: torch.Tensor, out_dtype=torch.bfloat16) -> t
 def block_attn_res(blocks, partial, queries, normalize_values: bool):
     """Softmax over depth of the (RMS-normalized) sources, one mixture per row of ``queries``.
 
-    ``partial`` may be ``(p, addend)``: the last source is then ``p + addend`` in FP32.
+    ``partial`` may be ``(p, addend)``: the last source is then ``p + addend`` in FP32, or None (only ``blocks``).
     Returns a tuple of FP32 ``[T, H]`` tensors.
     """
     if queries.ndim == 1:
@@ -76,7 +81,7 @@ def block_attn_res(blocks, partial, queries, normalize_values: bool):
     addend = None
     if isinstance(partial, tuple):
         partial, addend = partial
-    sources = [*blocks, partial]
+    sources = [*blocks, partial] if partial is not None else list(blocks)
     hidden = sources[0].shape[-1]
     values = torch.stack(sources).float()
     if addend is not None:
@@ -132,6 +137,44 @@ class AttnResState:
         return block_attn_res(
             self.blocks, self.partial, self.model.output_query, self.model.config.attn_res_normalize_values
         )[0]
+
+    def copy(self) -> "AttnResState":
+        state = AttnResState(self.model, self.partial)
+        state.blocks = list(self.blocks)
+        return state
+
+
+# --------------------------------------------------------------------------------------------
+# Loop messages (``tml/layers/loop.py``, ``tml/kernels/loop.py``)
+# --------------------------------------------------------------------------------------------
+
+LOOP_MODULES = ("attn", "k", "v", "mlp")
+
+
+def message_controller(dest, message, down, gain, forget):
+    """``(1 - tanh(f)) * dest + tanh(g) * message`` (FP32) with ``[g | f] = h @ [gain | forget]^T`` (FP32 output) and
+    ``h = rmsnorm_each([dest, message]) @ down^T`` (BF16 normalized input and output; no gain, eps 1e-6)."""
+    dest, message = dest.float(), message.float()
+    normalized = rms_norm(torch.stack((dest, message), dim=1), None, 1e-6).flatten(1)  # [T, 2H] BF16
+    hidden = linear(normalized, down)
+    g = linear(hidden, gain, out_dtype=torch.float32)
+    f = linear(hidden, forget, out_dtype=torch.float32)
+    return (1.0 - torch.tanh(f)) * dest + torch.tanh(g) * message
+
+
+class MessageBank:
+    """The previous pass's block outputs; ``read(l, module)`` is their attn-res mixture for core layer ``l``."""
+
+    def __init__(self, blocks, queries, kv_queries):
+        self.blocks, self.queries, self.kv_queries = list(blocks), queries, kv_queries
+
+    def read(self, layer: int, module: str) -> torch.Tensor:
+        queries = self.queries if module in ("attn", "mlp") else self.kv_queries
+        query = queries[2 * layer + int(module in ("mlp", "v"))]
+        return block_attn_res(self.blocks, None, query.to(self.blocks[0].device), normalize_values=True)[0]
+
+    def to(self, device: torch.device) -> None:
+        self.blocks = [b.to(device) for b in self.blocks]
 
 
 # --------------------------------------------------------------------------------------------
@@ -414,9 +457,11 @@ class MoE(nn.Module):
             return (xq @ self.experts.weight(which, e, torch.float32).t()).to(x.dtype)
         return linear(x, self.experts.weight(which, e, x.dtype))
 
-    def forward(self, x: torch.Tensor, act_quant: bool = False) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, act_quant: bool = False, routing: Optional[list] = None) -> torch.Tensor:
         cfg = self.config
         weights, ids = self.route(x)
+        if routing is not None:
+            routing.append(ids.cpu())
         out = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
         for e in ids.unique().tolist():
             token, slot = (ids == e).nonzero(as_tuple=True)
@@ -454,24 +499,59 @@ class DecoderLayer(nn.Module):
             )
             setattr(self, name, conv)
         self.eps = config.rms_norm_eps
+        self.core_offset = None
+        if layer_idx in config.loop_core_layers:
+            self.core_offset = layer_idx - config.loop_core_layers.start
+            rank = config.loop_config["gate_rank"]
+            self.controllers = nn.Module()
+            for module in LOOP_MODULES:
+                ctrl = nn.Module()
+                ctrl.down_weight = nn.Parameter(torch.empty(rank, 2 * H, dtype=torch.bfloat16), requires_grad=False)
+                ctrl.gain_weight = nn.Parameter(torch.empty(H, rank, dtype=torch.bfloat16), requires_grad=False)
+                ctrl.forget_weight = nn.Parameter(torch.empty(H, rank, dtype=torch.bfloat16), requires_grad=False)
+                setattr(self.controllers, module, ctrl)
+
+    def mix(self, messages: MessageBank, module: str, dest: torch.Tensor) -> torch.Tensor:
+        ctrl = getattr(self.controllers, module)
+        return message_controller(
+            dest, messages.read(self.core_offset, module), ctrl.down_weight, ctrl.gain_weight, ctrl.forget_weight
+        )
 
     @property
     def device(self) -> torch.device:
         return self.mlp_norm.weight.device
 
-    def forward(self, state: AttnResState, positions: torch.Tensor, act_quant: bool) -> None:
+    def forward(
+        self,
+        state: AttnResState,
+        positions: torch.Tensor,
+        act_quant: bool,
+        messages: Optional[MessageBank] = None,
+        routing: Optional[list] = None,
+    ) -> None:
+        """``messages``: the loop's message bank (core layers in passes after the first). ``routing``: a list to
+        append this layer run's selected expert ids ``[T, k]`` to."""
         i, eps, dev = self.layer_idx, self.eps, self.device
         state.to(dev)
         streams = state.attention_input(i, 1 if self.is_local else 3)
-        if self.is_local:
+        if messages is not None:
+            messages.to(dev)
+            streams = (streams * 3) if self.is_local else streams
+            streams = tuple(self.mix(messages, m, x) for m, x in zip(("attn", "k", "v"), streams))
+        if self.is_local and messages is None:
             xq = xk = xv = rms_norm(streams[0], self.attn_norm.weight, eps)
+        elif self.is_local:  # three distinct inputs, all through attn_norm
+            xq, xk, xv = (rms_norm(x, self.attn_norm.weight, eps) for x in streams)
         else:
             xq = rms_norm(streams[0], self.q_input_norm.weight, eps)
             xk = rms_norm(streams[1], self.k_input_norm.weight, eps)
             xv = rms_norm(streams[2], self.v_input_norm.weight, eps)
         attn = static_sconv(self.attn(xq, xk, xv, positions.to(dev)), self.attn_sconv.weight)
-        mlp_in = rms_norm(state.mlp_input(i, attn), self.mlp_norm.weight, eps)
-        mlp = static_sconv(self.mlp(mlp_in, act_quant), self.mlp_sconv.weight)
+        mix = state.mlp_input(i, attn)
+        if messages is not None:
+            mix = self.mix(messages, "mlp", mix)
+        mlp_in = rms_norm(mix, self.mlp_norm.weight, eps)
+        mlp = static_sconv(self.mlp(mlp_in, act_quant, routing), self.mlp_sconv.weight)
         state.finalize_layer(i, attn, mlp)
 
 
@@ -501,6 +581,10 @@ class Inkling2Reference(nn.Module):
         )
         self.attn_res.mlp_queries = nn.ParameterList([p(H, dtype=torch.float32) for _ in range(L)])
         self.attn_res.output_query = p(H, dtype=torch.float32)
+        if config.loop_config is not None:
+            shape = (2 * len(config.loop_core_layers), H)
+            self.middle_cycle_cross_pass_queries = p(*shape, dtype=torch.float32)
+            self.middle_cycle_cross_pass_kv_queries = p(*shape, dtype=torch.float32)
         self.norm = nn.Module()
         self.norm.weight = p(H)
         self.unembed = nn.Module()
@@ -518,16 +602,47 @@ class Inkling2Reference(nn.Module):
     def output_query(self):
         return self.attn_res.output_query
 
-    def hidden_states(self, input_ids: torch.Tensor, act_quant: bool = False) -> torch.Tensor:
-        """Final-norm output ``[T, H]`` (BF16) for one sequence."""
+    def hidden_states(
+        self,
+        input_ids: torch.Tensor,
+        act_quant: bool = False,
+        routing: Optional[list] = None,
+        pass_states: Optional[list] = None,
+    ) -> torch.Tensor:
+        """Final-norm output ``[T, H]`` (BF16) for one sequence.
+
+        ``routing``: list that receives each layer run's expert ids ``[T, k]``, in execution order (prelude,
+        core x passes, coda). ``pass_states``: list that receives the attn-res partial sum after every core pass.
+        """
         cfg = self.config
         dev0 = self.embed.weight.device
         input_ids = input_ids.to(dev0)
         positions = torch.arange(input_ids.shape[0], device=dev0)
         h0 = rms_norm(self.embed.weight[input_ids], self.embed_norm.weight, cfg.rms_norm_eps)
         state = AttnResState(self, h0)
-        for layer in self.layers:
-            layer(state, positions, act_quant)
+        core = cfg.loop_core_layers
+        if not core:
+            for layer in self.layers:
+                layer(state, positions, act_quant, routing=routing)
+        else:
+            for layer in self.layers[: core.start]:
+                layer(state, positions, act_quant, routing=routing)
+            prelude = state.copy()
+            messages = None
+            for p in range(cfg.loop_config["num_passes"]):
+                if p:
+                    # The previous pass's block outputs: drop the prelude's blocks and its partial sum.
+                    bank = (*state.blocks[len(prelude.blocks) + 1 :], state.partial)
+                    messages = MessageBank(
+                        bank, self.middle_cycle_cross_pass_queries, self.middle_cycle_cross_pass_kv_queries
+                    )
+                    state = prelude.copy()
+                for layer in self.layers[core.start : core.stop]:
+                    layer(state, positions, act_quant, messages=messages, routing=routing)
+                if pass_states is not None:
+                    pass_states.append(state.partial.cpu())
+            for layer in self.layers[core.stop :]:
+                layer(state, positions, act_quant, routing=routing)
         state.to(self.norm.weight.device)
         return rms_norm(state.output(), self.norm.weight, cfg.rms_norm_eps)
 
@@ -622,7 +737,7 @@ def load_reference(path: str, devices: Optional[Sequence[torch.device]] = None) 
                     continue
                 if key not in params:
                     raise KeyError(f"unexpected checkpoint tensor {name}")
-                parent, attr = key.rsplit(".", 1)
+                parent, _, attr = key.rpartition(".")
                 module = model.get_submodule(parent)
                 if tuple(tensor.shape) != tuple(params[key].shape):
                     raise ValueError(f"{name}: shape {tuple(tensor.shape)} != {tuple(params[key].shape)}")
