@@ -5,7 +5,10 @@ import numpy as np
 import pytest
 import torch
 
-from skyrl.backends.skyrl_train.distributed.megatron import token_metadata
+from skyrl.backends.skyrl_train.distributed.megatron import (
+    packing_utils,
+    token_metadata,
+)
 from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     TokenMetadataTrace,
 )
@@ -34,7 +37,7 @@ def parallel_state(monkeypatch):
 
 
 def test_microbatch_rows_share_one_packed_layout(monkeypatch, parallel_state):
-    monkeypatch.setattr(token_metadata, "get_packing_align_size_total", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(packing_utils, "get_packing_align_size_total", lambda *args, **kwargs: 4)
     attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
     routes = torch.tensor(
         [
@@ -73,7 +76,7 @@ def test_microbatch_rows_share_one_packed_layout(monkeypatch, parallel_state):
 
 
 def test_packed_layout_aligns_next_token_metadata_and_scatters_rows(monkeypatch, parallel_state):
-    monkeypatch.setattr(token_metadata, "get_packing_align_size_total", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(packing_utils, "get_packing_align_size_total", lambda *args, **kwargs: 4)
     attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
     metadata = torch.tensor([[0, 10, 11, 12], [0, 0, 20, 21]], dtype=torch.int32)
     layout = token_metadata.build_token_metadata_layout(
@@ -225,7 +228,7 @@ def test_routed_expert_trace_refuses_a_loss_active_target_without_a_row(active: 
 @pytest.mark.parametrize("packed", [False, True])
 def test_align_token_rows_places_each_trajectory_from_its_own_row_source(monkeypatch, parallel_state, packed):
     """``_align_token_rows`` is the one placement loop both alignment entry points share."""
-    monkeypatch.setattr(token_metadata, "get_packing_align_size_sequence", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(packing_utils, "get_packing_align_size_sequence", lambda *args, **kwargs: 4)
     monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
     attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
     rows = [torch.tensor([10, 11, 12], dtype=torch.int32), torch.tensor([20, 21], dtype=torch.int32)]
@@ -253,7 +256,7 @@ def test_align_token_rows_places_each_trajectory_from_its_own_row_source(monkeyp
 @pytest.mark.parametrize("packed", [False, True])
 def test_align_packed_token_metadata_honours_per_segment_starts(monkeypatch, parallel_state, packed):
     """A response-suffix channel covers part of a trajectory and needs its own start."""
-    monkeypatch.setattr(token_metadata, "get_packing_align_size_total", lambda *args, **kwargs: 4)
+    monkeypatch.setattr(packing_utils, "get_packing_align_size_total", lambda *args, **kwargs: 4)
     monkeypatch.setattr(token_metadata, "get_unpacked_seq_align_size", lambda *args, **kwargs: 4)
     attention_mask = torch.tensor([[0, 1, 1, 1], [0, 0, 1, 1]])
     # Trajectory 0 keeps its last 2 of 3 real tokens; trajectory 1 keeps its last 1 of 2.
