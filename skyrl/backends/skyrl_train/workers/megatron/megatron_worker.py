@@ -49,6 +49,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
+    mtp_heads_lr,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
@@ -1213,13 +1214,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             optim_config = init_megatron_optim_config(
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
+            mtp_lr = self.cfg.mtp.lr if self.cfg.mtp.enabled else None
+            if mtp_lr is not None:
+                logger.info(f"MTP heads: own optimizer param group at lr {mtp_lr} (policy lr {optim_config.lr})")
             offload_cfg = self.cfg.policy.megatron_config.optimizer_offload_to_disk
             offload_to_disk = None
             if offload_cfg.dir is not None:
                 if self._is_lora:
                     raise ValueError("optimizer_offload_to_disk does not support LoRA.")
                 offload_to_disk = dataclasses.replace(offload_cfg, dir=os.path.join(offload_cfg.dir, self.cfg.run_name))
-            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config, offload_to_disk=offload_to_disk)
+            self.optimizer = get_megatron_optimizer(
+                self.actor_module, optim_config, offload_to_disk=offload_to_disk, mtp_lr=mtp_lr
+            )
 
             # create scheduler
             self.scheduler = get_megatron_optimizer_param_scheduler(
@@ -1575,6 +1581,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         status = reduce_metrics(all_metrics, sum_loss_metrics=True)
         if self.optimizer is not None:
             status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
+            mtp_lr = mtp_heads_lr(self.optimizer, self.cfg.mtp.lr) if self.cfg.mtp.enabled else None
+            if mtp_lr is not None:
+                status["mtp_lr"] = mtp_lr
 
         # Token-based batching diagnostics: total microbatches this rank ran and how many
         # were purely-padding (added to equalize the microbatch count across DP ranks).
@@ -1665,6 +1674,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item() if hasattr(grad_norm, "item") else grad_norm
         return grad_norm
+
+    def mtp_grad_norm(self) -> Optional[float]:
+        """The MTP heads' own pre-clip grad norm from the last ``optim_step`` (``mtp/grad_clip.py``, installed
+        whenever heads are trained), or None if that step was skipped on inf/nan grads. It is a collective
+        reduction, so every rank holds the same value."""
+        norm = self.optimizer.mtp_grad_norm
+        # float() also unwraps the 1-element tensor Megatron's grad-norm may return.
+        return None if norm is None else float(norm)
 
     def get_lr(self) -> Optional[float]:
         """
