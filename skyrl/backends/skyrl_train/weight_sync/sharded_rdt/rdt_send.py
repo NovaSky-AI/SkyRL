@@ -25,12 +25,14 @@ from loguru import logger as _loguru
 from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.sharded_rdt_base import (
     GroupedWeightSource,
     ParamMeta,
+    _stack_key,
     layerwise_groups,
     materialize_full_tensor,
 )
 from skyrl.backends.skyrl_train.weight_sync.sources import (
     FsdpWeightSource,
     MegatronWeightSource,
+    is_megatron_mtp_param,
     wire_dtype,
 )
 
@@ -138,6 +140,15 @@ def _pp_local_export_ctx():
     ``megatron_to_hf``, so an instance-level change — clearing ``pp_group`` to
     reach the upstream ``pp_size == 1`` fast path, say — would miss the delegate
     that actually performs the broadcast.
+
+    megatron-bridge 0.8 added the same mode upstream, ``skip_pp_broadcast()``, and
+    ``AutoMapping`` takes its "not mine" exit only inside it: a task with no local
+    module otherwise resolves its parallelism type to ``None`` and raises. The bridge
+    clears the module of the MTP stage's copy of the input embedding so that it is
+    exported once, from the first stage, so without the upstream mode only the MTP
+    stage fails its walk. ``make_megatron_weight_source`` then falls back on that
+    stage alone, and the stages meet in different PP collectives. So enter the
+    upstream mode too.
     """
     from megatron.bridge.models.conversion.param_mapping import MegatronParamMapping
 
@@ -155,7 +166,8 @@ def _pp_local_export_ctx():
     MegatronParamMapping.broadcast_from_pp_rank = _local_tensor
     MegatronParamMapping.broadcast_obj_from_pp_rank = _local_obj
     try:
-        yield
+        with MegatronParamMapping.skip_pp_broadcast():
+            yield
     finally:
         (
             MegatronParamMapping.broadcast_from_pp_rank,
@@ -230,7 +242,20 @@ class _ExpertLayer:
     invariant rather than a mode.
     """
 
-    layer: int
+    megatron_index: int
+    """The index in the layer's Megatron name: 3 for ``decoder.layers.3``, 0 for an MTP head's ``mtp.layers.0``.
+    It fills the Megatron name templates the bridge resolves (Megatron has no ``mtp.layers.<N>`` past its own
+    heads), but it is not unique: decoder layer 0 and the first MTP layer are both 0."""
+    checkpoint_key: tuple
+    """``_stack_key`` (prefix, index) of the layer's checkpoint (HF) names: its group in the RDT partition, and
+    the key of the walk and of every per-layer cache. Unique per layer, because the checkpoint names the head
+    apart from the decoder:
+
+        Megatron name      checkpoint name                    checkpoint_key
+        decoder.layers.3   model.layers.3                     ("model.layers", 3)
+        mtp.layers.0       model.layers.<num_hidden_layers>   ("model.layers", <num_hidden_layers>)  DeepSeek-style
+        mtp.layers.0       mtp.layers.0                       ("mtp.layers", 0)                      Qwen3-Next-style
+    """
     fc1: list
     fc2: list
     owned: bool
@@ -306,6 +331,8 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         self._verified = False
         # Per-layer expert HF name lists, built once (see _expert_names_for).
         self._expert_names: dict = {}
+        # (head, megatron_index) -> the layer's checkpoint_key, built once (see _checkpoint_key).
+        self._checkpoint_keys: dict = {}
         # The bridge's own mapping registry, cached: `mapping_registry()` rebuilds
         # the whole mapping list per call. Used ONLY for name lookup (a pure
         # string op), never to run a mapping, so it needs no process groups
@@ -353,9 +380,11 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         self._group_index_of_name: dict = {}
 
     @staticmethod
-    def _global_layer(global_param_name: str) -> int:
-        # global_param_name like "decoder.layers.<N>.mlp.experts.linear_fc1.weight<E>"
-        return int(global_param_name.split("layers.")[1].split(".")[0])
+    def _megatron_layer(global_param_name: str) -> tuple:
+        # "decoder.layers.<N>.mlp.experts.linear_fc1.weight<E>", or an MTP head's
+        # "mtp.layers.<N>.mtp_model_layer...", whose N restarts at 0: the stack is part of the key.
+        head, _, rest = global_param_name.partition("layers.")
+        return head, int(rest.split(".")[0])
 
     @staticmethod
     def _local_expert(global_param_name: str) -> int:
@@ -374,7 +403,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
             if self._EXPERT_PRED not in t.param_name:
                 non_expert.append(t)
                 continue
-            layer = self._global_layer(t.global_param_name)
+            layer = self._megatron_layer(t.global_param_name)
             fc = "fc1" if ".linear_fc1." in t.param_name else "fc2"
             layers.setdefault(layer, {"fc1": [], "fc2": []})[fc].append(t)
         for layer, d in layers.items():
@@ -417,37 +446,35 @@ class MegatronStackedWeightSource(GroupedWeightSource):
 
     def _expert_geometry(self, layers: dict) -> dict:
         """Per-layer expert geometry for the layers THIS rank holds, read off
-        the local conversion-task weights. Returns ``{layer: _ExpertLayer}``.
+        the local conversion-task weights. Returns ``{checkpoint_key: _ExpertLayer}``.
 
         Local only, no communication: a stage never materializes another
         stage's layers (pp-local at pp>1; at pp==1 every layer is local), so
         foreign geometry must not appear in the walk — the layers dict IS what
         the walk iterates."""
-        from megatron.core import parallel_state
-
-        ep_size = torch.distributed.get_world_size(parallel_state.get_expert_model_parallel_group())
-
         merged: dict = {}
-        for layer, d in layers.items():
+        for (head, megatron_index), d in layers.items():
             if not d["fc1"] or d["fc1"][0].param_weight is None:
                 continue
             two_f, h = d["fc1"][0].param_weight.shape
-            merged[layer] = _ExpertLayer(
-                layer=layer,
+            checkpoint_key = self._checkpoint_key(head, megatron_index, d["fc1"][0])
+            merged[checkpoint_key] = _ExpertLayer(
+                megatron_index=megatron_index,
+                checkpoint_key=checkpoint_key,
                 fc1=d["fc1"],
                 fc2=d["fc2"],
                 owned=True,
                 n_local=len(d["fc1"]),
                 F=two_f // 2,
                 H=h,
-                ep_size=ep_size,
+                ep_size=self._ep_size,
             )
         return merged
 
     # ---------------- gather primitives ----------------
 
     def _merge_lora_into_local_shards(
-        self, layer: int, fc1_local: torch.Tensor, fc2_local: torch.Tensor, tasks_by_base: dict
+        self, lay: _ExpertLayer, fc1_local: torch.Tensor, fc2_local: torch.Tensor, tasks_by_base: dict
     ) -> None:
         """Merge ``base += (alpha/dim) * B @ A`` into this rank's LOCAL expert
         shards, BEFORE the shard broadcast/gather — so the merged bytes ride
@@ -459,8 +486,10 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         Same fp32-accumulate-then-cast rounding as the full-stack merge.
         Owner stage only (non-owner ranks receive merged shards)."""
         n_local = fc1_local.shape[0]
-        for proj, local in (("linear_fc1", fc1_local), ("linear_fc2", fc2_local)):
-            tasks = tasks_by_base.get(f"decoder.layers.{layer}.mlp.experts.{proj}")
+        for proj_tasks, local in ((lay.fc1, fc1_local), (lay.fc2, fc2_local)):
+            # Adapters are keyed by the wrapped linear's global name, e.g. ``decoder.layers.3.mlp.experts.linear_fc1``.
+            base = proj_tasks[0].global_param_name.replace(".to_wrap.", ".").rsplit(".weight", 1)[0]
+            tasks = tasks_by_base.get(base)
             if not tasks:
                 continue
             t = tasks[0]
@@ -468,7 +497,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
             B = t.linear_out_task.param_weight
             if A is None or B is None:
                 raise RuntimeError(
-                    f"[stacked-source] layer {layer} {proj}: owner stage is missing local "
+                    f"[stacked-source] {base}: owner stage is missing local "
                     "adapter weights; cannot local-merge (set SKYRL_RDT_STACKED_EXPERTS=0)"
                 )
             # 3D = per-LOCAL-expert [n_local, ...]; 2D = shared across this
@@ -530,6 +559,37 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         base = tail.rsplit("weight", 1)[0]
         return head + "layers.{layer}." + base + "weight{e}"
 
+    def _mapping_registry(self) -> Any:
+        # getattr: tests drive this source on instances built without __init__.
+        reg = getattr(self, "_mapping_reg", None)
+        if reg is None:
+            reg = self._mapping_reg = self._prepared_model_bridge().mapping_registry()
+        return reg
+
+    def _checkpoint_key(self, head: str, megatron_index: int, fc1_task: Any) -> tuple:
+        """The layer's ``checkpoint_key`` (see ``_ExpertLayer``): ``_stack_key`` of its first expert's HF name,
+        from the bridge's mapping. Static per model, so cached."""
+        cache = self._checkpoint_keys
+        key = (head, megatron_index)
+        if key not in cache:
+            try:
+                t1 = self._mg_expert_template(fc1_task.global_param_name)
+                hf = self._mapping_registry().megatron_to_hf_lookup(t1.format(layer=megatron_index, e=0)).hf_param
+            except Exception as e:  # noqa: BLE001 - add context, then fail the sync
+                raise RuntimeError(
+                    "sharded_rdt failed to look up expert fc1 via the Megatron-Bridge mapping registry "
+                    f"({head}layers.{megatron_index}): {type(e).__name__}: {e}."
+                ) from e
+            hf_name = hf["gate"] if isinstance(hf, dict) and "gate" in hf else hf
+            checkpoint_key = _stack_key(hf_name) if isinstance(hf_name, str) else None
+            if checkpoint_key is None:
+                raise RuntimeError(
+                    "sharded_rdt could not read the checkpoint layer of expert fc1 from the Megatron-Bridge "
+                    f"mapping registry for {head}layers.{megatron_index}: got {hf!r}."
+                )
+            cache[key] = checkpoint_key
+        return cache[key]
+
     def _resolved_expert_names(self, lay: "_ExpertLayer", E: int) -> list:
         """Expert HF names straight from the bridge's mapping registry.
 
@@ -546,20 +606,17 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         downstream to notice. Failing the sync loudly is the only safe response.
         """
         try:
-            # getattr: tests drive this source on instances built without __init__.
-            reg = getattr(self, "_mapping_reg", None)
-            if reg is None:
-                reg = self._mapping_reg = self._prepared_model_bridge().mapping_registry()
+            reg = self._mapping_registry()
             t1 = self._mg_expert_template(lay.fc1[0].global_param_name)
             t2 = self._mg_expert_template(lay.fc2[0].global_param_name)
             names: list = []
             for e in range(E):
-                fc1 = getattr(reg.megatron_to_hf_lookup(t1.format(layer=lay.layer, e=e)), "hf_param", None)
-                fc2 = getattr(reg.megatron_to_hf_lookup(t2.format(layer=lay.layer, e=e)), "hf_param", None)
+                fc1 = getattr(reg.megatron_to_hf_lookup(t1.format(layer=lay.megatron_index, e=e)), "hf_param", None)
+                fc2 = getattr(reg.megatron_to_hf_lookup(t2.format(layer=lay.megatron_index, e=e)), "hf_param", None)
                 if not isinstance(fc1, dict) or "gate" not in fc1 or "up" not in fc1 or not isinstance(fc2, str):
                     raise RuntimeError(
                         "sharded_rdt could not resolve expert HF names from the "
-                        f"Megatron-Bridge mapping registry for layer {lay.layer} expert {e}: "
+                        f"Megatron-Bridge mapping registry for layer {lay.megatron_index} expert {e}: "
                         f"expected fc1 -> {{'gate': str, 'up': str}} and fc2 -> str, got "
                         f"fc1={fc1!r} fc2={fc2!r}."
                     )
@@ -572,7 +629,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         except Exception as e:  # noqa: BLE001 - add context, then fail the sync
             raise RuntimeError(
                 "sharded_rdt failed to look up expert HF names via the Megatron-Bridge "
-                f"mapping registry (layer {lay.layer}, {E} experts): {type(e).__name__}: {e}."
+                f"mapping registry (layer {lay.megatron_index}, {E} experts): {type(e).__name__}: {e}."
             ) from e
 
     def _expert_names_for(self, lay: "_ExpertLayer", E: int) -> list:
@@ -585,7 +642,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         DeepSeek do not), and a wrong name is never baked by the consumer, so those
         experts would silently keep stale weights.
         """
-        names = self._expert_names.get(lay.layer)
+        names = self._expert_names.get(lay.checkpoint_key)
         if names is not None:
             return names
         names = self._resolved_expert_names(lay, E)
@@ -593,7 +650,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
             # Positive marker, once, so a run records where its names came from.
             self._expert_name_source = "bridge mapping_registry"
             logger.info("[rdt-config] expert HF names from: bridge mapping_registry")
-        self._expert_names[lay.layer] = names
+        self._expert_names[lay.checkpoint_key] = names
         return names
 
     def _stack_into_ring(self, kind: str, src: list) -> torch.Tensor:
@@ -629,7 +686,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         self._stack_ring_pos = getattr(self, "_stack_ring_pos", 0) + 1
         if adapter_ctx is not None:
             _mb, tasks_by_base = adapter_ctx
-            self._merge_lora_into_local_shards(lay.layer, fc1_local, fc2_local, tasks_by_base)
+            self._merge_lora_into_local_shards(lay, fc1_local, fc2_local, tasks_by_base)
         return fc1_local, fc2_local
 
     def _extend_layer_experts(
@@ -651,7 +708,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         ``.contiguous()``."""
         # Recorded BEFORE the expert names are emitted, so metadata can
         # synthesize foreign experts' shapes (their tensors are None).
-        self._layer_geom[lay.layer] = (lay.F, lay.H)
+        self._layer_geom[lay.checkpoint_key] = (lay.F, lay.H)
         fc1_local, fc2_local = self._local_layer_stacks(lay, adapter_ctx)
         F, E = lay.F, lay.E
         gates = fc1_local[:, :F].unbind(0)
@@ -676,19 +733,10 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         self._extend_layer_experts(lay, adapter_ctx, names, tensors)
         return zip(names, tensors)
 
-    @staticmethod
-    def _layer_of_hf_name(name: str) -> Optional[int]:
-        if ".layers." not in name:
-            return None
-        try:
-            return int(name.split(".layers.")[1].split(".")[0])
-        except (IndexError, ValueError):
-            return None
-
     # ---------------- WeightSource interface ----------------
 
     def _build_export_plan(self) -> tuple:
-        """Per-sync plan: ``(non_expert_tasks, {layer: _ExpertLayer}, adapter_ctx)``.
+        """Per-sync plan: ``(non_expert_tasks, {checkpoint_key: _ExpertLayer}, adapter_ctx)``.
 
         Runs once per walk, before any tensor is produced: it is not per-yield
         work, and it costs 0.74 s/sync at 235B — more than every per-tensor cost
@@ -700,6 +748,11 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         """
         tasks = self._bridge.get_conversion_tasks(self._module)
         non_expert, raw_layers = self._partition_tasks(tasks)
+        # The bridge sorts tasks by their first ``layers.<N>``, so an MTP head's ``mtp.layers.<i>`` streams with
+        # decoder layer i. Stream it after the decoder layers instead, where its group sits in the partition:
+        # a PP stage would otherwise hold it back behind them (see _walk_in_group_order). Stable, so the
+        # bridge's order (which every rank shares) is otherwise kept.
+        non_expert.sort(key=lambda t: is_megatron_mtp_param(t.global_param_name))
         layers = self._expert_geometry(raw_layers)
         # LoRA-wrapped experts: raw to_wrap weights need the adapter delta
         # merged in (the bridge would have merged during its per-tensor export).
@@ -777,21 +830,18 @@ class MegatronStackedWeightSource(GroupedWeightSource):
             _it = iter(_stream)
             names: list = []
             tensors: list = []
-            prev_layer: Optional[int] = None
+            # Keyed as the partition is (see layerwise_groups), whose post block is every un-indexed name after the
+            # first layer: held back and sent last, however early it streams. On a stage after the first that is
+            # all of them, as the pre block is the first stage's.
+            post_names: list = []
+            post_tensors: list = []
+            later_stage = self._pp_local and self._pp_geometry()[1] > 0
+            prev_key: Optional[tuple] = None
             while True:
                 item = next(_it, None)
                 if item is None:
                     break
                 name, tensor = item
-                layer = self._layer_of_hf_name(name)
-                if names and layer != prev_layer:
-                    # Group boundary (pre -> layer 0, layer N -> N+1, last layer
-                    # -> post): append the closing layer's experts, then flush.
-                    if prev_layer is not None and prev_layer in pending:
-                        self._extend_layer_experts(pending.pop(prev_layer), adapter_ctx, names, tensors)
-                    yield names, tensors
-                    names, tensors = [], []
-                prev_layer = layer
                 # Warm steady state: bridge already yields target dtype on-device —
                 # skip the no-op .to()/.contiguous() dispatches. fp32 / integer parameters
                 # (e.g. the MoE router) keep their dtype, as on the push backends.
@@ -801,18 +851,33 @@ class MegatronStackedWeightSource(GroupedWeightSource):
                 tensor = tensor.detach()
                 if not tensor.is_contiguous():
                     tensor = tensor.contiguous()
+                key = _stack_key(name)
+                if key is None and (prev_key is not None or later_stage):
+                    post_names.append(name)
+                    post_tensors.append(tensor)
+                    continue
+                if names and key != prev_key:
+                    # Group boundary (pre -> layer 0, layer N -> N+1): append
+                    # the closing layer's experts, then flush.
+                    if prev_key is not None and prev_key in pending:
+                        self._extend_layer_experts(pending.pop(prev_key), adapter_ctx, names, tensors)
+                    yield names, tensors
+                    names, tensors = [], []
+                prev_key = key
                 names.append(name)
                 tensors.append(tensor)
-            if prev_layer is not None and prev_layer in pending:
-                self._extend_layer_experts(pending.pop(prev_layer), adapter_ctx, names, tensors)
+            if prev_key is not None and prev_key in pending:
+                self._extend_layer_experts(pending.pop(prev_key), adapter_ctx, names, tensors)
             if names:
                 yield names, tensors
             # Layers whose non-expert tensors were all emitted before a boundary
             # was seen (or post-block orderings): emit stragglers in layer order.
-            for layer in sorted(pending):
+            for key in sorted(pending):
                 names, tensors = [], []
-                self._extend_layer_experts(pending.pop(layer), adapter_ctx, names, tensors)
+                self._extend_layer_experts(pending.pop(key), adapter_ctx, names, tensors)
                 yield names, tensors
+            if post_names:
+                yield post_names, post_tensors
         # [RDT-EXPORT-RING] Drop our refs so the buffers (a layer's experts each,
         # hundreds of MB) do not survive into the training step. The consumer of
         # this generator still holds the last groups' views, so nothing in flight
@@ -838,7 +903,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         per layer — gate/up ``[F, H]``, down ``[H, F]`` — and the walk records
         each layer's ``(F, H)`` before that layer's expert names are emitted, so
         every ``None`` this rank yields belongs to a layer it walked."""
-        F, H = self._layer_geom[self._layer_of_hf_name(name)]
+        F, H = self._layer_geom[_stack_key(name)]
         return (H, F) if ".down_proj." in name else (F, H)
 
     @cached_property
@@ -894,9 +959,10 @@ class MegatronStackedWeightSource(GroupedWeightSource):
 
         The bridge streams a stage's tasks in ITS order, which need not agree with
         the partition: at 235B the last stage exports the output block before its
-        layers, while ``layerwise_groups`` places that block last. The gather loop
-        walks the held groups ascending and holds the source to it, so a group
-        that arrives early is held back until its turn.
+        layers, while ``layerwise_groups`` places that block last (the walk holds
+        that block back itself). The gather loop walks the held groups ascending
+        and holds the source to it, so a group that arrives early is held back
+        until its turn.
 
         Only the non-layer block is ever out of order, so at most a couple of
         groups are ever held. Holding a LAYER group would pin its gathered stacks
@@ -910,6 +976,14 @@ class MegatronStackedWeightSource(GroupedWeightSource):
                 raise RuntimeError(
                     f"PP-local walk yielded a group starting {names[0]!r}, which is "
                     "not in the assembled partition; metadata and the walk disagree."
+                )
+            # A held layer group's experts are views into the reused export ring, which the groups walked
+            # after it overwrite before it is sent.
+            ahead = not expect or gi != expect[0]
+            if ahead and self._stack_ring_on and _stack_key(names[0]) in self._layer_geom:
+                raise RuntimeError(
+                    f"PP-local walk yielded layer group {gi} ({names[0]!r}) ahead of group {expect[:1]}; its "
+                    "experts sit in the reused export ring and would be overwritten before they are sent."
                 )
             held[gi] = (names, tensors)
             # `held` is the legitimate hold (bounded to 2 below); the loop
@@ -1009,7 +1083,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
         parsed: list = []
         for m in meta:
             e = self._expert_index_of(m.name)
-            layer = self._layer_of_hf_name(m.name) if e is not None else None
+            layer = _stack_key(m.name) if e is not None else None
             parsed.append((e, layer))
             if e is not None:
                 e_max[layer] = max(e, e_max.get(layer, -1))
@@ -1114,7 +1188,7 @@ class MegatronStackedWeightSource(GroupedWeightSource):
                 del ref, tensor
             del mine
             if rank == 0:
-                logger.info("[stacked-verify] layer %d: expert tensors match bridge export", layer)
+                logger.info("[stacked-verify] layer %s: expert tensors match bridge export", layer)
 
 
 def make_fsdp_weight_source(model: Any, dtype: torch.dtype, weight_prefix: str = "") -> GroupedWeightSource:
@@ -1161,6 +1235,10 @@ def make_megatron_weight_source(bridge: Any, module: Any, dtype: torch.dtype) ->
             # filtered==full export, so the simpler path is kept. The `_demoted`
             # check below still catches layouts a stage cannot serve alone (tied
             # embeddings, MTP).
+            # An MTP head needs the stacked source's ordering: the bridge streams ``mtp.layers.<i>`` with decoder
+            # layer i and the head's un-indexed names mid-stream, which is not group-contiguous; the stacked
+            # source streams the MTP tasks after the decoder layers and holds the post block back.
+            has_mtp = any(is_megatron_mtp_param(t.global_param_name) for t in tasks)
             pp_local_gain = False
             if not expert_tasks:
                 try:
@@ -1169,7 +1247,7 @@ def make_megatron_weight_source(bridge: Any, module: Any, dtype: torch.dtype) ->
                     pp_local_gain = parallel_state.get_pipeline_model_parallel_world_size() > 1
                 except Exception:  # noqa: BLE001
                     pp_local_gain = False
-            if (expert_tasks or pp_local_gain) and not grouped and etp_ok:
+            if (expert_tasks or pp_local_gain or has_mtp) and not grouped and etp_ok:
                 if wrapped:
                     logger.info("[rdt] stacked expert source with LoRA stack-merge (etp=1)")
                 src = MegatronStackedWeightSource(bridge, module, dtype)

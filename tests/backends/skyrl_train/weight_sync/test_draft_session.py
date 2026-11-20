@@ -236,9 +236,11 @@ class TestBuildTrainerEngineDraftSource:
         assert seen["draft_factory_args"] == []
         assert seen["engine"].skyrl_draft_source is None
 
-    def test_sharded_rdt_refuses_before_rendezvous(self, monkeypatch):
-        with pytest.raises(ValueError, match="sharded_rdt cannot sync the spec-decode drafter"):
-            self._build(monkeypatch, {"method": "mtp"}, weight_sync_backend="sharded_rdt")
+    def test_sharded_rdt_builds_no_draft_source(self, monkeypatch):
+        """Its plan carries the MTP layers, which its engines bake into the drafter."""
+        seen = self._build(monkeypatch, {"method": "mtp"}, weight_sync_backend="sharded_rdt")
+        assert seen["draft_factory_args"] == []
+        assert seen["engine"].skyrl_draft_source is None
 
 
 class TestMegatronDraftParams:

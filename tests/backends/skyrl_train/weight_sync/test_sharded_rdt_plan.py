@@ -1544,6 +1544,8 @@ class TestComposedPostLoadTransform:
         eng.device = torch.device("cpu")
         eng._name_to_plan = {}
         eng._post_load_fns = {}
+        # Set by __init__; this stub-built engine has no spec-decode drafter.
+        eng._draft = None
         init_info = SkyRLShardedRDTWeightTransferInitInfo(names=["A_log"], dtype_names=["float32"], shapes=[[4]])
         a_log = torch.arange(4, dtype=torch.float32)
 

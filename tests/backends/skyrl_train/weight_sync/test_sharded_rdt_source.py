@@ -12,7 +12,9 @@ Adapted from the vLLM RDT fork (`tests/distributed/test_weight_transfer.py`).
 Marked `vllm`: `sharded_rdt_base` imports the base ABCs from the wheel.
 """
 
+import importlib
 from functools import cached_property
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -367,3 +369,277 @@ class TestExpertNameResolution:
         base = f"{hf_prefix}.layers.{layer}.mlp.experts.{expert}"
         assert fc1 == {"gate": f"{base}.gate_proj.weight", "up": f"{base}.up_proj.weight"}
         assert fc2 == f"{base}.down_proj.weight"
+
+
+class TestMtpExperts:
+    """A trained MTP head's experts are their own group, under the HF layer the bridge maps them to."""
+
+    @staticmethod
+    def _task(name):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(param_name=name, global_param_name=name)
+
+    def test_mtp_experts_are_keyed_apart_from_decoder_layer_0(self):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            MegatronStackedWeightSource,
+        )
+
+        tasks = [
+            self._task("decoder.layers.0.mlp.experts.linear_fc1.weight0"),
+            self._task("mtp.layers.0.transformer_layer.mlp.experts.linear_fc1.weight0"),
+            self._task("mtp.layers.0.eh_proj.weight"),
+        ]
+        src = MegatronStackedWeightSource.__new__(MegatronStackedWeightSource)
+        non_expert, layers = src._partition_tasks(tasks)
+        assert [t.global_param_name for t in non_expert] == ["mtp.layers.0.eh_proj.weight"]
+        assert sorted(layers) == [("decoder.", 0), ("mtp.", 0)]
+
+    @staticmethod
+    def _source_with_registry(reg):
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            MegatronStackedWeightSource,
+        )
+
+        model_bridge = SimpleNamespace(mapping_registry=lambda: reg)
+        bridge = SimpleNamespace(_model_bridge=model_bridge, hf_pretrained=None)
+        return MegatronStackedWeightSource(bridge, module=None, dtype=torch.bfloat16)
+
+    @staticmethod
+    def _mg_names(n_layers, n_mtp, moe, hybrid=False):
+        """Megatron names of a tiny model: a few decoder layers, then ``n_mtp`` MTP layers.
+
+        ``hybrid``: a HybridModel (GLM-5 under megatron-bridge 0.8), whose decoder layer ``i`` is attention layer
+        ``2i`` and MLP layer ``2i + 1``.
+        """
+
+        def block(attn, mlp):
+            if not moe:
+                return [f"{attn}.self_attention.linear_proj.weight", f"{mlp}.mlp.linear_fc2.weight"]
+            experts = [f"{mlp}.mlp.experts.linear_fc{k}.weight{e}" for k in (1, 2) for e in range(2)]
+            return [f"{attn}.self_attention.linear_proj.weight", f"{mlp}.mlp.router.weight", *experts]
+
+        def layer(prefix, i):
+            if hybrid:
+                return block(f"{prefix}.{2 * i}", f"{prefix}.{2 * i + 1}")
+            return block(f"{prefix}.{i}", f"{prefix}.{i}")
+
+        final_norm = "decoder.final_norm.weight" if hybrid else "decoder.final_layernorm.weight"
+        names = ["embedding.word_embeddings.weight", final_norm, "output_layer.weight"]
+        names += [n for i in range(n_layers) for n in layer("decoder.layers", i)]
+        for i in range(n_mtp):
+            names += [f"mtp.layers.{i}.{p}.weight" for p in ("enorm", "hnorm", "eh_proj", "final_layernorm")]
+            if hybrid:
+                names += layer(f"mtp.layers.{i}.mtp_model_layer.layers", 0)
+            else:
+                names += block(f"mtp.layers.{i}.mtp_model_layer", f"mtp.layers.{i}.mtp_model_layer")
+        return names
+
+    @pytest.mark.megatron
+    @pytest.mark.parametrize(
+        "bridge, n_mtp, moe, hybrid",
+        [
+            ("glm_moe_dsa.glm5_bridge.GLM5Bridge", 1, True, True),  # the head is model.layers.<num_hidden_layers>
+            ("deepseek.deepseek_v3_bridge.DeepSeekV3Bridge", 1, True, False),
+            ("qwen.qwen3_next_bridge.Qwen3NextBridge", 1, True, False),  # mtp.layers.0, and un-indexed mtp.fc etc.
+            ("mimo.mimo_bridge.MimoBridge", 2, False, False),  # model.mtp_layers.<i>: no ".layers."
+        ],
+    )
+    def test_the_walk_is_the_partition_for_each_bridges_mtp_names(self, bridge, n_mtp, moe, hybrid):
+        """Through the real mapping registry, at pp=1: the walk's batches are ``layerwise_groups`` over its
+        metadata, head included, and every name the tasks map to is sent once, with no layer's experts
+        keyed onto another's."""
+        pytest.importorskip("megatron.bridge", reason="needs the megatron extra")
+        from megatron.bridge.models.conversion.utils import extract_sort_key
+
+        module, cls = bridge.rsplit(".", 1)
+        bridge_cls = getattr(importlib.import_module(f"megatron.bridge.models.{module}"), cls)
+        bridge_obj = bridge_cls.__new__(bridge_cls)  # mapping_registry reads only hf_config
+        bridge_obj.hf_config = SimpleNamespace(num_hidden_layers=3, num_nextn_predict_layers=n_mtp)
+        reg = bridge_obj.mapping_registry()
+
+        def hf_names(task):
+            hf = reg.megatron_to_hf_lookup(task.global_param_name).hf_param
+            return list(hf.values()) if isinstance(hf, dict) else [hf]
+
+        # In the bridge's own task order, which streams mtp.layers.<i> with decoder layer i.
+        mg_names = sorted(self._mg_names(3, n_mtp, moe, hybrid), key=extract_sort_key)
+        tasks = [SimpleNamespace(param_name=n, global_param_name=n, param_weight=torch.zeros(4, 2)) for n in mg_names]
+        src = self._source_with_registry(reg)
+        src._bridge.get_conversion_tasks = lambda module: tasks
+        src._bridge._model_bridge.stream_weights_megatron_to_hf = lambda *args, conversion_tasks, **kwargs: (
+            (name, torch.zeros(2)) for t in conversion_tasks for name in hf_names(t)
+        )
+
+        meta = [m.name for m in src.metadata]
+        assert [names for names, _ in src.iter_groups()] == layerwise_groups(meta)
+        assert sorted(meta) == sorted(name for t in tasks for name in hf_names(t))
+
+    def test_a_dense_model_with_an_mtp_head_gets_the_stacked_source(self, monkeypatch):
+        """The plain source streams the bridge's order, where ``mtp.layers.0`` sits with decoder layer 0: not
+        group-contiguous. A dense model with an MTP head therefore gets the stacked source, which reorders it."""
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
+
+        class _Stacked:
+            _EXPERT_PRED = rdt_send.MegatronStackedWeightSource._EXPERT_PRED
+            _demoted = False
+
+            def __init__(self, bridge, module, dtype):
+                pass
+
+            def held_names(self):
+                return None
+
+        monkeypatch.setattr(rdt_send, "MegatronStackedWeightSource", _Stacked)
+        tasks = [
+            self._task("decoder.layers.0.self_attention.linear_proj.weight"),
+            self._task("mtp.layers.0.eh_proj.weight"),
+        ]
+        for t in tasks:
+            t.mapping = SimpleNamespace()
+        bridge = SimpleNamespace(get_conversion_tasks=lambda module: tasks)
+        assert isinstance(rdt_send.make_megatron_weight_source(bridge, None, torch.bfloat16), _Stacked)
+        tasks.pop()  # no MTP head: a dense model at pp == 1 keeps the plain source
+        assert isinstance(
+            rdt_send.make_megatron_weight_source(bridge, None, torch.bfloat16), rdt_send.RdtMegatronWeightSource
+        )
+
+    def test_lora_merges_each_layers_own_adapters(self):
+        """Adapters are keyed by the wrapped linear's Megatron name: an MTP head's are not decoder layer 0's."""
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            MegatronStackedWeightSource,
+            _ExpertLayer,
+        )
+
+        head = "mtp.layers.0.transformer_layer.mlp.experts"
+        fc1, fc2 = ([self._task(f"{head}.linear_fc{k}.to_wrap.weight0")] for k in (1, 2))
+        lay = _ExpertLayer(
+            megatron_index=0,
+            checkpoint_key=("model.layers", 4),
+            fc1=fc1,
+            fc2=fc2,
+            owned=True,
+            n_local=1,
+            F=1,
+            H=1,
+            ep_size=1,
+        )
+
+        def adapter(rows, scale):  # B @ A is `scale` everywhere
+            lin_in = SimpleNamespace(param_weight=torch.ones(1, 1))
+            lin_out = SimpleNamespace(param_weight=torch.full((rows, 1), scale))
+            return [SimpleNamespace(linear_in_task=lin_in, linear_out_task=lin_out, alpha=1, dim=1)]
+
+        tasks_by_base = {
+            f"{prefix}.linear_fc{k}": adapter(rows, scale)
+            for prefix, scale in (("decoder.layers.0.mlp.experts", 1.0), (head, 2.0))
+            for k, rows in ((1, 2), (2, 1))
+        }
+        fc1_local, fc2_local = torch.zeros(1, 2, 1), torch.zeros(1, 1, 1)
+        src = MegatronStackedWeightSource.__new__(MegatronStackedWeightSource)
+        src._merge_lora_into_local_shards(lay, fc1_local, fc2_local, tasks_by_base)
+        assert fc1_local.eq(2).all() and fc2_local.eq(2).all()
+
+    def test_mtp_tasks_stream_after_the_decoder_layers(self, monkeypatch):
+        """The bridge sorts ``mtp.layers.0`` with decoder layer 0; the plan moves it behind the decoder."""
+        from types import SimpleNamespace
+
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            MegatronStackedWeightSource,
+        )
+
+        tasks = [
+            self._task("output_layer.weight"),
+            self._task("mtp.layers.0.eh_proj.weight"),
+            self._task("decoder.layers.0.input_layernorm.weight"),
+            self._task("mtp.layers.0.enorm.weight"),
+            self._task("decoder.layers.1.input_layernorm.weight"),
+        ]
+        src = MegatronStackedWeightSource.__new__(MegatronStackedWeightSource)
+        src._bridge, src._module = SimpleNamespace(get_conversion_tasks=lambda module: tasks), object()
+        monkeypatch.setattr(src, "_expert_geometry", lambda raw_layers: raw_layers, raising=False)
+
+        non_expert, _, _ = src._build_export_plan()
+
+        assert [t.global_param_name for t in non_expert] == [
+            "output_layer.weight",
+            "decoder.layers.0.input_layernorm.weight",
+            "decoder.layers.1.input_layernorm.weight",
+            "mtp.layers.0.eh_proj.weight",
+            "mtp.layers.0.enorm.weight",
+        ]
+
+    @staticmethod
+    def _last_stage_walk(monkeypatch, stream_layers, tail=()):
+        """The PP-local walk of a last stage holding decoder layers 2 and 3 and the MTP head (HF layer 4).
+
+        Each layer's local experts hold the layer's index, and the export ring is on at depth 2. The
+        bridge streams the post block first, then ``stream_layers`` in order, then the un-indexed ``tail``.
+        """
+        import contextlib
+        from types import SimpleNamespace
+
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt.rdt_send import (
+            MegatronStackedWeightSource,
+            _ExpertLayer,
+        )
+
+        F, H = 4, 3
+
+        def lay(layer):
+            fc1 = [SimpleNamespace(param_weight=torch.full((2 * F, H), float(layer)))]
+            fc2 = [SimpleNamespace(param_weight=torch.full((H, F), float(layer)))]
+            key = ("model.layers", layer)
+            return _ExpertLayer(
+                megatron_index=layer, checkpoint_key=key, fc1=fc1, fc2=fc2, owned=True, n_local=1, F=F, H=H, ep_size=1
+            )
+
+        stream = [("model.norm.weight", torch.zeros(H)), ("lm_head.weight", torch.zeros(H))]
+        stream += [(f"model.layers.{layer}.input_layernorm.weight", torch.zeros(H)) for layer in stream_layers]
+        stream += [(name, torch.zeros(H)) for name in tail]
+        src = MegatronStackedWeightSource.__new__(MegatronStackedWeightSource)
+        src._dtype, src._pp_local, src._demoted = torch.float32, True, False
+        src._pp_geometry = lambda: (2, 1)
+        src._stack_ring, src._stack_ring_pos, src._stack_ring_depth, src._stack_ring_on = {}, 0, 2, True
+        src._expert_names, src._layer_geom, src._my_ep_rank = {}, {}, 0
+        src._bridge, src._module = SimpleNamespace(hf_pretrained=None), None
+        src._build_export_plan = lambda: ([], {("model.layers", layer): lay(layer) for layer in (2, 3, 4)}, None)
+        stream_fn = lambda *args, **kwargs: iter(stream)  # noqa: E731
+        src._prepared_model_bridge = lambda: SimpleNamespace(stream_weights_megatron_to_hf=stream_fn)
+        src._expert_names_for = lambda lay, E: [
+            f"model.layers.{lay.checkpoint_key[1]}.mlp.experts.0.{p}_proj.weight" for p in ("gate", "up", "down")
+        ]
+        # The partition: decoder layers, the MTP head, then the post block.
+        groups = [[f"model.layers.{layer}.input_layernorm.weight"] for layer in (2, 3, 4)]
+        groups.append(["model.norm.weight", "lm_head.weight", *tail])
+        src._group_index_of_name = {n: gi for gi, g in enumerate(groups) for n in g}
+        src._owned_group_idx = list(range(len(groups)))
+        monkeypatch.setattr(rdt_send, "_pp_local_export_ctx", contextlib.nullcontext)
+        monkeypatch.setattr(rdt_send, "_qkv_index_device_ctx", contextlib.nullcontext)
+        return [
+            (
+                [n for n in names if ".experts." not in n],
+                {float(t.flatten()[0]) for n, t in zip(names, tensors) if ".experts." in n},
+            )
+            for names, tensors in src._iter_groups_impl(collect_meta=False)
+        ]
+
+    def test_each_layer_group_carries_its_own_experts(self, monkeypatch):
+        groups = self._last_stage_walk(monkeypatch, [2, 3, 4])
+        assert groups == [
+            (["model.layers.2.input_layernorm.weight"], {2.0}),
+            (["model.layers.3.input_layernorm.weight"], {3.0}),
+            (["model.layers.4.input_layernorm.weight"], {4.0}),
+            (["model.norm.weight", "lm_head.weight"], set()),
+        ]
+
+    def test_a_later_stage_sends_all_its_un_indexed_names_as_the_post_group(self, monkeypatch):
+        """On both sides of its layers: the output block before them, an MTP head's own norm after."""
+        groups = self._last_stage_walk(monkeypatch, [2, 3, 4], tail=["mtp.norm.weight"])
+        assert groups[3:] == [(["model.norm.weight", "lm_head.weight", "mtp.norm.weight"], set())]
+
+    def test_a_layer_group_held_behind_later_layers_raises(self, monkeypatch):
+        """Its experts would be sent from export-ring slots the later layers have already reused."""
+        with pytest.raises(RuntimeError, match="overwritten before they are sent"):
+            self._last_stage_walk(monkeypatch, [4, 2, 3])

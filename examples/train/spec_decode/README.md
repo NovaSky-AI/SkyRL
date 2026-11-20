@@ -10,6 +10,7 @@ Requires the `megatron` backend and the `vllm` inference engine, plus an MTP-cap
 trainer.mtp.enabled=true \
 trainer.mtp.num_speculative_tokens=3 \      # vLLM draft depth
 trainer.mtp.loss_weight=0.2 \               # weight of the draft loss
+trainer.mtp.loss_type=distribution \        # distill the policy's distribution (default: hard_label)
 trainer.policy.megatron_config.mtp_loss_topk=256   # top-k soft CE (memory-efficient)
 ```
 
@@ -37,3 +38,7 @@ bash examples/train/spec_decode/run_search_megatron_mimo_7b_specdecode.sh
 ## Monitoring acceptance
 
 Acceptance determines your speedup. It's logged under `vllm/train/` — most importantly `draft_mean_acceptance_length` (tokens per target forward pass; this *is* the speedup factor) and the per-depth breakdown `draft_acceptance_rate_pos_{1..k}`. The draft loss is logged as `mtp_loss` on the training side. See [the docs](https://docs.skyrl.ai/docs/examples/spec_decode#monitoring-acceptance) for the full list.
+
+## Weight sync
+
+Every weight sync also refreshes the drafter. `nccl` and `delta` send the MTP head in a second session; `sharded_rdt` pulls the MTP layer with the target's layers, and each engine reloads its drafter in the same session.

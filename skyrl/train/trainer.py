@@ -1661,6 +1661,11 @@ class RayPPOTrainer:
                 grad_norm = self.dispatch.optim_step(model)
                 if grad_norm is not None:
                     all_metrics["grad_norm"].append(grad_norm)
+                # The draft heads are clipped by their own norm (mtp/grad_clip.py); grad_norm stays the policy's.
+                if model == "policy" and self.cfg.trainer.mtp.enabled and self.cfg.trainer.strategy == "megatron":
+                    mtp_grad_norm = self.dispatch.mtp_grad_norm(model)
+                    if mtp_grad_norm is not None:
+                        all_metrics["mtp_grad_norm"].append(mtp_grad_norm)
 
         # Reduce metrics across all mini-batches and epochs
         reduced_metrics = reduce_metrics(all_metrics, sum_loss_metrics=False)

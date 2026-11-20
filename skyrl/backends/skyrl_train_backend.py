@@ -199,6 +199,12 @@ def _build_skyrl_train_config(
     cfg = SkyRLTrainConfig.from_cli_overrides(
         {**backend_config, **{key: value for key, (value, _) in server_values.items()}}
     )
+    # This path never runs validate_cfg, which configures and checks MTP.
+    if cfg.trainer.mtp.enabled:
+        raise ValueError(
+            "trainer.mtp.enabled=true is not supported on the Tinker backend yet: MTP training and drafter sync are "
+            "only wired through the SkyRL trainer path."
+        )
     lora = cfg.trainer.policy.model.lora
     if lora.rank > 0:
         # Fail before Ray starts or any GPU is reserved. The worker repeats this and adds the
