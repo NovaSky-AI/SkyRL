@@ -220,6 +220,15 @@ def get_stripped_lines(val: str):
     return [val_line.strip() for val_line in val.split("\n")]
 
 
+def _json_default(value):
+    """json.dumps fallback for call-based predictions: numpy scalars become the matching Python scalar."""
+    import numpy as np
+
+    if isinstance(value, np.generic):
+        return value.item()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: str, timeout: int):
     # call-based clean up logic
     # need to wrap in try-catch logic after to catch the correct errors, but for now this is fine.
@@ -255,7 +264,13 @@ def grade_call_based(code: str, all_inputs: list, all_outputs: list, fn_name: st
             if isinstance(prediction, tuple):
                 prediction = list(prediction)
 
-            tmp_result = prediction == gt_out
+            # Compare a JSON round-trip copy of the prediction. gt_out is parsed from JSON, and the
+            # copy holds only plain JSON types, so an object's own __eq__ cannot decide the result.
+            # If json.dumps raises TypeError, ValueError or RecursionError, the test counts as a wrong answer.
+            try:
+                tmp_result = json.loads(json.dumps(prediction, default=_json_default)) == gt_out
+            except (TypeError, ValueError, RecursionError):
+                tmp_result = False
 
             # handle floating point comparisons
 
