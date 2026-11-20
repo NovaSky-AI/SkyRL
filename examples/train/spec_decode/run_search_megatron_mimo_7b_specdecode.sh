@@ -119,6 +119,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.mtp.enabled=$MTP_ENABLED \
   trainer.mtp.num_speculative_tokens=$MTP_NUM_SPECULATIVE_TOKENS \
   trainer.mtp.loss_weight=$MTP_LOSS_WEIGHT \
+  trainer.mtp.loss_type=distribution \
   trainer.policy.megatron_config.mtp_loss_topk=$MTP_LOSS_TOPK \
   trainer.logger="wandb" \
   trainer.project_name="mimo_7b_rl_searchr1" \

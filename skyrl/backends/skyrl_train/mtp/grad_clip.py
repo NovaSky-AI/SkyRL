@@ -23,6 +23,9 @@ from megatron.core.optimizer.clip_grads import (
 # param_groups hold main params whose identities no longer match the model's).
 _MODEL_TO_MAIN_GROUPS = (
     ("model_float16_groups", "shard_fp32_from_float16_groups"),  # DistributedOptimizer
+    # Precision-aware optimizer (incl. cpu_adamw_bf16): FusedAdam holds the fp32 master, the optimizer
+    # steps the bf16 model shards, and shard_fp32_from_float16_groups holds None.
+    ("model_float16_groups", "shard_float16_groups"),
     ("model_fp32_groups", "shard_fp32_groups"),
     ("float16_groups", "fp32_from_float16_groups"),  # Float16OptimizerWithFloat16Params
     ("fp32_from_fp32_groups", "fp32_from_fp32_groups"),  # fp32 params are their own main param
@@ -63,7 +66,7 @@ def _mtp_main_params(sub_opt, mtp_model_ids: set) -> List[torch.nn.Parameter]:
             continue
         for model_group, main_group in zip(model_groups, main_groups):
             for model_param, main_param in zip(model_group, main_group):
-                if id(model_param) in mtp_model_ids and id(main_param) not in seen:
+                if main_param is not None and id(model_param) in mtp_model_ids and id(main_param) not in seen:
                     seen.add(id(main_param))
                     found.append(main_param)
     return found
@@ -105,17 +108,12 @@ def install_mtp_separate_grad_clip(optimizer, model_chunks) -> int:
     params (PP stage without the head, or a DP shard not covering it) still participates.
 
     Reports the POLICY grad norm as the step's grad_norm, so ``policy/grad_norm`` stays comparable
-    to a no-MTP run; the head's own (pre-clip) norm is stashed on ``optimizer.mtp_grad_norm``.
+    to a no-MTP run; the head's own (pre-clip) norm is stashed on ``optimizer.mtp_grad_norm`` (None
+    before the first step and after one skipped on inf/nan grads).
     Returns the number of head main params isolated on THIS rank (0 is normal under DP sharding).
     """
     subs = _sub_optimizers(optimizer)
     mtp_model_ids = _mtp_model_param_ids(model_chunks)
-    if not mtp_model_ids:
-        raise RuntimeError(
-            "install_mtp_separate_grad_clip: no parameter name matched is_mtp_param_name (expected "
-            "'.mtp.' or 'mtp.'). The head's naming changed -- it would be clipped together with the "
-            "policy and throttle the policy update. Update mtp/grad_clip.py."
-        )
     policy_subsets, mtp_subsets = [], []
     for sub in subs:
         all_main = sub.get_parameters()
@@ -124,15 +122,22 @@ def install_mtp_separate_grad_clip(optimizer, model_chunks) -> int:
         policy_subsets.append([p for p in all_main if id(p) not in mtp_main_ids])
     n_local = sum(len(s) for s in mtp_subsets)
 
-    # The head must be covered SOMEWHERE across the group (ownership is DP-sharded; a given rank
-    # owning none is normal). Zero everywhere means the model->main pairing broke and the head is
-    # silently back in the policy clip -- fail loud, collectively.
+    # The head must exist and be covered SOMEWHERE across the group: under PP only the last stage
+    # holds it, and ownership is DP-sharded, so a given rank holding or owning none is normal. Zero
+    # everywhere means the naming or the model->main pairing broke and the head is silently back in
+    # the policy clip -- fail loud, collectively.
+    counts = [len(mtp_model_ids), n_local]
     if torch.distributed.is_initialized():
-        covered = torch.tensor([n_local], device=torch.cuda.current_device())
-        torch.distributed.all_reduce(covered, op=torch.distributed.ReduceOp.SUM)
-        n_global = int(covered.item())
-    else:
-        n_global = n_local
+        totals = torch.tensor(counts, device=torch.cuda.current_device())
+        torch.distributed.all_reduce(totals, op=torch.distributed.ReduceOp.SUM)
+        counts = totals.tolist()
+    n_named, n_global = counts
+    if n_named == 0:
+        raise RuntimeError(
+            "install_mtp_separate_grad_clip: no parameter name matched is_mtp_param_name (expected "
+            "'.mtp.' or 'mtp.') on any rank. The head's naming changed -- it would be clipped together "
+            "with the policy and throttle the policy update. Update mtp/grad_clip.py."
+        )
     if n_global == 0:
         raise RuntimeError(
             "install_mtp_separate_grad_clip: the model has an MTP head but none of its params mapped "
@@ -144,6 +149,8 @@ def install_mtp_separate_grad_clip(optimizer, model_chunks) -> int:
 
     @torch.no_grad()
     def step():
+        # A step skipped on inf/nan grads (fp16 loss scaling) has no head norm either: clear the last one.
+        optimizer.mtp_grad_norm = None
         if optimizer.prepare_grads():
             return False, None, None
 
@@ -173,5 +180,6 @@ def install_mtp_separate_grad_clip(optimizer, model_chunks) -> int:
         update_successful = False if should_skip_update else optimizer.step_with_ready_grads()
         return update_successful, policy_norm, num_zeros_in_grad
 
+    optimizer.mtp_grad_norm = None
     optimizer.step = step
     return n_local

@@ -19,11 +19,15 @@
 from typing import Optional, Union
 
 import torch
-from megatron.core.optimizer import OptimizerConfig
+from megatron.core.optimizer import OptimizerConfig, get_standard_config_overrides
 from megatron.core.optimizer import (
     get_megatron_optimizer as get_megatron_optimizer_native,
 )
-from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from megatron.core.optimizer.optimizer_config import ParamKey, ParamWithNamePredicate
+from megatron.core.optimizer_param_scheduler import (
+    OptimizerParamScheduler,
+    ParamGroupOverride,
+)
 from omegaconf import DictConfig
 
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer_dtype import (
@@ -32,6 +36,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer_dtype import (
 from skyrl.backends.skyrl_train.distributed.megatron.optimizer_offload_to_disk import (
     build_optimizer_offloaded_to_disk,
 )
+from skyrl.backends.skyrl_train.mtp.grad_clip import is_mtp_param_name
 from skyrl.train.config import OptimizerConfig as SkyRLOptimizerConfig
 from skyrl.train.config.config import MegatronOptimizerOffloadToDiskConfig
 
@@ -62,19 +67,50 @@ def init_megatron_optim_config(
     return config
 
 
+def mtp_lr_config_overrides(config: OptimizerConfig, mtp_lr: float) -> dict:
+    """Megatron's standard per-parameter overrides, plus an own learning rate for the MTP heads.
+
+    The heads' group runs the policy's schedule between ``mtp_lr`` and a ``min_lr`` at the policy's
+    ``min_lr / lr`` ratio. Matched by name (``is_mtp_param_name``), like the heads' separate grad clip.
+    """
+    overrides = get_standard_config_overrides(config)
+    heads = ParamKey(
+        with_name_predicate=ParamWithNamePredicate(name="mtp_heads", fn=lambda param, name: is_mtp_param_name(name))
+    )
+    min_lr = mtp_lr * config.min_lr / config.lr if config.lr else 0.0
+    overrides[heads] = ParamGroupOverride(max_lr=mtp_lr, min_lr=min_lr)
+    return overrides
+
+
+def mtp_heads_lr(optimizer, mtp_lr: Optional[float]) -> float:
+    """The MTP heads' current learning rate: their own groups' (found by the ``max_lr`` their override sets) when
+    ``mtp_lr`` is set, else the policy's ``param_groups[0]``, which then holds them. Megatron aligns the param groups
+    across ranks, so a rank without heads (a PP stage without the MTP layer) still has their groups, empty and
+    scheduled. The heads can span several groups (weight decay, expert parallel), all on one schedule."""
+    groups = optimizer.param_groups
+    if mtp_lr is None:
+        return groups[0]["lr"]
+    heads = [g["lr"] for g in groups if g.get("max_lr") == mtp_lr]
+    assert heads, f"no optimizer param group has the MTP heads' max_lr {mtp_lr}"
+    return heads[0]
+
+
 def get_megatron_optimizer(
     model,
     config: OptimizerConfig,
     offload_to_disk: Optional[MegatronOptimizerOffloadToDiskConfig] = None,
+    mtp_lr: Optional[float] = None,
 ):
-    """Build Megatron's optimizer; with ``offload_to_disk`` its state lives on node-local disk."""
+    """Build Megatron's optimizer; with ``offload_to_disk`` its state lives on node-local disk, and ``mtp_lr`` gives
+    the MTP heads their own learning rate."""
     if offload_to_disk is not None:
+        # The disk-offloaded optimizer builds Megatron's standard param groups, without the heads' own group.
+        if mtp_lr is not None:
+            raise ValueError("optimizer_offload_to_disk does not support trainer.mtp.lr")
         return build_optimizer_offloaded_to_disk(model, config, offload_to_disk)
-    # Base optimizer.
-    return get_megatron_optimizer_native(
-        config=config,
-        model_chunks=model,
-    )
+    # Only an own MTP-head lr adds overrides; otherwise Megatron applies its standard ones itself.
+    native_kwargs = {} if mtp_lr is None else {"config_overrides": mtp_lr_config_overrides(config, mtp_lr)}
+    return get_megatron_optimizer_native(config=config, model_chunks=model, **native_kwargs)
 
 
 def get_megatron_optimizer_param_scheduler(

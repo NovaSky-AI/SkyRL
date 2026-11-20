@@ -49,6 +49,7 @@ from skyrl.backends.skyrl_train.distributed.megatron.optimizer import (
     get_megatron_optimizer,
     get_megatron_optimizer_param_scheduler,
     init_megatron_optim_config,
+    mtp_heads_lr,
 )
 from skyrl.backends.skyrl_train.distributed.megatron.packing_utils import (
     get_packed_seq_align_size,
@@ -85,6 +86,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_hybrid_indexer import
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_dsa_index_share import (
     patch_dsa_index_share,
+)
+from skyrl.backends.skyrl_train.patches.megatron.patch_mtp_roll_allgather import (
+    apply_mtp_roll_allgather_patch,
 )
 from skyrl.backends.skyrl_train.patches.megatron.patch_packed_per_expert_sharded_state_dict import (
     apply_packed_per_expert_sharded_state_dict_patch,
@@ -1151,6 +1155,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             bridge_weights_path=bridge_weights_path,
             enable_mtp=self.cfg.mtp.enabled,
         )
+        # MTP with CP > 1: exchange the MTP roll's CP boundary tokens with one all-gather instead of megatron-core's
+        # P2P, whose lazy P2P connection setup can deadlock across nodes (SKYRL_MTP_ROLL_ALLGATHER=0/1 overrides).
+        apply_mtp_roll_allgather_patch(
+            mtp_enabled=self.cfg.mtp.enabled,
+            context_parallel_size=self.cfg.policy.megatron_config.context_parallel_size,
+        )
 
         if self.enable_router_replay:
             from skyrl.backends.skyrl_train.utils.replay_utils import (
@@ -1213,13 +1223,18 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             optim_config = init_megatron_optim_config(
                 self.cfg.policy.optimizer_config, self.cfg.policy.megatron_config.optimizer_config_kwargs
             )
+            mtp_lr = self.cfg.mtp.lr if self.cfg.mtp.enabled else None
+            if mtp_lr is not None:
+                logger.info(f"MTP heads: own optimizer param group at lr {mtp_lr} (policy lr {optim_config.lr})")
             offload_cfg = self.cfg.policy.megatron_config.optimizer_offload_to_disk
             offload_to_disk = None
             if offload_cfg.dir is not None:
                 if self._is_lora:
                     raise ValueError("optimizer_offload_to_disk does not support LoRA.")
                 offload_to_disk = dataclasses.replace(offload_cfg, dir=os.path.join(offload_cfg.dir, self.cfg.run_name))
-            self.optimizer = get_megatron_optimizer(self.actor_module, optim_config, offload_to_disk=offload_to_disk)
+            self.optimizer = get_megatron_optimizer(
+                self.actor_module, optim_config, offload_to_disk=offload_to_disk, mtp_lr=mtp_lr
+            )
 
             # create scheduler
             self.scheduler = get_megatron_optimizer_param_scheduler(
@@ -1575,6 +1590,9 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         status = reduce_metrics(all_metrics, sum_loss_metrics=True)
         if self.optimizer is not None:
             status["policy_lr"] = self.optimizer.param_groups[0]["lr"]
+            mtp_lr = mtp_heads_lr(self.optimizer, self.cfg.mtp.lr) if self.cfg.mtp.enabled else None
+            if mtp_lr is not None:
+                status["mtp_lr"] = mtp_lr
 
         # Token-based batching diagnostics: total microbatches this rank ran and how many
         # were purely-padding (added to equalize the microbatch count across DP ranks).
@@ -1665,6 +1683,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         if grad_norm is not None:
             grad_norm = grad_norm.detach().cpu().item() if hasattr(grad_norm, "item") else grad_norm
         return grad_norm
+
+    def mtp_grad_norm(self) -> Optional[float]:
+        """The MTP heads' own pre-clip grad norm from the last ``optim_step`` (``mtp/grad_clip.py``, installed
+        whenever heads are trained), or None if that step was skipped on inf/nan grads. It is a collective
+        reduction, so every rank holds the same value."""
+        norm = self.optimizer.mtp_grad_norm
+        # float() also unwraps the 1-element tensor Megatron's grad-norm may return.
+        return None if norm is None else float(norm)
 
     def get_lr(self) -> Optional[float]:
         """
