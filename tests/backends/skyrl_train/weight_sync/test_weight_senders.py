@@ -29,6 +29,7 @@ from skyrl.backends.skyrl_train.weight_sync.control_plane import (  # noqa: E402
 from skyrl.backends.skyrl_train.weight_sync.weight_senders import (  # noqa: E402
     _build_sender_init_info,
     _packed_buffer_size_bytes,
+    mark_replay_only,
     maybe_set_reset_prefix_cache,
     teardown_engine,
 )
@@ -446,6 +447,41 @@ class TestTeardown:
 
     def test_none_is_a_no_op(self):
         teardown_engine(None)
+
+
+class _ReplayableSource:
+    def __init__(self):
+        self.replay_only = False
+
+    def set_replay_only(self):
+        self.replay_only = True
+
+
+@pytest.mark.parametrize(
+    "backend, is_sender, expected",
+    [
+        ("nccl", False, True),  # vLLM's NCCL engine drains a non-sender's stream and discards it
+        ("nccl", True, False),  # the sender's stream is what goes on the wire
+        ("ipc", False, False),  # every IPC rank ships its own handles
+        ("delta", False, False),
+        ("sharded_rdt", False, False),
+    ],
+)
+def test_mark_replay_only_only_on_nccl_non_senders(backend, is_sender, expected):
+    source = _ReplayableSource()
+    assert mark_replay_only(source, backend=backend, is_sender=is_sender) is expected
+    assert source.replay_only is expected
+
+
+def test_mark_replay_only_ignores_sources_without_the_hook():
+    assert mark_replay_only(object(), backend="nccl", is_sender=False) is False
+
+
+def test_packed_buffer_floor_honours_the_source_minimum():
+    torch_dtype = torch.bfloat16
+    base = _packed_buffer_size_bytes(None, 1.0, torch_dtype)
+    assert _packed_buffer_size_bytes(None, 1.0, torch_dtype, min_bytes=base + 7) == base + 7
+    assert _packed_buffer_size_bytes(None, 1.0, torch_dtype, min_bytes=1) == base
 
 
 @pytest.mark.parametrize("backend", ["nccl", "ipc"])
