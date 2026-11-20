@@ -3,8 +3,9 @@
 With ``generator.inference_engine.offload_kv_for_weight_sync=True`` (fully-async),
 ``WorkerDispatch.save_weights_for_sampler`` freezes in-flight requests (KEEP pause),
 offloads the KV cache to CPU, re-syncs weights into the freed space, then restores
-the KV cache. This asserts an in-flight request survives that offload/restore and
-finishes cleanly.
+the KV cache. With explicit KV clearing, it discards KV and resets running
+requests instead, including when prefix caching is disabled. In-flight requests
+must finish cleanly in either case.
 
 GPU Requirements: 2 GPUs (1 inference + 1 policy).
 
@@ -39,7 +40,7 @@ MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 LONG_PROMPT = "Tell me a very long, detailed story about a dragon who learns to code."
 
 
-def _offload_kv_cfg() -> SkyRLTrainConfig:
+def _offload_kv_cfg(clear_kv_cache: bool = False, enable_prefix_caching: bool = True) -> SkyRLTrainConfig:
     cfg = SkyRLTrainConfig()
     cfg.trainer.policy.model.path = MODEL
     cfg.trainer.critic.model.path = ""
@@ -48,11 +49,12 @@ def _offload_kv_cfg() -> SkyRLTrainConfig:
     cfg.trainer.placement.policy_num_gpus_per_node = 1
     cfg.trainer.remove_microbatch_padding = False
     cfg.trainer.logger = "console"
-    # Fully-async so the KV cache is offloaded to CPU and in-flight requests are
-    # frozen and resumed across the sync.
+    # Fully-async so requests remain in flight across the sync, either restoring
+    # their KV from CPU or recomputing it when explicit clearing is enabled.
     cfg.trainer.fully_async.enabled = True
-    cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = False
+    cfg.trainer.fully_async.clear_kv_cache_on_weight_sync = clear_kv_cache
     ie = cfg.generator.inference_engine
+    ie.enable_prefix_caching = enable_prefix_caching
     ie.num_engines = 1
     ie.tensor_parallel_size = 1
     ie.run_engines_locally = True
@@ -90,7 +92,10 @@ def _sample_payload(prompt_token_ids: List[int], model: str, max_tokens: int) ->
 
 
 @pytest.mark.asyncio
-async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixture, monkeypatch):
+@pytest.mark.parametrize("clear_kv_cache,enable_prefix_caching", [(False, True), (True, False)])
+async def test_offload_kv_weight_sync_preserves_inflight_request(
+    ray_init_fixture, monkeypatch, clear_kv_cache, enable_prefix_caching
+):
     """An in-flight request must survive the KV offload/restore weight sync.
 
     While a long sample is mid-generation we run a real training step and
@@ -102,7 +107,7 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
     # ignore_eos isn't in the default Tinker->vLLM forwarding map; widen it.
     monkeypatch.setitem(_ric._TINKER_SAMPLE_TO_VLLM_PARAM_MAP, "ignore_eos", "ignore_eos")
 
-    cfg = _offload_kv_cfg()
+    cfg = _offload_kv_cfg(clear_kv_cache, enable_prefix_caching)
     tokenizer = AutoTokenizer.from_pretrained(MODEL, trust_remote_code=True)
     prompt_token_ids = _prompt_token_ids(tokenizer)
 
@@ -174,6 +179,7 @@ async def test_offload_kv_weight_sync_preserves_inflight_request(ray_init_fixtur
 
         # Confirm the KV-offloading path was actually exercised.
         assert sleep_calls, "sleep_for_weight_sync was never called — offload_kv path not taken"
+        assert sleep_calls[0][1]["offload_kv"] is not clear_kv_cache
         assert any(tags and "weights" in tags for tags in wake_tags), "weights were never woken for the broadcast"
         assert any(tags and "kv_cache" in tags for tags in wake_tags), "KV cache was never restored"
 
