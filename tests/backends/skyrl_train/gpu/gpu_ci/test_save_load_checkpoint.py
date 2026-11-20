@@ -68,6 +68,7 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
         ("fsdp", False, False, False, False),
         pytest.param("megatron", False, False, False, False, marks=pytest.mark.megatron),
         pytest.param("megatron", False, False, False, True, marks=pytest.mark.megatron),
+        pytest.param("megatron", False, False, False, "streaming", marks=pytest.mark.megatron),
         pytest.param("megatron", False, False, True, False, marks=pytest.mark.megatron),
         pytest.param("megatron", True, False, False, False, marks=[pytest.mark.megatron, pytest.mark.lora]),
         pytest.param("megatron", False, True, False, False, marks=pytest.mark.megatron),
@@ -91,6 +92,7 @@ def get_test_actor_config(strategy: str) -> SkyRLTrainConfig:
         "fsdp",
         "megatron",
         "megatron_async_dist_ckpt_save",
+        "megatron_async_save_streaming_write",
         "megatron_optimizer_cpu_offload",
         "megatron_lora",
         "megatron_fully_reshardable",
@@ -118,6 +120,9 @@ def test_save_load_checkpoint(ray_init_fixture, strategy, lora, fully_reshardabl
         cfg.trainer.policy.megatron_config.optimizer_config_kwargs["optimizer_offload_fraction"] = 1
     if async_save:
         cfg.trainer.policy.megatron_config.async_dist_ckpt_save = True
+    if async_save == "streaming":
+        cfg.trainer.policy.megatron_config.async_save_streaming_write = True
+    elif async_save:
         # CI runners restrict ptrace, so the checkpoint writer cannot import the rank's CUDA
         # handles and the run would hang. Prestage on the rank instead.
         cfg.trainer.policy.megatron_config.async_save_prestage_to_cpu = True

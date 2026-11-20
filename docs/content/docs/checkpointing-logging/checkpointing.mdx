@@ -90,6 +90,24 @@ With [`optimizer_offload_to_disk`](/docs/examples/megatron#optimizer-state-on-di
 distributed checkpoint: each rank copies its state files into `optimizer_offload_to_disk/`. Such checkpoints need a
 local `ckpt_path` and resume only with the same parallelism.
 
+#### Streaming async writes
+
+If your checkpoint shards do not fit in host memory, enable streaming instead of staging a full copy for the async writer. For a full-parameter Megatron policy, set:
+
+```yaml
+trainer:
+  policy:
+    megatron_config:
+      async_dist_ckpt_save: true
+      async_save_streaming_write: true
+```
+
+Each rank writes from its live tensors in a background thread. The next optimizer step, offload, or backload waits for the write to finish. If training offloads the optimizer immediately after saving, little work overlaps the write.
+
+Use a filesystem path accessible to all ranks. Cloud paths use the synchronous save. Streaming does not support LoRA, `async_save_prestage_to_cpu`, or `ddp_config.overlap_param_gather`.
+
+The checkpoint format does not change. After an interruption, do not rely on `latest_ckpt_global_step.txt` alone: it can advance before the write finishes. Check for `metadata.json` in the Megatron model checkpoint directory before resuming from that step.
+
 ## Key Configuration Parameters
 
 Checkpointing behavior is controlled by several parameters in the YAML configuration (see the [configuration API reference](/docs/api-ref/skyrl/config) for the full training config):
