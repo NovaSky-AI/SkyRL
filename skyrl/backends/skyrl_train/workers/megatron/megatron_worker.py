@@ -1666,6 +1666,14 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             grad_norm = grad_norm.detach().cpu().item() if hasattr(grad_norm, "item") else grad_norm
         return grad_norm
 
+    def mtp_grad_norm(self) -> Optional[float]:
+        """The MTP heads' own pre-clip grad norm from the last ``optim_step`` (``mtp/grad_clip.py``, installed
+        whenever heads are trained), or None if that step was skipped on inf/nan grads. It is a collective
+        reduction, so every rank holds the same value."""
+        norm = self.optimizer.mtp_grad_norm
+        # float() also unwraps the 1-element tensor Megatron's grad-norm may return.
+        return None if norm is None else float(norm)
+
     def get_lr(self) -> Optional[float]:
         """
         Get current learning rate from optimizer.

@@ -1768,11 +1768,12 @@ def _cp2_megatron_config():
     return cfg
 
 
-def test_megatron_validation_refuses_mtp_with_cp():
+def test_megatron_validation_refuses_distribution_mtp_with_cp():
     cfg = _cp2_megatron_config()
     cfg.trainer.mtp.enabled = True
+    cfg.trainer.mtp.loss_type = "distribution"
 
-    with pytest.raises(ValueError, match="mtp.enabled=true is not supported with context_parallel_size > 1"):
+    with pytest.raises(ValueError, match="'distribution' does not support context_parallel_size > 1"):
         train_utils.validate_megatron_cfg(cfg)
 
 

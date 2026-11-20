@@ -47,6 +47,7 @@ from skyrl.env_vars import (
 from skyrl.train.config.config import (
     SUPPORTED_SPECULATIVE_DECODING_METHODS,
     MegatronConfig,
+    MTPLossType,
     SkyRLTrainConfig,
     get_config_as_dict,
 )
@@ -286,11 +287,30 @@ def validate_megatron_cfg(cfg: SkyRLTrainConfig):
             cfg.generator.inference_engine.enable_return_routed_experts
         ), "rollout router replay (r3) is only supported when enable_return_routed_experts is True"
 
-    # The decoupled MTP draft loss rolls logits and labels without context parallelism (see the CP=1
-    # assert in MegatronModelWrapper), for every model.
-    mtp = getattr(cfg.trainer, "mtp", None)
-    if mtp is not None and mtp.enabled and cfg.trainer.policy.megatron_config.context_parallel_size > 1:
-        raise ValueError("trainer.mtp.enabled=true is not supported with context_parallel_size > 1")
+    # The MTP draft loss's parallelism limits, per loss type. Read trainer.mtp.loss_type: validate_cfg runs this
+    # before _apply_mtp_config copies it to megatron_config.mtp_loss_type.
+    mtp = cfg.trainer.mtp
+    mcfg = policy_cfg.megatron_config
+    if mtp.enabled and mtp.loss_type == MTPLossType.DISTRIBUTION:
+        # It distills the full main logits: its teacher / label rolls are CP-unaware, the MTP block's ids are laid
+        # out per stage, and the fused LM head never builds those logits.
+        if mcfg.context_parallel_size > 1:
+            raise ValueError(
+                "trainer.mtp.loss_type='distribution' does not support context_parallel_size > 1: its teacher / "
+                "label roll is CP-unaware. Use trainer.mtp.loss_type='hard_label'."
+            )
+        if mcfg.pipeline_model_parallel_size > 1:
+            raise ValueError(
+                "trainer.mtp.loss_type='distribution' does not support pipeline_model_parallel_size > 1. "
+                "Use trainer.mtp.loss_type='hard_label'."
+            )
+        if cfg.trainer.fused_lm_head_logprob:
+            raise ValueError(
+                "trainer.mtp.loss_type='distribution' does not support trainer.fused_lm_head_logprob=true: the fused "
+                "path skips the output-layer matmul, so there are no main logits to use as the draft teacher. Use "
+                "trainer.mtp.loss_type='hard_label' on a GPTModel, or disable fused_lm_head_logprob: HybridModel "
+                "does not support it with MTP."
+            )
 
     worker_configs = [(cfg.trainer.policy, "policy"), (cfg.trainer.ref, "ref")]
     for config, worker_type in worker_configs:
@@ -329,10 +349,7 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
     The vLLM draft depth (``num_speculative_tokens``) is decoupled from the trained head count
     (depth > 1 reuses the head autoregressively). When disabled, force the heads off.
     """
-    mtp = getattr(cfg.trainer, "mtp", None)
-    if mtp is None:
-        return
-
+    mtp = cfg.trainer.mtp
     mcfg = cfg.trainer.policy.megatron_config
     if not mtp.enabled:
         # Explicit 0 force-disables MTP even on MTP-capable models.
@@ -348,6 +365,12 @@ def _apply_mtp_config(cfg: SkyRLTrainConfig):
     # Leave mcfg.mtp_num_layers untouched (None => megatron-bridge infers the head count from the
     # model's HF config; MegatronWorker fails loud if it resolves to zero while MTP is enabled).
     mcfg.mtp_loss_weight = mtp.loss_weight
+    mcfg.mtp_loss_type = mtp.loss_type
+    # The hard-label loss has no teacher distribution for mtp_loss_topk to truncate, so it ignores it.
+    if mtp.loss_type == MTPLossType.HARD_LABEL and mcfg.mtp_loss_topk is not None:
+        logger.warning(
+            "trainer.policy.megatron_config.mtp_loss_topk is ignored with trainer.mtp.loss_type='hard_label'."
+        )
 
     # SKYRL_DISABLE_SPEC=1: train the MTP heads, but keep the vLLM rollout plain autoregressive.
     if os.environ.get("SKYRL_DISABLE_SPEC") == "1":

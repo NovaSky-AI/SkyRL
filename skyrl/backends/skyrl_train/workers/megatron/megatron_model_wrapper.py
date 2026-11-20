@@ -44,9 +44,16 @@ from skyrl.backends.skyrl_train.distributed.megatron.token_metadata import (
     build_token_metadata_layout,
 )
 from skyrl.backends.skyrl_train.mtp.adapter import project_mtp_hidden_to_logits
+from skyrl.backends.skyrl_train.mtp.draft_loss import (
+    distribution_valid_mask,
+    mtp_draft_token_counts,
+    mtp_hard_label_draft_loss,
+    segment_real_lengths,
+)
 from skyrl.backends.skyrl_train.mtp.hidden_capture import (
     maybe_capture_mtp_hidden,
     native_mtp_disabled,
+    stage_needs_input_ids,
 )
 from skyrl.backends.skyrl_train.mtp.soft_ce import (
     build_teacher_logits,
@@ -85,7 +92,17 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     compute_minibatch_rollout_logprob_diff_metrics,
 )
 from skyrl.train.config import TrainerConfig
+from skyrl.train.config.config import MTPLossType
 from skyrl.train.fused_lm_head import FusedLmHeadBackend
+
+_MTP_STUDENT_LOGITS_KEY = "mtp_student_logits"
+_MTP_STUDENT_HIDDEN_KEY = "mtp_student_hidden"
+# loss_func runs on the last pipeline stage, which holds the MTP block, so the heads' outputs are there whenever
+# MTP trains; without them the draft loss would silently drop out.
+_MTP_OUTPUTS_MISSING = (
+    "the MTP block's outputs were not captured on the last pipeline stage (its forward was skipped or the "
+    "capture hook did not fire)"
+)
 
 
 def _pack_sequence_values(
@@ -385,8 +402,8 @@ class MegatronModelWrapper:
                 f"packed sample; got {model_cls}. Set trainer.remove_microbatch_padding=false."
             )
         # CP needs packing (validate_megatron_cfg), so the check above also limits VLM CP to models that
-        # apply the CP split themselves (shard_for_cp=False below relies on it). MTP with CP is refused in
-        # validate_megatron_cfg too.
+        # apply the CP split themselves (shard_for_cp=False below relies on it). validate_megatron_cfg also
+        # refuses the distribution MTP loss with CP.
         assert (
             mpu.get_tensor_model_parallel_world_size() == 1 or self.cfg.policy.sequence_parallel_size == 1
         ), "VLM + sequence parallelism unsupported"
@@ -724,6 +741,22 @@ class MegatronModelWrapper:
         mtp_loss_weight = float(mcfg.mtp_loss_weight)
         mtp_loss_chunk_size = mcfg.mtp_loss_chunk_size
         mtp_loss_topk = mcfg.mtp_loss_topk
+        # "hard_label": cross-entropy on the generated tokens through the packed / CP / fused-LM-head log-prob
+        # path, so it runs under CP, PP and the fused LM head; "distribution" needs the full main logits.
+        # validate_megatron_cfg enforces each loss type's limits before model load.
+        mtp_hard_label = mtp_enabled and mcfg.mtp_loss_type == MTPLossType.HARD_LABEL
+        # Both draft losses are a token mean over the whole mini-batch (all microbatches and DP ranks), as the
+        # policy loss's reduction is: each microbatch scores its share against these per-depth counts.
+        mtp_token_counts = (
+            mtp_draft_token_counts(
+                micro_batches,
+                int(model_config.mtp_num_layers),
+                loss_type=MTPLossType(mcfg.mtp_loss_type),
+                packed=self.remove_microbatch_padding,
+            )
+            if mtp_enabled
+            else None
+        )
 
         if mtp_enabled:
             # The decoupled draft training records the MTP block's inputs with a forward pre-hook
@@ -793,8 +826,9 @@ class MegatronModelWrapper:
             tp_rank = mpu.get_tensor_model_parallel_rank()
 
             # The policy loss is already normalized through the pre-scaled advantages (#1296), so the
-            # intended gradient is the sum of every microbatch's policy loss over all DP x CP ranks;
-            # KL / entropy / MTP terms are per-microbatch means averaged over DP and real microbatches.
+            # intended gradient is the sum of every microbatch's policy loss over all DP x CP ranks, and
+            # the MTP draft loss is each microbatch's share of the mini-batch token mean, scaled the same;
+            # KL / entropy terms are per-microbatch means averaged over DP and real microbatches.
             if per_token_loss:
                 # calculate_per_token_loss: the schedule leaves a 3-tuple loss unscaled, DDP sums over
                 # DP x CP, and this call's gradients are divided by its global token count
@@ -977,20 +1011,54 @@ class MegatronModelWrapper:
                 **score_centering_kwargs,
             )
 
-            # Decoupled MTP / draft loss: soft-CE distillation of the detached-input MTP head against
-            # the policy's own next-token distribution (full-vocab, or top-k when mtp_loss_topk is
-            # set). The local masked-mean scalar is folded into the loss below like the KL/entropy
-            # aux terms.
+            # Decoupled MTP / draft loss: hard-label CE on the generated tokens, or soft-CE distillation of
+            # the detached-input MTP head against the policy's own next-token distribution (full-vocab, or
+            # top-k when mtp_loss_topk is set). Either is this microbatch's share of the mini-batch token
+            # mean (see mtp_draft_token_counts), folded into the loss below pre-scaled like the policy loss.
             draft_loss = None
-            student_logits_list = data.get("mtp_student_logits")
-            if mtp_enabled and student_logits_list:
+            if mtp_hard_label:
+                # forward_step stores the heads' hidden states for the fused LM head, their logits otherwise.
+                student_outputs = data.pop(
+                    _MTP_STUDENT_HIDDEN_KEY if self._fused_lm_head else _MTP_STUDENT_LOGITS_KEY, None
+                )
+                assert student_outputs, (
+                    "MTP training is on but loss_func got no MTP head outputs for the hard-label draft loss: "
+                    f"{_MTP_OUTPUTS_MISSING}."
+                )
+                draft_loss = mtp_hard_label_draft_loss(
+                    student_outputs,
+                    fused=self._fused_lm_head,
+                    lm_head_weight=data.get("lm_head_weight"),
+                    sequences=sequences,
+                    attention_mask=data["attention_mask"],
+                    sub_seq_lengths=data.get("sub_seq_lengths_list"),
+                    num_actions=num_actions,
+                    loss_mask=loss_mask,
+                    packed_seq_params=packed_seq_params,
+                    packed_targets=packed_targets,
+                    tp_grp=tp_grp,
+                    tp_rank=tp_rank,
+                    chunk_size=mtp_loss_chunk_size,
+                    fused_backend=self._fused_lm_head_backend,
+                    token_counts=mtp_token_counts,
+                    softcap=self._logit_softcap,
+                )
+                student_outputs = None
+            elif mtp_enabled:
+                student_logits_list = data.get(_MTP_STUDENT_LOGITS_KEY)
+                assert student_logits_list, (
+                    "MTP training is on but loss_func got no MTP head logits for the distribution draft loss: "
+                    f"{_MTP_OUTPUTS_MISSING}."
+                )
                 # Under THD sample packing the teacher (logits) and student logits are packed
-                # ([1, T, vocab]); use the matching packed real-token mask + segment boundaries so the
-                # MTP roll/mask respect sub-sequence boundaries (see shift_mask_for_mtp). Otherwise the
-                # [batch, seq] attention mask aligns with the de-padded logits.
+                # ([1, T, vocab]); mask them per segment from the real lengths mtp_draft_token_counts counts
+                # (distribution_valid_lengths), at the padded segment starts. Otherwise the [batch, seq]
+                # attention mask aligns with the de-padded logits.
                 packed = packed_seq_params is not None
-                draft_mask = (data["mtp_packed_mask"] if packed else data["attention_mask"]).to(logits.dtype)
-                mtp_cu_seqlens = packed_seq_params.cu_seqlens_q_padded if packed else None
+                if packed:
+                    segment_lengths = segment_real_lengths(data["attention_mask"], data.get("sub_seq_lengths_list"))
+                else:
+                    draft_mask = data["attention_mask"].to(logits.dtype)
                 vocab_size_tp = logits.shape[-1]
                 # Undo the in-place temperature scaling so the teacher is the true policy distribution.
                 # Detached: both draft-loss paths below require a detached teacher.
@@ -1008,7 +1076,12 @@ class MegatronModelWrapper:
                 for layer_idx, student_logits in enumerate(student_logits_list):
                     if true_shard_width != vocab_size_tp:
                         student_logits = student_logits[..., :true_shard_width]
-                    layer_mask = shift_mask_for_mtp(draft_mask, layer_idx, cu_seqlens=mtp_cu_seqlens)
+                    if packed:
+                        layer_mask = distribution_valid_mask(
+                            segment_lengths, layer_idx, packed_seq_params.cu_seqlens_q_padded
+                        ).to(device=logits.device, dtype=logits.dtype)
+                    else:
+                        layer_mask = shift_mask_for_mtp(draft_mask, layer_idx)
                     if mtp_loss_topk:
                         # Top-k draft loss: O(seq*k) memory, no full-vocab softmax. Pass the un-rolled
                         # policy logits + roll_shift so top-k runs on them directly and only the small
@@ -1019,6 +1092,7 @@ class MegatronModelWrapper:
                                 teacher_src,
                                 layer_mask,
                                 k=mtp_loss_topk,
+                                global_normalization_factor=mtp_token_counts[layer_idx],
                                 vocab_parallel_group=tp_grp,
                                 roll_shift=layer_idx + 1,
                             )
@@ -1030,6 +1104,7 @@ class MegatronModelWrapper:
                                 student_logits,
                                 teacher_logits,
                                 layer_mask,
+                                global_normalization_factor=mtp_token_counts[layer_idx],
                                 vocab_parallel_group=tp_grp,
                                 chunk_size=mtp_loss_chunk_size,
                             )
@@ -1037,7 +1112,7 @@ class MegatronModelWrapper:
                 draft_loss = torch.stack(per_layer_losses).mean()
                 # Drop the dict's reference so the tensor is freed after this microbatch's backward
                 # (the autograd graph still holds it until then) instead of lingering.
-                del data["mtp_student_logits"]
+                del data[_MTP_STUDENT_LOGITS_KEY]
                 student_logits_list = None
 
             # SFT objectives need no RL entropy/KL pass. Anchored objectives
@@ -1046,9 +1121,10 @@ class MegatronModelWrapper:
                 # Policy loss masks are pre-scaled to achieve the correct reduction
                 # when summing across the entire minibatch (see `DefaultCollator`).
                 loss = policy_loss * grad_sum_correction_factor
-                # Fold the per-token-mean MTP/draft loss in with the same micro-batch correction as the RL path.
+                # Like the policy loss's token_mean, the draft loss is a token mean over the whole mini-batch:
+                # each microbatch adds sum(CE) / the mini-batch's valid-token count (mtp_draft_token_counts).
                 if draft_loss is not None:
-                    loss = loss + mtp_loss_weight * draft_loss * kl_entropy_microbatch_scale
+                    loss = loss + mtp_loss_weight * draft_loss * grad_sum_correction_factor
                 unscaled_loss = policy_loss
 
                 # Only build per-token outputs for callers that consume them.
@@ -1156,12 +1232,12 @@ class MegatronModelWrapper:
                 policy_loss * grad_sum_correction_factor
                 + (kl_loss_term - entropy_loss_term) * kl_entropy_microbatch_scale
             )
-            # The decoupled MTP/draft loss is a per-token mean (like KL/entropy), so fold it in with
-            # the same micro-batch correction. Its gradient only reaches the MTP-head parameters: the
-            # trunk hidden states, the re-embedding, the output weight and the teacher distribution
-            # are all detached.
+            # The decoupled MTP/draft loss is a mini-batch token mean, scaled like the policy loss (see the SFT branch
+            # above). Padding microbatches have no valid tokens, add nothing and are not counted. Its gradient only
+            # reaches the MTP-head parameters: the trunk hidden states, the re-embedding, the output weight and the
+            # teacher distribution are all detached.
             if draft_loss is not None:
-                loss = loss + mtp_loss_weight * draft_loss * kl_entropy_microbatch_scale
+                loss = loss + mtp_loss_weight * draft_loss * grad_sum_correction_factor
             unscaled_loss = loss / grad_sum_correction_factor
 
             # Build per-sequence loss_fn_outputs with logprobs.
@@ -1242,11 +1318,12 @@ class MegatronModelWrapper:
             if batch.get("image_grid_thw") is not None:
                 vlm_inputs["image_grid_thw"] = torch.cat(batch["image_grid_thw"].tensors, dim=0)
 
+            needs_input_ids = stage_needs_input_ids(mtp_enabled)
             if self.remove_microbatch_padding:
                 new_sequences, packed_seq_params = preprocess_packed_seqs(
                     sequences,
                     attention_mask,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
+                    pre_process=needs_input_ids or self.is_vlm,
                     sub_seq_lengths=sub_seq_lengths,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
@@ -1268,7 +1345,7 @@ class MegatronModelWrapper:
                     new_position_ids = preprocess_packed_seqs(
                         position_ids,
                         attention_mask,
-                        pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True),
+                        pre_process=needs_input_ids,
                     )[0]
                 else:
                     new_position_ids = None
@@ -1277,7 +1354,7 @@ class MegatronModelWrapper:
                     sequences,
                     attention_mask,
                     position_ids,
-                    pre_process=mpu.is_pipeline_first_stage(ignore_virtual=True) or self.is_vlm,
+                    pre_process=needs_input_ids or self.is_vlm,
                     fp8_enabled=fp8_enabled,
                     fp8_recipe=fp8_recipe,
                     seq_align=self._seq_align,
@@ -1327,28 +1404,6 @@ class MegatronModelWrapper:
                     post_process=is_last_stage,
                 )
 
-            # The decoupled MTP teacher/label rolls are context-parallel-unaware (a plain global
-            # torch.roll, both here and in the packed path), so MTP draft training requires CP=1.
-            # CP>1 would need the cross-rank boundary exchange that megatron's roll_tensor implements.
-            if mtp_enabled:
-                assert mpu.get_context_parallel_world_size() == 1, (
-                    "MTP/draft training does not support context parallelism "
-                    "(context_parallel_size > 1): the teacher/label roll is CP-unaware."
-                )
-                # NOTE (Alex): PP not supported yet -- the MTP block runs on the last stage, but the
-                # ids it re-embeds are only laid out for the first stage.
-                assert (
-                    mpu.get_pipeline_model_parallel_world_size() == 1
-                ), "MTP/draft training does not support pipeline parallelism (pipeline_model_parallel_size > 1)."
-                # The fused LM-head path never materializes the main logits (its output_processor
-                # returns decoder hidden states), but the draft loss distills against exactly those
-                # logits as its teacher -- so the two cannot run together.
-                assert not self._fused_lm_head, (
-                    "MTP draft training is not supported with fused_lm_head_logprob=True: the fused "
-                    "path skips the output-layer matmul, so there are no main logits to use as the "
-                    "draft teacher. Disable one of them."
-                )
-
             # Run the policy forward; when MTP is active a pre-hook records the MTP block's arguments.
             student_hidden = None
             student_model = None
@@ -1389,20 +1444,26 @@ class MegatronModelWrapper:
 
             # Project the MTP hidden states through the shared output layer so loss_func can score the
             # draft loss. Match the teacher's layout: keep them packed ([1, T, vocab/tp]) under sample
-            # packing, or de-pad to [batch, seq_len, vocab/tp] otherwise. When packed, also hand
-            # loss_func the packed real-token mask so it can mask cross-segment MTP targets.
-            if student_hidden is not None:
+            # packing, or de-pad to [batch, seq_len, vocab/tp] otherwise.
+            if student_hidden is not None and mtp_hard_label and self._fused_lm_head:
+                # The hard-label loss scores the heads' hidden states through the fused LM-head log-prob op
+                # (the output weight is detached there). The policy's output processor gathers the
+                # sequence-parallel shards, maps [seq, batch, hidden] -> [batch, seq, hidden] (packed
+                # [1, T, H] or de-padded) and reduces the input grad across TP, as for the decoder output.
+                student_hidden = [
+                    fused_lm_head_output_processor(hidden_states=h, output_layer=student_model.output_layer)
+                    for h in student_hidden
+                ]
+                if self.remove_microbatch_padding:
+                    batch[_MTP_STUDENT_HIDDEN_KEY] = student_hidden
+                else:
+                    batch[_MTP_STUDENT_HIDDEN_KEY] = [depad(h) for h in student_hidden]
+            elif student_hidden is not None:
                 student_logits = project_mtp_hidden_to_logits(student_hidden, student_model)
                 if self.remove_microbatch_padding:
-                    batch["mtp_student_logits"] = student_logits
-                    batch["mtp_packed_mask"] = _pack_sequence_values(
-                        attention_mask.to(dtype=torch.float32),
-                        attention_mask,
-                        packed_seq_params,
-                        sub_seq_lengths=sub_seq_lengths,
-                    )
+                    batch[_MTP_STUDENT_LOGITS_KEY] = student_logits
                 else:
-                    batch["mtp_student_logits"] = [depad(sl) for sl in student_logits]
+                    batch[_MTP_STUDENT_LOGITS_KEY] = [depad(sl) for sl in student_logits]
 
             if rollout_expert_indices is not None:
                 setup_per_microbatch_replay_backward()

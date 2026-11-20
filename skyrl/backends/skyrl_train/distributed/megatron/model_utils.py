@@ -689,6 +689,7 @@ def from_parallel_logits_to_logprobs_packed_sequences(
     chunk_size: Optional[int] = None,
     attention_mask: Optional[torch.Tensor] = None,
     sub_seq_lengths: Optional[list[list[int]]] = None,
+    target_shift: int = 1,
 ) -> torch.Tensor:
     """Get log probabilities from TP sharded vocab logits for packed sequences.
 
@@ -711,6 +712,9 @@ def from_parallel_logits_to_logprobs_packed_sequences(
         sub_seq_lengths (list[list[int]], optional): Per-row sub-sequence lengths for controller-side sequence packing.
             When provided, ``cu_seqlens_padded`` is interpreted as one entry per sub-sequence, and output values are
             scattered back to the row offsets used by ``PackedDataCollator``.
+        target_shift (int, optional): Position ``t`` scores the token ``target_shift`` positions ahead within
+            its sequence. ``1`` is next-token log-probs; an MTP head at depth ``d`` (0-based) uses ``d + 2``.
+            The last ``target_shift`` positions of each sequence wrap around and must be masked by the caller.
 
     Returns:
         torch.Tensor: Unpacked log probabilities tensor with shape [batch_size, unpacked_seqlen-1].
@@ -731,7 +735,10 @@ def from_parallel_logits_to_logprobs_packed_sequences(
         cu_seqlens_padded, target.shape[0], target.device
     )
 
-    next_offsets = torch.remainder(seq_offsets + 1, seq_lens_padded[seq_indices])
+    # Offset o of a sequence (padded length n) is labeled with that sequence's token at (o + target_shift) % n.
+    # Labels past its last real token are padding or wrap to its start; the caller masks them (for the MTP
+    # heads, mtp_action_aligned drops columns >= seq - target_shift, and loss_mask is 0 on padded actions).
+    next_offsets = torch.remainder(seq_offsets + target_shift, seq_lens_padded[seq_indices])
     rolled_targets_full = target[cu_seqlens_padded[seq_indices] + next_offsets]
     if cp_size > 1:
         cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(
@@ -980,9 +987,10 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
     return_entropy: bool = False,
     entropy_requires_grad: bool = False,
     softcap: Optional[float] = None,
+    target_shift: int = 1,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Fused-LM-head variant of
-    :func:`from_parallel_logits_to_logprobs_packed_sequences`.
+    :func:`from_parallel_logits_to_logprobs_packed_sequences` (``target_shift`` as there).
 
     Identical packed-sequence / CP / scatter-back logic, but the output
     projection is fused into the chunked logprob op (``hidden`` [1, T//CP, H] +
@@ -1011,7 +1019,8 @@ def from_parallel_hidden_to_logprobs_packed_sequences(
         cu_seqlens_padded, target.shape[0], target.device
     )
 
-    next_offsets = torch.remainder(seq_offsets + 1, seq_lens_padded[seq_indices])
+    # Labels as in from_parallel_logits_to_logprobs_packed_sequences: the sequence's token at (o + target_shift) % n.
+    next_offsets = torch.remainder(seq_offsets + target_shift, seq_lens_padded[seq_indices])
     rolled_targets_full = target[cu_seqlens_padded[seq_indices] + next_offsets]
     if cp_size > 1:
         cp_rank_for_token, local_indices = _packed_cp_rank_and_local_indices(

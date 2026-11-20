@@ -4,6 +4,7 @@ title: "Faster Rollouts with MTP Speculative Decoding"
 
 <Callout type="info">
 MTP training requires the `megatron` backend and the `vllm` inference engine.
+MTP is not supported on the Tinker backend yet.
 </Callout>
 
 <Callout type="info">
@@ -18,16 +19,16 @@ Source code: `examples/train/spec_decode/`.
 
 During RL training, rollouts (generation) are typically the throughput bottleneck. Speculative decoding improves throughput (at lower batch size) with a small, cheap **drafter** that proposes the next `k` tokens, which the policy then verifies in a single forward pass.
 
-Since the policy distribution changes in RL, the drafter must be co-trained to stay aligned. SkyRL trains the MTP heads with a top-k soft cross-entropy loss, which better aligns the drafter and policy distributions while reducing the memory overhead of training the additional heads.
+Since the policy distribution changes in RL, the drafter must be co-trained to stay aligned. By default SkyRL trains the MTP heads with a hard-label cross-entropy on the tokens the policy generated. At CP=1 and PP=1, the `distribution` loss (a top-k soft cross-entropy against the policy's own next-token distribution) is an option.
 
 There are two pieces:
 
-1. **Training the head** — a decoupled draft loss distills the policy's own next-token distribution into the MTP head on the Megatron backend.
+1. **Training the head** — a decoupled draft loss trains the MTP head on the policy's own outputs on the Megatron backend.
 2. **Drafting with it** — the trained head is handed to vLLM as an MTP drafter. Every weight sync reloads it in vLLM's native draft session, right after the policy.
 
 ### How does it work?
 
-The draft loss reuses the hidden states the policy's forward pass already computed: it replays the MTP block on the **detached** trunk and trains the head against the policy's own detached next-token distribution. The loss is vocab-parallel, so it works under tensor parallelism.
+The draft loss reuses the hidden states the policy's forward pass already computed: it replays the MTP block on the **detached** trunk and trains the head against the token the policy generated (`hard_label`) or the policy's own detached next-token distribution (`distribution`). The loss is vocab-parallel, so it works under tensor parallelism.
 
 Everything but the head is detached: trunk, re-embedding, output weight, and teacher. So the draft gradient reaches only the MTP head, never the backbone. The head shares the policy's gradient buffer and optimizer but is clipped by its own gradient norm.
 
@@ -61,16 +62,18 @@ The high-level knob:
 |---|---|---|
 | `trainer.mtp.enabled` | `false` | Train MTP heads and use them for speculative decoding. |
 | `trainer.mtp.num_speculative_tokens` | `1` | vLLM draft depth per step. |
-| `trainer.mtp.loss_weight` | `0.1` | Weight `w` of the draft loss in `policy_loss + w * draft_loss`. |
+| `trainer.mtp.loss_weight` | `0.1` | Weight `w` of the draft loss in `policy_loss + w * draft_loss`. The draft loss is a token mean over the whole mini-batch (every microbatch and DP rank), so each token weighs the same however the mini-batch is split. |
+| `trainer.mtp.loss_type` | `hard_label` | Draft loss. `distribution` distills the policy's full next-token distribution, so it needs CP=1, PP=1 and `trainer.fused_lm_head_logprob=false`. `hard_label` is cross-entropy on the generated tokens and also runs with CP, PP and the fused LM head. |
 
-Megatron-side fields tune the draft loss; most runs only need `mtp_loss_topk`:
+Megatron-side fields tune the draft loss; most `distribution` runs only need `mtp_loss_topk`. The `hard_label` loss ignores `mtp_loss_topk`:
 
 | Field | Default | Description |
 |---|---|---|
 | `mtp_num_layers` | `null` | Head count. `null` honors the model's HF config; `0` force-disables MTP. |
-| `mtp_loss_topk` | `null` | Distill only the teacher's top-k tokens instead of the full vocab: `O(seq*k)` memory rather than `O(seq*vocab)`. `null` uses the exact full-vocab loss. |
-| `mtp_loss_chunk_size` | `1024` | Sequence-chunk size for the draft loss, with gradient checkpointing, to bound peak memory. Numerically identical to no chunking; ignored when `mtp_loss_topk` is set. |
+| `mtp_loss_topk` | `null` | `distribution` only. Distill the teacher's top-k tokens instead of the full vocab: `O(seq*k)` memory rather than `O(seq*vocab)`. `null` uses the exact full-vocab loss. |
+| `mtp_loss_chunk_size` | `1024` | Sequence-chunk size for the draft loss, to bound peak memory: `distribution` checkpoints each chunk of its full-vocab soft cross-entropy (and ignores it when `mtp_loss_topk` is set), `hard_label` chunks its log-prob computation. Numerically identical to no chunking. |
 | `mtp_loss_weight` | `0.1` | Set automatically from `trainer.mtp.loss_weight`. |
+| `mtp_loss_type` | `hard_label` | Set automatically from `trainer.mtp.loss_type`. |
 
 ## Example
 
@@ -94,6 +97,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
     trainer.mtp.enabled=$MTP_ENABLED \
     trainer.mtp.num_speculative_tokens=$MTP_NUM_SPECULATIVE_TOKENS \
     trainer.mtp.loss_weight=$MTP_LOSS_WEIGHT \
+    trainer.mtp.loss_type=distribution \
     trainer.policy.megatron_config.mtp_loss_topk=$MTP_LOSS_TOPK \
     generator.inference_engine.backend=vllm \
     ...
