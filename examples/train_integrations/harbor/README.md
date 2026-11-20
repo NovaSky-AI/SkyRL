@@ -12,6 +12,7 @@ skyrl/integration/harbor/
 
 examples/train_integrations/harbor/
   prepare_harbor_dataset.py        # Downloads + extracts datasets from HuggingFace
+  split_tasks.py                   # Seeded split of prepared tasks into training and held-out sets
   harbor_trial_config/
     default.yaml                   # Harbor TrialConfig template
   entrypoints/

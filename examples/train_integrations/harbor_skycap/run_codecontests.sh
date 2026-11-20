@@ -9,14 +9,32 @@
 # overlong filtering, 8 GPUs colocated with 4 vLLM engines at TP 2. The knobs below scale it down.
 #
 # Does everything: reads the sandbox credentials, prepares the tasks under /tmp/harbor/data
-# (skipped when they are already there), and trains EPOCHS passes over the tasks. Each run
-# gets a fresh uuid name, so its trials, skycap records, checkpoints and logs all land in
-# their own /tmp/harbor/runs/<name>.
+# (skipped when they are already there), splits them into training and held-out tasks, and
+# trains EPOCHS passes over the training tasks. It evaluates on the held-out tasks before the
+# first step, every EVAL_INTERVAL steps and after the last, checkpoints every CKPT_INTERVAL
+# steps and exports a merged Hugging Face model at every epoch end. A run's trials, skycap
+# records, checkpoints, exports and logs all land in $OUTPUT_ROOT/$RUN_NAME; launching again
+# with the same RUN_NAME resumes from its latest checkpoint.
 #
 #   GENERATOR=skycap|baseline  which integration generates the rollouts (default skycap)
-#   NUM_PROMPTS, GROUP_SIZE    prompts per step and samples per prompt (default 32 x 8)
-#   TASKS=a,b                  task names to run instead of the first NUM_PROMPTS
-#   EPOCHS, LR                 passes over the tasks, learning rate (default 1, 1e-6)
+#   NUM_TASKS                  training tasks (default NUM_PROMPTS)
+#   NUM_PROMPTS, GROUP_SIZE    tasks per step and samples per task (default 32 x 8); NUM_PROMPTS is
+#                              capped at NUM_TASKS
+#   TASKS=a,b                  training task names instead of NUM_TASKS from the split
+#   EVAL_TASKS, EVAL_SAMPLES   held-out tasks and samples per task (default 32 x 2); EVAL_TASKS=0
+#                              turns eval off
+#   EVAL_INTERVAL              steps between eval passes (default 10)
+#   SPLIT_SEED                 the shuffle behind the split (default 0): all tasks sorted and
+#                              shuffled once, the first EVAL_TASKS held out, the next NUM_TASKS
+#                              trained on, so the held-out set doesn't move when NUM_TASKS does
+#   RUN_NAME                   the run's name and directory (default harbor-$GENERATOR-<uuid>, a
+#                              fresh run); the same name again resumes it, on the same split only
+#   OUTPUT_ROOT                where run directories go (default /mnt/cluster_storage/harbor/runs
+#                              when /mnt/cluster_storage exists, else /tmp/harbor/runs)
+#   CKPT_INTERVAL, MAX_CKPTS   steps between checkpoints and how many to keep (default 5, 5)
+#   EXPORT_INTERVAL            steps between merged HF exports (default: steps per epoch); the
+#                              trainer also exports at every epoch end
+#   EPOCHS, LR                 passes over the training tasks, learning rate (default 1, 1e-6)
 #   TEMPERATURE=0              greedy, so a baseline run and a skycap run can be diffed
 #                              token for token with compare_runs.py
 #   DETERMINISTIC=1            one trial at a time and no prefix caching, so every request runs
@@ -31,6 +49,9 @@
 #                              one node needs: expert parameters aren't sharded across data parallel
 #   R3=1                       rollout routing replay for an MoE model: vLLM returns each token's
 #                              routed experts and Megatron replays them (needs STRATEGY=megatron)
+#
+# A comparison run (TEMPERATURE=0, DETERMINISTIC=1) that wants none of eval, checkpoints and
+# exports passes EVAL_TASKS=0 CKPT_INTERVAL=-1 EXPORT_INTERVAL=-1.
 #
 # Needs: the GPUs, and the sandbox's credentials in a file: `DAYTONA_API_KEY=...`
 # (DAYTONA_KEY_FILE) or `MODAL_TOKEN_ID=... MODAL_TOKEN_SECRET=...` (MODAL_KEY_FILE). For W&B,
@@ -54,7 +75,14 @@ SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-$(basename "$MODEL")}"
 CHAT_TEMPLATE="${CHAT_TEMPLATE:-$REPO/skyrl/train/utils/templates/qwen3_acc_thinking.jinja2}"
 NUM_PROMPTS="${NUM_PROMPTS:-32}"
 GROUP_SIZE="${GROUP_SIZE:-8}"
+NUM_TASKS="${NUM_TASKS:-$NUM_PROMPTS}"
 TASKS="${TASKS:-}"
+EVAL_TASKS="${EVAL_TASKS:-32}"
+EVAL_SAMPLES="${EVAL_SAMPLES:-2}"
+EVAL_INTERVAL="${EVAL_INTERVAL:-10}"
+SPLIT_SEED="${SPLIT_SEED:-0}"
+CKPT_INTERVAL="${CKPT_INTERVAL:-5}"
+MAX_CKPTS="${MAX_CKPTS:-5}"
 EPOCHS="${EPOCHS:-1}"
 LR="${LR:-1.0e-6}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
@@ -79,9 +107,14 @@ OPTIMIZER_OFFLOAD="${OPTIMIZER_OFFLOAD:-1}"
 DATA_ROOT="/tmp/harbor/data"
 TASKS_DIR="$DATA_ROOT/$(basename "$DATASET")"
 
-EXPERIMENT="harbor-$GENERATOR-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')"
-RUN_DIR="/tmp/harbor/runs/$EXPERIMENT"
-SUBSET_DIR="$RUN_DIR/tasks"
+# Cluster storage outlives the node (and, on Anyscale, a workspace restart); /tmp doesn't.
+if [[ -d /mnt/cluster_storage ]]; then
+  OUTPUT_ROOT="${OUTPUT_ROOT:-/mnt/cluster_storage/harbor/runs}"
+else
+  OUTPUT_ROOT="${OUTPUT_ROOT:-/tmp/harbor/runs}"
+fi
+RUN_NAME="${RUN_NAME:-harbor-$GENERATOR-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:12])')}"
+RUN_DIR="$OUTPUT_ROOT/$RUN_NAME"
 
 case "$GENERATOR" in
   skycap)
@@ -189,7 +222,7 @@ if [[ "$LOGGER" == wandb ]]; then
 fi
 
 #-----------------------
-# Data: download and extract once, then this run's tasks (TASKS, or the first NUM_PROMPTS)
+# Data: download and extract once, then this run's training and held-out tasks
 #-----------------------
 if [[ -d "$TASKS_DIR" ]] && [[ -n "$(ls -A "$TASKS_DIR" 2>/dev/null)" ]]; then
   echo "==> tasks already at $TASKS_DIR"
@@ -199,20 +232,34 @@ else
   uv run --isolated --extra harbor python examples/train_integrations/harbor/prepare_harbor_dataset.py \
     --dataset "$DATASET" --output_dir "$TASKS_DIR"
 fi
-mkdir -p "$SUBSET_DIR"
-if [[ -n "$TASKS" ]]; then
-  IFS=, read -r -a tasks <<< "$TASKS"
-  tasks=("${tasks[@]/#/$TASKS_DIR/}")
-else
-  mapfile -t tasks < <(find "$TASKS_DIR" -mindepth 1 -maxdepth 1 -type d | sort)
-  tasks=("${tasks[@]:0:$NUM_PROMPTS}")
+mkdir -p "$RUN_DIR"
+# Rebuilt from the same seed on every launch, so a resumed run trains and evaluates on the same tasks.
+python3 examples/train_integrations/harbor/split_tasks.py --tasks-dir "$TASKS_DIR" --run-dir "$RUN_DIR" \
+  --eval "$EVAL_TASKS" --train "$NUM_TASKS" --seed "$SPLIT_SEED" --tasks "$TASKS"
+NUM_TASKS="$(wc -l < "$RUN_DIR/train_tasks.txt" | tr -d ' ')"
+if (( NUM_PROMPTS > NUM_TASKS )); then
+  NUM_PROMPTS="$NUM_TASKS"
 fi
-for task in "${tasks[@]}"; do
-  [[ -d "$task" ]] || { echo "no task at $task" >&2; exit 1; }
-  ln -s "$task" "$SUBSET_DIR/$(basename "$task")"
-done
-NUM_PROMPTS="${#tasks[@]}"
-echo "==> $NUM_PROMPTS tasks x $GROUP_SIZE samples in $SUBSET_DIR"
+STEPS_PER_EPOCH=$((NUM_TASKS / NUM_PROMPTS))
+EXPORT_INTERVAL="${EXPORT_INTERVAL:-$STEPS_PER_EPOCH}"
+echo "==> $NUM_TASKS training tasks, $NUM_PROMPTS x $GROUP_SIZE samples per step, $STEPS_PER_EPOCH steps per epoch"
+
+if (( EVAL_TASKS > 0 )); then
+  # skycap samples every call with generator.sampling_params, eval calls included.
+  EVAL_ARGS=(
+    data.val_data="['$RUN_DIR/eval_tasks']"
+    trainer.eval_interval="$EVAL_INTERVAL"
+    trainer.eval_before_train=true
+    generator.eval_n_samples_per_prompt="$EVAL_SAMPLES"
+    generator.eval_sampling_params.temperature="$TEMPERATURE"
+  )
+  if [[ "$GENERATOR" == skycap ]]; then
+    EVAL_ARGS+=(skycap.wandb.phases="['train','eval']")
+  fi
+  echo "==> $EVAL_TASKS held-out tasks x $EVAL_SAMPLES samples, every $EVAL_INTERVAL steps"
+else
+  EVAL_ARGS=(trainer.eval_interval=-1 trainer.eval_before_train=false)
+fi
 
 #-----------------------
 # Ray: a fresh local cluster for this run
@@ -234,25 +281,26 @@ export RAY_task_events_report_interval_ms=0
 unset RAY_enable_core_worker_ray_event_to_aggregator
 unset RAY_DASHBOARD_AGGREGATOR_AGENT_EVENTS_EXPORT_ADDR RAY_DASHBOARD_AGGREGATOR_AGENT_PUBLISHER_MAX_RETRIES
 
-echo "==> experiment $EXPERIMENT in $RUN_DIR"
+echo "==> run $RUN_NAME in $RUN_DIR"
 
 #-----------------------
 # Run: the sibling recipe's settings, apart from the knobs above. The arm's own settings come
 # last so they win (DETERMINISTIC's concurrency of 1 over the recipe's 512).
 #-----------------------
 uv run --isolated --extra "$STRATEGY" "${EXTRAS[@]}" -m "$ENTRYPOINT" \
-  data.train_data="['$SUBSET_DIR']" \
+  data.train_data="['$RUN_DIR/tasks']" \
   trainer.policy.model.path="$MODEL" \
   generator.inference_engine.served_model_name="$SERVED_MODEL_NAME" \
   trainer.project_name=harbor-compare \
-  trainer.run_name="$EXPERIMENT" \
+  trainer.run_name="$RUN_NAME" \
   trainer.logger="$LOGGER" \
   trainer.export_path="$RUN_DIR/exports" \
   trainer.ckpt_path="$RUN_DIR/ckpts" \
   trainer.log_path="$RUN_DIR/logs" \
-  trainer.ckpt_interval=-1 \
-  trainer.hf_save_interval=-1 \
-  trainer.resume_mode=none \
+  trainer.ckpt_interval="$CKPT_INTERVAL" \
+  trainer.max_ckpts_to_keep="$MAX_CKPTS" \
+  trainer.hf_save_interval="$EXPORT_INTERVAL" \
+  trainer.resume_mode=latest \
   harbor_trial_config.trials_dir="$RUN_DIR/trials" \
   harbor_trial_config.environment.type="$SANDBOX" \
   harbor_trial_config.agent.kwargs.temperature="$TEMPERATURE" \
@@ -263,8 +311,6 @@ uv run --isolated --extra "$STRATEGY" "${EXTRAS[@]}" -m "$ENTRYPOINT" \
   trainer.policy_mini_batch_size="$NUM_PROMPTS" \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
-  trainer.eval_before_train=false \
-  trainer.eval_interval=-1 \
   trainer.update_epochs_per_batch=1 \
   generator.n_samples_per_prompt="$GROUP_SIZE" \
   trainer.algorithm.advantage_estimator=grpo \
@@ -299,14 +345,17 @@ uv run --isolated --extra "$STRATEGY" "${EXTRAS[@]}" -m "$ENTRYPOINT" \
   generator.rate_limit.enabled=true \
   generator.rate_limit.trajectories_per_second=5 \
   generator.rate_limit.max_concurrency=512 \
+  "${EVAL_ARGS[@]}" \
   "${STRATEGY_ARGS[@]}" \
   "${ARM_ARGS[@]}" \
-  "$@" 2>&1 | tee "$RUN_DIR/run.log"
+  "$@" 2>&1 | tee -a "$RUN_DIR/run.log"
 
 echo
-echo "==> done: $EXPERIMENT"
+echo "==> done: $RUN_NAME (launch again with RUN_NAME=$RUN_NAME to resume)"
 if [[ "$GENERATOR" == skycap ]]; then
   echo "    skycap records: $RUN_DIR/skycap"
 fi
 echo "    Harbor trials:  $RUN_DIR/trials"
+echo "    checkpoints:    $RUN_DIR/ckpts"
+echo "    HF exports:     $RUN_DIR/exports"
 echo "    log:            $RUN_DIR/run.log"
