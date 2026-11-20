@@ -100,7 +100,7 @@ class Turn:
     completion_tokens: int
     #: A digest of the prompt length and the sampled ids, for ids a client sends back.
     key: str
-    #: The server's ``use_raw_content``.
+    #: Whether the reply was the completion's raw text: the server's ``use_raw_content``, on an API that carries it.
     raw_content: bool = False
 
 
