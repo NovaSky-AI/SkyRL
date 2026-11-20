@@ -6,6 +6,7 @@ import asyncio
 import multiprocessing as mp
 import os
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +42,8 @@ __all__ = ["BasePPOExp", "config_dir"]
 
 
 class BasePPOExp:
+    _on_policy_servers_launched = None
+
     def __init__(self, cfg: SkyRLTrainConfig):
         """
         Initializes a PPO experiment.
@@ -234,6 +237,7 @@ class BasePPOExp:
             self.cfg,
             self.tokenizer,
             placement_group=self.colocate_pg if is_colocated else None,
+            on_servers_launched=self._on_policy_servers_launched,
         )
         self._inference_router = server_setup.router
         self._server_groups = server_setup.server_groups
@@ -279,8 +283,64 @@ class BasePPOExp:
         tracker = self.get_tracker()
         self.tracker = tracker
 
-        inference_engine_client = self.get_inference_client()
+        async_cfg = self.cfg.trainer.fully_async
+        workers = (PolicyWorker, CriticWorker, RefWorker)
+        with ExitStack() as training_resources:
+            groups = None
+            training_steps = None
 
+            def prepare_training_models():
+                nonlocal groups, training_steps
+                from skyrl.train.fully_async_trainer import fully_async_step_counts
+
+                # The fully async dataloader yields one prompt per item. Start the training
+                # actors after inference owns its placement groups and has submitted start RPCs.
+                _, training_steps = fully_async_step_counts(
+                    len(self.train_dataset), self.cfg.trainer.policy_mini_batch_size, self.cfg.trainer
+                )
+                logger.info("Preparing training models while inference servers start")
+                groups = RayPPOTrainer._start_model_groups(
+                    self.cfg,
+                    self.colocate_pg,
+                    self.tokenizer.pad_token_id,
+                    training_steps,
+                    *workers,
+                    training_resources,
+                )
+
+            overlap = (
+                async_cfg.enabled
+                and async_cfg.overlap_model_startup
+                and not async_cfg.simulate_training
+                and not self.cfg.trainer.placement.colocate_all
+            )
+            # Only the managed policy launch in _get_new_inference_client calls this.
+            self._on_policy_servers_launched = prepare_training_models if overlap else None
+            inference_engine_client = self.get_inference_client()
+            trainer = self._create_trainer(tracker, inference_engine_client)
+            if async_cfg.simulate_training:
+                logger.info("fully_async.simulate_training=True: skipping build_models()")
+            elif (
+                groups is not None
+                and type(trainer).build_models is RayPPOTrainer.build_models
+                and trainer.total_training_steps == training_steps
+            ):
+                trainer._attach_model_groups(*groups)
+                training_resources.pop_all()
+            else:
+                if groups is not None:
+                    # A custom trainer owns model initialization or uses a different optimizer schedule.
+                    logger.warning(
+                        f"{type(trainer).__name__} overrides build_models() or computes a different number of "
+                        f"training steps ({trainer.total_training_steps} vs {training_steps}); restarting the "
+                        "training actors serially. Set trainer.fully_async.overlap_model_startup=false to skip "
+                        "the discarded startup."
+                    )
+                    training_resources.close()
+                trainer.build_models(*workers)
+            return trainer
+
+    def _create_trainer(self, tracker, inference_engine_client) -> RayPPOTrainer:
         generator: GeneratorInterface = self.get_generator(self.cfg, self.tokenizer, inference_engine_client)
 
         trainer = self.get_trainer(
@@ -337,19 +397,6 @@ class BasePPOExp:
         # during `build_models` (which happens before _setup_trainer returns).
         self.trainer = trainer
 
-        # Build the models — skipped in simulated-trainer mode (no policy/critic/ref components).
-        # See FullyAsyncConfig.simulate_training / FullyAsyncTrainerSim: steps are simulated
-        # (sleep + pause/resume, no broadcast), typically against external served endpoints.
-        # TODO: we should make a top level TrainerConfig.simulate_training flag to provide a consistent way
-        # for simulating training steps
-        simulate_training = self.cfg.trainer.fully_async.simulate_training
-        if simulate_training:
-            logger.info(
-                "fully_async.simulate_training=True: skipping build_models() — no policy/critic/ref "
-                "models instantiated. Trainer steps will be simulated (sleep + pause/resume, no broadcast)."
-            )
-        else:
-            trainer.build_models(PolicyWorker, CriticWorker, RefWorker)
         return trainer
 
     def run(self):
@@ -392,6 +439,8 @@ class BasePPOExp:
                 # before log_exception finishes the wandb run.
                 self.trainer.flush_pending_metrics()
                 self.trainer.tracker.log_exception(e, step=self.trainer.global_step)
+            elif self.tracker is not None:
+                self.tracker.log_exception(e, step=0)
             else:
                 logger.error(f"Setup failed before tracker was initialized:\n{e}")
             raise

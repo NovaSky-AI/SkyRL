@@ -53,6 +53,14 @@ class InferenceServerSetup:
     decode_server_groups: List[ServerGroup] = field(default_factory=list)
 
 
+def _start_server_groups(groups, on_servers_launched):
+    """Start all groups in parallel, run ``on_servers_launched``, then wait for every server."""
+    refs = [ref for group in groups for ref in group.start(blocking=False)]
+    if on_servers_launched is not None:
+        on_servers_launched()
+    ray.get(refs)
+
+
 def create_inference_servers(
     ie_cfg: InferenceEngineConfig,
     cli_args: Namespace,
@@ -60,6 +68,7 @@ def create_inference_servers(
     placement_group=None,
     *,
     start_port: int = VLLM_START_PORT,
+    on_servers_launched: Optional[Callable[[], None]] = None,
 ) -> InferenceServerSetup:
     """Build server groups and router from config.
 
@@ -73,6 +82,7 @@ def create_inference_servers(
         cli_args: vLLM CLI args from :func:`build_vllm_cli_args` (the policy)
             or :func:`build_frozen_vllm_cli_args` (a frozen model).
         log_path: Log path for SkyRL logs
+        on_servers_launched: Optional driver work to submit after all start RPCs are in flight.
         placement_group: Optional resolved placement group for colocated
             training.  ``None`` when not colocated.
         start_port: Base of the first server's port window. Each server owns
@@ -164,16 +174,7 @@ def create_inference_servers(
             for i in range(num_decode)
         ]
 
-        # Start all prefill and decode groups in parallel (non-blocking)
-        all_refs = []
-        for g in prefill_server_groups:
-            all_refs.extend(g.start(blocking=False))
-
-        for g in decode_server_groups:
-            all_refs.extend(g.start(blocking=False))
-
-        # Wait for all servers to be ready in one shot
-        ray.get(all_refs)
+        _start_server_groups(prefill_server_groups + decode_server_groups, on_servers_launched)
 
         # Collect URLs — refs are already resolved so lazy property returns immediately
         prefill_urls = [info.url for g in prefill_server_groups for info in g.server_infos]
@@ -241,13 +242,7 @@ def create_inference_servers(
             for i in range(ie_cfg.num_engines)
         ]
 
-        # Start all engine groups in parallel (non-blocking)
-        all_refs = []
-        for g in server_groups:
-            all_refs.extend(g.start(blocking=False))
-
-        # Wait for all servers to be ready in one shot
-        ray.get(all_refs)
+        _start_server_groups(server_groups, on_servers_launched)
 
         # Collect URLs — refs are already resolved so lazy property returns immediately
         server_urls = [info.url for g in server_groups for info in g.server_infos]
@@ -268,6 +263,8 @@ def build_new_inference_client(
     cfg: SkyRLTrainConfig,
     tokenizer,
     placement_group: Optional[ResolvedPlacementGroup] = None,
+    *,
+    on_servers_launched: Optional[Callable[[], None]] = None,
 ) -> Tuple[RemoteInferenceClient, InferenceServerSetup]:
     """Build the new HTTP-based inference client and supporting state for the policy.
 
@@ -290,6 +287,7 @@ def build_new_inference_client(
         make_cli_args=lambda: build_vllm_cli_args(cfg),
         placement_group=placement_group,
         tokenizer=tokenizer,
+        on_servers_launched=on_servers_launched,
         enable_return_routed_experts=ie_cfg.enable_return_routed_experts,
         enable_return_sample_support_set=ie_cfg.enable_return_sample_support_set,
         enable_return_sample_support_logprobs=cfg.trainer.algorithm.enable_score_centering,
@@ -305,6 +303,7 @@ def build_new_inference_client_impl(
     make_cli_args: Callable[[], Namespace],
     placement_group: Optional[ResolvedPlacementGroup] = None,
     start_port: int = VLLM_START_PORT,
+    on_servers_launched: Optional[Callable[[], None]] = None,
     **client_kwargs: Any,
 ) -> Tuple[RemoteInferenceClient, InferenceServerSetup]:
     """Resolve a model's servers from its engine config and build the client that drives them.
@@ -379,6 +378,7 @@ def build_new_inference_client_impl(
             log_path=log_path,
             placement_group=placement_group,
             start_port=start_port,
+            on_servers_launched=on_servers_launched,
         )
 
     client = RemoteInferenceClient(

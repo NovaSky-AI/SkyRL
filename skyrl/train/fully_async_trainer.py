@@ -327,6 +327,15 @@ class _AsyncDataloader:
         return len(self._consumed_data_uids) - len(self._filtered_data_uids)
 
 
+def fully_async_step_counts(num_prompts, mini_batch_size, trainer_cfg):
+    """Return epoch and total steps for the fully async one-prompt dataloader."""
+    steps_per_epoch = num_prompts // mini_batch_size
+    total_steps = steps_per_epoch * trainer_cfg.epochs
+    if trainer_cfg.max_training_steps is not None:
+        total_steps = min(total_steps, trainer_cfg.max_training_steps)
+    return steps_per_epoch, total_steps
+
+
 class FullyAsyncRayPPOTrainer(RayPPOTrainer):
 
     def __init__(self, *args, **kwargs):
@@ -421,10 +430,9 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
         Overrides to build dataloader for fully async training. See `_AsyncDataloader` for more details.
         """
         self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True, is_fully_async=True)
-        self.num_steps_per_epoch = len(self.train_dataloader) // self.mini_batch_size
-        self.total_training_steps = self.num_steps_per_epoch * self.cfg.trainer.epochs
-        if self.cfg.trainer.max_training_steps is not None:
-            self.total_training_steps = min(self.total_training_steps, self.cfg.trainer.max_training_steps)
+        self.num_steps_per_epoch, self.total_training_steps = fully_async_step_counts(
+            len(self.train_dataloader), self.mini_batch_size, self.cfg.trainer
+        )
         logger.info(f"Length of train_dataloader: {len(self.train_dataloader)}")
         logger.info(f"Number of steps per epoch: {self.num_steps_per_epoch}")
         logger.info(f"Total training steps: {self.total_training_steps}")

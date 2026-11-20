@@ -111,7 +111,7 @@ def test_build_new_inference_client_impl_launches_with_the_role_inputs(monkeypat
     )
     calls = []
 
-    def fake_create(ie_cfg_arg, cli_args, log_path, placement_group, start_port):
+    def fake_create(ie_cfg_arg, cli_args, log_path, placement_group, start_port, on_servers_launched):
         calls.append((ie_cfg_arg, cli_args, log_path, placement_group, start_port))
         return canned
 
@@ -181,3 +181,22 @@ def test_build_new_inference_client_launched_and_external_clients_get_the_same_p
         "data_parallel_size",
     ):
         assert getattr(launched, name) == getattr(external, name), name
+
+
+def test_launch_hook_runs_after_all_start_rpcs_before_readiness(launcher_doubles, monkeypatch):
+    events = []
+
+    def start(group, *, blocking):
+        assert not blocking
+        events.append(f"launch {group.index}")
+        return [group.index]
+
+    monkeypatch.setattr(FakeServerGroup, "start", start)
+    monkeypatch.setattr(inference_setup.ray, "get", lambda refs: events.append(("wait", refs)))
+    create_inference_servers(
+        InferenceEngineConfig(num_engines=2),
+        Namespace(tensor_parallel_size=1, pipeline_parallel_size=1),
+        log_path="/tmp/logs",
+        on_servers_launched=lambda: events.append("launch training"),
+    )
+    assert events == ["launch 0", "launch 1", "launch training", ("wait", [0, 1])]
