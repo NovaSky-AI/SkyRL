@@ -35,7 +35,7 @@ concurrency:
 jobs:
   test:
     # CI runs only in the upstream repo, as for the rest of the repository.
-    if: github.repository == 'NovaSky-AI/SkyRL'
+    if: github.repository == 'skyrl-project/SkyRL'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,4 +45,4 @@ jobs:
       - name: Install the latest version of uv
         uses: astral-sh/setup-uv@v6
       - name: Test
-        run: uv run --isolated --extra skyrl-train --extra harbor --extra skycap --extra dev pytest tests/integrations/harbor tests/integrations/harbor_skycap
+        run: uv run --isolated --extra skyrl-train --extra harbor --extra skycap --extra dev pytest tests/integrations

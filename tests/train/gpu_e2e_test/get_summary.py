@@ -1,20 +1,8 @@
 import argparse
 import operator
-import sys
+import time
 
 import wandb
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--run_name", type=str, required=True)
-parser.add_argument("--project_name", type=str, required=True)
-
-parser.add_argument(
-    "--asserts",
-    nargs="+",
-    type=str,
-    required=True,
-    help="List of assertions to make on summary metrics. Format;a <metric_name> <operator> <threshold>. Example: --asserts eval/all/avg_score >= 0.72 generate/max_num_tokens <= 1000",
-)
 
 OPERATORS = {
     "<": operator.lt,
@@ -25,26 +13,76 @@ OPERATORS = {
     ">=": operator.ge,
 }
 
-args = parser.parse_args()
 
-api = wandb.Api()
-# get latest run with the run name
-runs = api.runs(f"{args.project_name}", filters={"display_name": args.run_name}, order="-created_at")
-matched_run = next(iter(runs), None)
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run_name", type=str, required=True)
+    parser.add_argument("--project_name", type=str, required=True)
+    parser.add_argument("--wait_for_finished", action="store_true")
+    parser.add_argument(
+        "--asserts",
+        nargs="+",
+        type=str,
+        required=True,
+        help="Assertions such as 'eval/all/avg_score >= 0.72'.",
+    )
+    args = parser.parse_args()
+    assertions = [assertion.strip().split() for assertion in args.asserts]
+    metric_names = [name for name, _, _ in assertions]
 
-if matched_run is None:
-    raise ValueError(f"Run {args.run_name} not found in project {args.project_name}")
+    deadline = time.monotonic() + 180
+    while True:
+        # Api.runs() caches results on the Api instance, so create one per poll.
+        runs = wandb.Api().runs(f"{args.project_name}", filters={"display_name": args.run_name}, order="-created_at")
+        matched_run = next(iter(runs), None)
+        if matched_run is None and not args.wait_for_finished:
+            raise ValueError(f"Run {args.run_name} not found in project {args.project_name}")
+        if matched_run is not None and not args.wait_for_finished:
+            metric_values = matched_run.summary_metrics
+            break
+        if matched_run is not None and matched_run.state in {"failed", "crashed", "killed"}:
+            raise ValueError(f"Run {args.run_name} ended with state {matched_run.state}")
 
-for assertion in args.asserts:
-    metric_name, operator_str, threshold = assertion.lstrip().rstrip().split()
-    threshold = float(threshold)
-    if metric_name not in matched_run.summary_metrics:
-        raise ValueError(f"Metric {metric_name} not found in run {args.run_name}")
+        if matched_run is not None and matched_run.state == "finished":
+            step_rows = matched_run.scan_history(
+                keys=["trainer/global_step", "trainer/total_training_steps"], use_cache=False
+            )
+            final_steps = [
+                row["trainer/global_step"]
+                for row in step_rows
+                if row.get("trainer/global_step") is not None
+                and row.get("trainer/total_training_steps") is not None
+                and row["trainer/global_step"] >= row["trainer/total_training_steps"]
+            ]
+            if final_steps:
+                final_step = max(final_steps)
+                metric_rows = matched_run.scan_history(keys=["trainer/global_step", *metric_names], use_cache=False)
+                final_rows = [
+                    row
+                    for row in metric_rows
+                    if row.get("trainer/global_step") == final_step
+                    and all(row.get(name) is not None for name in metric_names)
+                ]
+                if final_rows:
+                    metric_values = final_rows[-1]
+                    break
 
-    metric_value = matched_run.summary_metrics[metric_name]
-    if not OPERATORS[operator_str](metric_value, threshold):
-        print(f"Metric {metric_name} is not {operator_str} threshold {threshold}: {metric_value}")
-        sys.exit(1)
-    else:
+        if time.monotonic() >= deadline:
+            raise ValueError(f"Run {args.run_name} did not publish final training metrics within 180 seconds")
+        time.sleep(10)
+
+    for metric_name, operator_str, threshold in assertions:
+        threshold = float(threshold)
+        if metric_name not in metric_values:
+            raise ValueError(f"Metric {metric_name} not found in run {args.run_name}")
+        metric_value = metric_values[metric_name]
+        if not OPERATORS[operator_str](metric_value, threshold):
+            print(f"Metric {metric_name} is not {operator_str} threshold {threshold}: {metric_value}")
+            return 1
         print(f"Metric {metric_name} is {operator_str} threshold {threshold}: {metric_value}")
-print("All assertions passed!")
+    print("All assertions passed!")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

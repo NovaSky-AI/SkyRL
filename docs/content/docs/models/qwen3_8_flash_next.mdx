@@ -1,0 +1,73 @@
+---
+title: "Qwen3.8-Flash-Next"
+---
+
+| Model | Full FT | LoRA | Min. hardware |
+|---|---|---|---|
+| Qwen3.8-Flash-Next (HF `qwen4_exp`, ~180B MoE) | ✅ | ✅ | 4x8 B200 |
+
+Supported on `main` with the Megatron backend. The model mixes GDN linear attention with gated attention using a QSA sparse indexer,
+has 512 routed experts (top-10), and a frozen ~51B-parameter PLE n-gram table.
+Megatron support is SkyRL's own, in `skyrl/backends/skyrl_train/patches/megatron/qwen4_exp/`.
+CI runs Megatron vs vLLM logprob tests (full and LoRA adapter) on a [4-layer slice](https://huggingface.co/xguihugging/Qwen3.8-Flash-Next-4layer).
+
+## Example scripts
+
+All scripts are in [`examples/train/qwen3_8_flash_next/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/qwen3_8_flash_next) and run on 4x8 B200.
+
+| Task | Mode | Script |
+|---|---|---|
+| GSM8K | LoRA | [`run_gsm8k_qwen3_8_flash_next_lora_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/qwen3_8_flash_next/run_gsm8k_qwen3_8_flash_next_lora_4node.sh) |
+| GSM8K | Full FT | [`run_gsm8k_qwen3_8_flash_next_fullft_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/qwen3_8_flash_next/run_gsm8k_qwen3_8_flash_next_fullft_4node.sh) |
+| DAPO | LoRA | [`run_dapo_qwen3_8_flash_next_lora_sync_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/qwen3_8_flash_next/run_dapo_qwen3_8_flash_next_lora_sync_4node.sh) |
+| DAPO | Full FT | [`run_dapo_qwen3_8_flash_next_fullft_sync_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/qwen3_8_flash_next/run_dapo_qwen3_8_flash_next_fullft_sync_4node.sh) |
+| DAPO, 64K responses, CP8 | LoRA | [`run_dapo_qwen3_8_flash_next_lora_cp8_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/qwen3_8_flash_next/run_dapo_qwen3_8_flash_next_lora_cp8_4node.sh) |
+| DAPO, 64K responses, CP8 | Full FT | [`run_dapo_qwen3_8_flash_next_fullft_cp8_4node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/qwen3_8_flash_next/run_dapo_qwen3_8_flash_next_fullft_cp8_4node.sh) |
+
+```bash
+bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+MODEL_PATH=/path/to/Qwen3.8-Flash-Next bash examples/train/qwen3_8_flash_next/run_dapo_qwen3_8_flash_next_lora_sync_4node.sh
+```
+
+Put `MODEL_PATH` on node-local disk at the same path on every node. Every vLLM and trainer rank reads the 360 GB checkpoint at startup.
+
+The GSM8K scripts cap sequences at 512 + 1024 tokens, so attention stays dense. The DAPO scripts use the stock 2k prompt / 8k response budget,
+which runs the QSA indexer in its sparse regime, with R3 (rollout routing replay). The CP8 scripts raise the response budget to 64K;
+raise `MAX_RESPONSE_LENGTH` to go up to 262,144 tokens of prompt + response.
+
+**Results:** DAPO LoRA (LR 3e-4, alpha 32) took held-out AIME from 0.45 to 0.85 in 10 steps.
+With CP8, on ~65K-token multi-hop QA prompts, full FT went from 0.68 to 0.89 eval pass in 10 steps and LoRA from 0.71 to 0.85.
+At 257K tokens, Megatron CP8 and vLLM logprobs differ by a mean |dlogp| of 0.031.
+
+## Parallelism
+
+- TP=1 by default, or TP=2 with sequence parallelism. At TP=4 the cuDNN QSA kernels don't cover the head layout and it falls back to FlexAttention.
+- PP=1. The model scales with expert parallelism: EP=16 on 32 GPUs.
+- Context parallelism (CP>1) holds sequences up to 262,144 tokens (CP8 on 4x8 B200). It needs Blackwell and the cuDNN QSA kernels (`QSA_CUDNN_WHEEL`, see Notes),
+  and TP x CP &lt;= 16. QSA attention runs split-K cuDNN QSA over the CP chunks with an LSE merge; GDN uses megatron-core's CP.
+- Full FT at CP8 uses TP=2 and EP=32, so the optimizer fits on the GPU. At TP=1 it needs CPU optimizer offload.
+- EP also shards the frozen PLE table (~100 GB / EP per rank, ~6.4 GB at EP=16, kept in pinned host memory).
+
+## Notes
+
+- **Text only and packed sequences** (`language_model_only=true`, `remove_microbatch_padding=true`).
+- **What trains:** the PLE n-gram table is a plain tensor, so it is never trained or synced. The PLE projections/norms/conv and the hyper-connections train in full FT.
+  The QSA indexer stays frozen. LoRA (all-linear) adapts only the attention, GDN and MoE linears.
+- **MTP is not trained** (`mtp_num_layers=0`). vLLM keeps the base MTP weights, so don't turn on MTP speculative decoding for long runs.
+- **LoRA sync is adapter-only** (`merge_lora=false`). Merging doesn't fit in memory at TP8/EP16. Expert adapters keep the full rank, since `normalize_moe_lora` needs `rank % 10 == 0`.
+- **Learning rates:** LoRA needs a much larger LR than full FT. At 1e-5 / 3e-5 LoRA runs stayed flat, and 3e-4 learns. For full FT, 1e-5 sharpened the policy too fast and 3e-6 works.
+- **Overlong penalty:** the DAPO scripts use a half-strength soft overlong penalty. At full strength, full FT learned to cut its reasoning short.
+- **Faster sparse attention on B200:** set `QSA_CUDNN_WHEEL` to a cudnn-frontend wheel with `cudnn.ops.qsa_forward` (>= 1.32, or the `1.32.0.dev` cp312 wheel from
+  [NVIDIA/cudnn-frontend releases](https://github.com/NVIDIA/cudnn-frontend/releases)), at the same path on every node. It is 1.7-3.5x faster than the FlexAttention fallback,
+  and required for CP>1. If the image puts its own cuDNN on `LD_LIBRARY_PATH` (e.g. `/opt/cudnn`), Ray workers load that older cuDNN instead:
+  drop that entry and set `SKYRL_LD_LIBRARY_PATH_EXPORT=1`.
+- **Blackwell:** the scripts default to the Triton GDN backend, since fla's TileLang GDN backward aborts on Blackwell.
+- **H100 (80 GB):** set `NCCL_NVLS_ENABLE=0` in the Ray worker environment (SkyRL doesn't forward it from your shell). NVLS buffers otherwise take ~12 GiB/GPU that vLLM needs.
+- **vLLM custom all-reduce is off.** It fails under sleep mode with TP>1 (`custom_all_reduce.cuh:164 'invalid argument'`).
+- **Loading full-FT exports:** HF exports from `trainer.hf_save_interval` leave out the PLE table, vision tower and MTP head, and vLLM needs the PLE table.
+  Fill in the missing tensors from the base checkpoint with
+  [`complete_export.py`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/qwen3_8_flash_next/complete_export.py):
+
+  ```bash
+  uv run --isolated --no-project python examples/train/qwen3_8_flash_next/complete_export.py <export_dir> <base_dir>
+  ```

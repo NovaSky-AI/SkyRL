@@ -26,7 +26,7 @@ import re
 import time
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -37,11 +37,14 @@ from harbor.models.agent.name import AgentName
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
 from loguru import logger
-from skycap import CapturePool, PathRuleError
-from skycap.paths import load_rule
 from tqdm import tqdm
 
+from skycap import CapturePool, PathRuleError
+from skycap.paths import load_rule
 from skyrl.backends.skyrl_train.inference_servers.base import ConversationType
+from skyrl.integration.harbor.trial_metrics import TrialAttempts, trial_metrics
+from skyrl.integration.harbor_skycap.compose import TrialOutcome, compose, split
+from skyrl.integration.harbor_skycap.record_index import RecordLog
 from skyrl.train.generators.base import (
     GeneratorInput,
     GeneratorInterface,
@@ -49,11 +52,7 @@ from skyrl.train.generators.base import (
     TrajectoryID,
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt
-from skyrl.train.utils.rate_limiter import RateLimiterConfig, create_rate_limiter
-
-from ..harbor.trial_metrics import TrialAttempts, trial_metrics
-from .compose import TrialOutcome, compose, split
-from .record_index import RecordLog
+from skyrl.train.utils.rate_limiter import create_rate_limiter
 
 litellm.suppress_debug_info = True
 
@@ -105,6 +104,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         train_paths: str = "all",
         records: Optional[RecordLog] = None,
         include_images: bool = False,
+        check_first_batch: bool = True,
     ) -> None:
         """
         Args:
@@ -116,6 +116,8 @@ class HarborSkycapGenerator(GeneratorInterface):
                 rule's ``"pkg.module:function"``, which the servers must have been started with.
             records: where every trajectory opened is logged, per phase, for the W&B record index.
             include_images: the model takes images; each row carries its path's ``pixel_values`` and ``image_grid_thw``.
+            check_first_batch: raise when not one trajectory of the first ``generate`` call has anything to train
+                (``skycap.check_first_batch``).
         """
         # Imported here too, so a bad import path fails at startup rather than at the first finish.
         load_rule(train_paths)
@@ -154,15 +156,9 @@ class HarborSkycapGenerator(GeneratorInterface):
         # skycap has the tokens exactly; asking Harbor for them too is what forces the sibling to ban summarization.
         kwargs.pop("collect_rollout_details", None)
         self.include_images = include_images
+        self._check_first_batch = check_first_batch
+        self._first_batch_done = False
         self._rate_limiter = create_rate_limiter(getattr(generator_cfg, "rate_limit", None))
-        if remote_sandboxes(self._template) and not max_concurrency(getattr(generator_cfg, "rate_limit", None)):
-            # A provider's sandboxes count against an account quota others share, and every trial of a batch
-            # (eval: the whole eval set) would start one at once.
-            raise ValueError(
-                f"harbor_trial_config.environment runs sandboxes remotely ({environment_name(self._template)}): "
-                "cap how many run at once with generator.rate_limit.enabled=true and "
-                "generator.rate_limit.max_concurrency=<n>"
-            )
 
     async def close(self) -> None:
         """Close the pool's HTTP session. The generator can't generate afterwards."""
@@ -208,6 +204,15 @@ class HarborSkycapGenerator(GeneratorInterface):
                     group.create_task(worker(index, prompt, trajectory_id))
         finally:
             progress.close()
+
+        if self._check_first_batch and not self._first_batch_done:
+            self._first_batch_done = True
+            if not any(outcome is not None and outcome.samples for outcome in outcomes):
+                raise RuntimeError(
+                    f"No trajectory in the first batch ({len(outcomes)}) has anything to train; each trial's "
+                    f"exception.txt and agent logs are under {self._template.get('trials_dir')}. "
+                    "skycap.check_first_batch=false skips this check."
+                )
 
         output = compose(
             outcomes,
@@ -388,34 +393,10 @@ def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
     # As Harbor picks the agent (AgentFactory.create_agent_from_config): a known name wins over an import path.
     name, import_path = agent.get("name"), agent.get("import_path")
     if name is not None and name in AgentName.values():
-        cls = AgentFactory._AGENT_MAP.get(AgentName(name))
+        cls = AgentFactory.get_agent_class(AgentName(name))
     elif import_path:
         module, _, attribute = import_path.partition(":")
         cls = getattr(importlib.import_module(module), attribute)
     else:
         return False
     return isinstance(cls, type) and issubclass(cls, BaseInstalledAgent)
-
-
-#: Harbor environments whose sandboxes run on this machine or cluster, not in a provider's account.
-LOCAL_ENVIRONMENTS = frozenset({"docker"})
-
-
-def environment_name(template: Dict[str, Any]) -> str:
-    """The trial's environment, as Harbor picks it: an import path over a type, Docker by default."""
-    environment = template.get("environment") or {}
-    return environment.get("import_path") or str(environment.get("type") or "docker")
-
-
-def remote_sandboxes(template: Dict[str, Any]) -> bool:
-    """Whether the trial's sandboxes run remotely (Daytona, Modal, ...)."""
-    return environment_name(template) not in LOCAL_ENVIRONMENTS
-
-
-def max_concurrency(rate_limit: Any) -> Optional[int]:
-    """``generator.rate_limit``'s cap on trials in flight, or None when it sets none."""
-    if isinstance(rate_limit, Mapping):
-        rate_limit = RateLimiterConfig(**rate_limit)
-    if rate_limit is None or not rate_limit.enabled:
-        return None
-    return rate_limit.max_concurrency

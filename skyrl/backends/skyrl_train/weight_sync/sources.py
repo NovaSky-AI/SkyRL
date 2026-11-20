@@ -62,15 +62,17 @@ _MEGATRON_SHARED_WITH_DRAFT = ("embedding.word_embeddings.weight", "output_layer
 
 
 def wire_dtype(tensor: torch.Tensor, dtype: torch.dtype) -> torch.dtype:
-    """The dtype a Megatron parameter goes out in: ``dtype``, except fp32 and integer tensors.
+    """The dtype a Megatron parameter goes out in: ``dtype``, except fp32, integer and FP8 tensors.
 
     Parameters a model keeps in fp32 under bf16 training (the MoE router expert bias; Beam's router
     weight too; DeepSeek-V4's mHC mixing weights and attention sinks) go out in fp32:
     vLLM keeps them in fp32 too, and a bf16 round trip changes them by ~1/256, enough to move router
     top-k choices. Integer tables (DeepSeek-V4's hash-routing tid2eid) keep their dtype: bf16 holds
-    integers exactly only up to 256.
+    integers exactly only up to 256. One-byte floats keep theirs too: an export that re-quantizes to
+    the checkpoint's layout (DeepSeek-V4 / V4.1: FP8 E4M3 weights, e8m0 scales) is already in the
+    dtype vLLM loads, and vLLM's scale loaders reject a widened scale.
     """
-    if tensor.dtype == torch.float32 or not tensor.is_floating_point():
+    if tensor.dtype == torch.float32 or not tensor.is_floating_point() or tensor.element_size() == 1:
         return tensor.dtype
     return dtype
 
@@ -458,6 +460,27 @@ class LoraAdapterWeightSource(WeightSource):
             self._drop_cached_metadata()
 
 
+def adapter_target_modules(bridge: Any, adapter_weight_names: Iterable[str]) -> List[str]:
+    """``target_modules`` for an exported PEFT adapter, from the model bridge.
+
+    Megatron-Bridge's ``_adapter_target_modules`` hook (what ``AutoBridge.save_hf_adapter`` uses)
+    defaults to PEFT's leaf-name selectors. Bridges whose leaf names are ambiguous override it with
+    full module paths: PEFT matches ``target_modules`` by suffix, so Beam's attention
+    ``self_attn.gate_proj`` would otherwise also wrap every MLP ``mlp.gate_proj``.
+    """
+    names = list(adapter_weight_names)
+    model_bridge = getattr(bridge, "_model_bridge", None)
+    if hasattr(model_bridge, "_adapter_target_modules"):
+        modules = model_bridge._adapter_target_modules(names)
+    else:
+        from megatron.bridge.models.conversion.peft_bridge import (
+            infer_target_modules_from_adapter_weights,
+        )
+
+        modules = infer_target_modules_from_adapter_weights(names)
+    return sorted(set(modules) - {"base_layer"})
+
+
 class MegatronLoraAdapterSource(LoraAdapterWeightSource):
     """LoRA adapter source for the Megatron backend.
 
@@ -500,7 +523,6 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Any]]:
         from megatron.bridge.models.conversion.peft_bridge import (
             build_adapter_config_dict,
-            infer_target_modules_from_adapter_weights,
         )
 
         from skyrl.backends.skyrl_train.distributed.megatron.lora_export import (
@@ -531,7 +553,7 @@ class MegatronLoraAdapterSource(LoraAdapterWeightSource):
         # Fold that scale here and publish lora_alpha == r so vLLM's scale is 1.
         adapter_state = fold_lora_alpha_for_vllm(adapter_state, config_rank=config_rank, alpha=self._lora_cls.alpha)
         adapter_state = _convert_moe_experts_lora_to_vllm(adapter_state)
-        target_modules = sorted(set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"})
+        target_modules = adapter_target_modules(self._bridge, adapter_state.keys())
         adapter_config = mark_alpha_folded(
             build_adapter_config_dict(
                 self._lora_cls,

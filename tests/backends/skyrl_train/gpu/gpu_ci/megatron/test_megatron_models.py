@@ -45,6 +45,9 @@ from skyrl.train.generators.base import GeneratorInput
 from skyrl.train.generators.skyrl_gym_generator import SkyRLGymGenerator
 from skyrl.train.utils.utils import validate_cfg
 from tests.backends.skyrl_train.gpu.gpu_ci.conftest import ray_init
+from tests.backends.skyrl_train.gpu.gpu_ci.megatron.megatron_tiny_models.create_beam_tiny import (
+    create_beam_tiny,
+)
 from tests.backends.skyrl_train.gpu.utils import (
     InferenceEngineState,
     Timer,
@@ -63,6 +66,16 @@ QWEN38_4LAYER = os.environ.get("SKYRL_QWEN38_4LAYER_PATH", "xguihugging/Qwen3.8-
 # 4-layer bf16 slice of moonshotai/Kimi-K3 built by examples/train/kimi_k3/make_slice.py. A local
 # override must keep "kimi-k3" in its path: the settings below are keyed on the model name.
 KIMI_K3_4LAYER = os.environ.get("SKYRL_KIMI_K3_4LAYER_PATH", "eatang/Kimi-K3-4layer")
+# Tiny random Beam checkpoint, built on first use by megatron_tiny_models/create_beam_tiny.py. The
+# "_fused_lm_head" copy is the same checkpoint run through trainer.fused_lm_head_logprob (the fused
+# path applies Beam's final logit softcap itself). Settings below are keyed on "beam" in the path.
+BEAM_TINY = os.environ.get("SKYRL_BEAM_TINY_PATH", "/tmp/skyrl-beam-tiny-random")
+BEAM_TINY_FUSED_LM_HEAD = f"{BEAM_TINY}_fused_lm_head"
+
+
+def _is_beam(model_name: str) -> bool:
+    return "beam" in model_name.lower()
+
 
 NUM_PROMPTS = 10
 N_SAMPLES_PER_PROMPT = 8
@@ -124,6 +137,11 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         # max_num_seqs=1024 and 64 heads that is 65536 > 65535 and the CUDA-graph capture / profile
         # run fails with "Triton Error [CUDA]: invalid argument". Stay below the limit.
         cfg.generator.inference_engine.max_num_seqs = 512
+        # megatron-core's DSAttention supports context parallelism only with allgather (the
+        # tp2_cp2 rows); no effect at CP=1.
+        transformer_config_kwargs = dict(cfg.trainer.policy.megatron_config.transformer_config_kwargs or {})
+        transformer_config_kwargs["cp_comm_type"] = "allgather"
+        cfg.trainer.policy.megatron_config.transformer_config_kwargs = transformer_config_kwargs
     if "qwen3.8-flash-next" in model_name.lower():
         # VL checkpoint; patches/megatron/qwen4_exp bridges the language model only, and PLE
         # needs packed (thd) sequences.
@@ -166,6 +184,8 @@ def get_test_actor_config(model_name) -> SkyRLTrainConfig:
         lora.target_modules = ["linear_proj", "linear_fc1", "linear_fc2"]
         cfg.trainer.policy.megatron_config.lora_config.merge_lora = False
         cfg.trainer.policy.megatron_config.lora_config.normalize_moe_lora = True
+    if _is_beam(model_name) and model_name.endswith("_fused_lm_head"):
+        cfg.trainer.fused_lm_head_logprob = True
     # Large MoE models: Megatron's DistributedOptimizer eagerly materializes
     # the fp32 master + AdamW state on GPU at init (~6x model size), which
     # OOMs on 4xH100 before forward ever runs. These tests only forward +
@@ -208,6 +228,12 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
             scale_mode, e8m0_mode = "1", "0"
         env["NVTE_FP8_BLOCK_SCALING_FP32_SCALES"] = os.environ.get("NVTE_FP8_BLOCK_SCALING_FP32_SCALES", scale_mode)
         env["VLLM_USE_DEEP_GEMM_E8M0"] = os.environ.get("VLLM_USE_DEEP_GEMM_E8M0", e8m0_mode)
+        # The first blockwise-FP8 row per model starts slowly: ~530 s of vLLM engine init for
+        # qwen3.5-0.8b on H100, which with server start-up reaches the 600 s health-wait default.
+        # Later FP8 rows for the same model start in ~100 s. A ceiling, not a duration.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
+        )
     if fp8_mode and fp8_mode.startswith("mxfp8"):
         # flashinfer's MXFP8 GEMM autotune on a cold cache can exceed the
         # 600 s health-wait default; production stages the same ceiling. This
@@ -241,6 +267,12 @@ def _extra_env_vars_for_model(model_name: str, fp8_mode: str | None = None) -> d
         # kernels during CUDA-graph capture, then runs the JIT kernel warmup and the FlashInfer
         # MoE autotune: ~490 s to healthy on B200, and a cold H100 CI runner exceeded the 600 s
         # default. Warm caches boot in ~2 min.
+        env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
+            "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
+        )
+    if "glm-4.7-flash" in model_name.lower():
+        # A cold node builds the Ray worker env and JIT-builds flashinfer's trtllm_mnnvl_comm
+        # during CUDA-graph capture, past the 600 s health-wait default. A ceiling, not a duration.
         env["SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S"] = os.environ.get(
             "SKYRL_WAIT_UNTIL_INFERENCE_SERVER_HEALTHY_TIMEOUT_S", "1800"
         )
@@ -308,6 +340,12 @@ def _engine_overrides_for_model(model_name: str, fp8_mode: str | None = None) ->
         # 1M default context; the slice is ~18B bf16 params, colocated with the Megatron shard.
         overrides["engine_init_kwargs"]["max_model_len"] = 4096
         overrides["gpu_memory_utilization"] = 0.5
+    if _is_beam(model_name):
+        # The 24 GB L4 CI shape: the tiny checkpoint's 1M-token max_position_embeddings is capped
+        # at 4096 and the KV pool is kept small next to the colocated Megatron shard.
+        overrides["engine_init_kwargs"]["max_model_len"] = 4096
+        overrides["max_num_seqs"] = 128
+        overrides["gpu_memory_utilization"] = 0.6
     if "kimi-k2.5" in model_name.lower():
         # Same story: a 262k default context, and 384 routed experts sitting next
         # to the colocated Megatron shard.
@@ -417,6 +455,29 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             id="qwen3-moe_pp2_cp2",
         ),
+        # Tiny random Beam (4 layers: sliding-window RoPE x3 + NoPE/SSMax full attention, dense +
+        # 3 grouped-sigmoid MoE layers with an fp32 router, gated attention with per-head gate bias,
+        # sandwich norms, final logit softcap). Megatron side is Megatron-Bridge's BeamBridge
+        # (HybridModel), vLLM side is vLLM's BeamForCausalLM; both on the 4 x L4 CI mesh.
+        pytest.param(2, 1, 1, 2, 1, 2, 4, BEAM_TINY, 1e-1, 2e-1, None, None, id="beam-tiny_tp2_ep2"),
+        pytest.param(
+            2,
+            1,
+            1,
+            2,
+            1,
+            2,
+            4,
+            BEAM_TINY_FUSED_LM_HEAD,
+            1e-1,
+            2e-1,
+            None,
+            None,
+            id="beam-tiny_tp2_ep2_fused_lm_head",
+        ),
+        # PP splits at Beam-layer (attention + MLP) boundaries; CP with sliding-window attention
+        # runs cp_comm_type="a2a" (default_cp_comm_type_for_sliding_window).
+        pytest.param(1, 2, 2, 1, None, 2, 4, BEAM_TINY, 1e-1, 2e-1, None, None, id="beam-tiny_pp2_cp2"),
         # GLM-4.7-Flash (~31B MoE, MLA) on 4xH100-80G. Mesh: TP=4 EP=4 ETP=1
         # -> DP=1, vLLM TP=4 colocated on the same GPUs, same layout as the
         # other large-MoE entries below.
@@ -534,6 +595,44 @@ async def construct_training_input_from_generator_output(generator_output, token
             None,
             2048,
             id="glm-5.3-flash-4layer_h100_tp2_ep4_kpool_beyond_topk",
+            marks=pytest.mark.h100,
+        ),
+        # The two rows above under context parallelism (TP2 x CP2, same 4 GPUs): head-wise
+        # (Ulysses) CP in the KDA layers (mcore_ext/kda.py), megatron-core's allgather CP in the DSA
+        # layers. The beyond-topk row is the one that checks the DSA side: past the budget, pool
+        # selection depends on the k-pool gate score, which megatron-core all-gathers and reorders
+        # with the indexer keys under CP; a rank-local gate score would select the wrong pools.
+        # Same thresholds as the CP=1 rows.
+        pytest.param(
+            2,
+            1,
+            2,
+            4,
+            1,
+            4,
+            4,
+            "eatang/GLM-5.3-Flash-4layer",
+            3e-1,
+            1e-1,
+            None,
+            None,
+            id="glm-5.3-flash-4layer_h100_tp2_cp2_ep4",
+            marks=pytest.mark.h100,
+        ),
+        pytest.param(
+            2,
+            1,
+            2,
+            4,
+            1,
+            4,
+            4,
+            "eatang/GLM-5.3-Flash-4layer",
+            5e-1,
+            1e-1,
+            None,
+            2048,
+            id="glm-5.3-flash-4layer_h100_tp2_cp2_ep4_kpool_beyond_topk",
             marks=pytest.mark.h100,
         ),
         # Kimi K3, 4-layer bf16 slice of the real checkpoint (KIMI_K3_4LAYER): KDA (dense MLP),
@@ -884,7 +983,10 @@ async def test_logprobs_matching_roundtrip(
         or "kimi-k2.5" in model_name.lower()
         or "kimi-k3" in model_name.lower()
         or "qwen3.8-flash-next" in model_name.lower()
+        or _is_beam(model_name)
     )
+    if _is_beam(model_name):
+        create_beam_tiny(model_name)
     with ray_init(extra_env_vars=_extra_env_vars_for_model(model_name, fp8_mode)):
         cfg = get_test_actor_config(model_name=model_name)
         # With merge_lora=False the policy is served under the adapter name, which

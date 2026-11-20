@@ -4,44 +4,62 @@ title: Using SkyRL as a Library
 
 To use SkyRL as a dependency in your project, configure your `pyproject.toml` with `uv`. You can install from either PyPI (stable releases) or Git (latest development version).
 
-Some additional dependencies that depend on custom indexes/wheels, such as flash-attn and flashinfer-jit-cache. Below is an example configuration using uv:
+SkyRL's own `pyproject.toml` takes some packages from custom indexes (`[tool.uv.sources]`) and settles a few version conflicts with `override-dependencies`. uv never applies a dependency's `override-dependencies` to your project, and applies its sources only for a Git install. Your `pyproject.toml` has to declare whatever uv doesn't carry over.
+
+## Packages from custom indexes
+
+SkyRL builds against CUDA 13 and torch 2.14. It takes these packages from outside PyPI:
+
+| Packages | Source |
+|---|---|
+| `torch`, `torchvision` | PyTorch's `cu130` index |
+| `flashinfer-jit-cache` (and its per-arch packages, see below) | flashinfer's `cu130` index |
+| `flashinfer-cubin` | flashinfer's CUDA-agnostic index |
+| `causal-conv1d`, `mamba-ssm`, `transformer-engine`, `transformer-engine-cu13`, `transformer-engine-torch` | Astral's `cu130` index |
+| `flash-attn`, `flash-attn-4`, `flash-mla`, `fast-hadamard-transform` | SkyRL's prebuilt wheels on GitHub releases |
+
+**flashinfer's per-arch packages.** `flashinfer-jit-cache` is a metadata-only package. It depends on one `flashinfer-jit-cache-sm*` package per GPU architecture, and those are published only on flashinfer's `cu130` index.
+
+`[tool.uv.index]`, `[tool.uv.sources]` and `override-dependencies` in SkyRL's
+[`pyproject.toml`](https://github.com/NovaSky-AI/SkyRL/blob/main/pyproject.toml) have the exact indexes, versions and
+markers. When you upgrade SkyRL, take them from the `pyproject.toml` of the version you install.
+
+## Option A: PyPI
+
+A published wheel carries no uv sources, so declare the custom-index packages from the table above yourself. Copy
+each one's `[tool.uv.index]` and `[tool.uv.sources]` entries from SkyRL's `pyproject.toml`.
+
+uv applies `[tool.uv.sources]` only to packages your project lists directly. A source entry for a package that arrives
+as a transitive dependency is ignored, and with an `explicit = true` index the package then fails to resolve. So each
+package you give a source must also appear in your `dependencies`, including every `flashinfer-jit-cache-sm*` package.
+
+## Option B: Git
+
+uv applies SkyRL's own sources to a Git dependency, so the packages above resolve without extra configuration. You still need SkyRL's overrides for packages such as `flash-attn` ,where we use a custom wheel with both FA2 and FA2 bundled. The modification needed for your TOML file is shown below:
 
 ```toml
 [project]
-dependencies = [
-    # Option A: Install from PyPI (stable release)
-    "skyrl[fsdp]",
-    # Option B: Install from Git (latest)
-    # "skyrl[fsdp]",
-
-    "flashinfer-jit-cache==0.6.13",
-    "flash-attn==2.8.3+cu.13.0.torch.2.11"
-]
+dependencies = ["skyrl[fsdp]"]
 
 [tool.uv.sources]
-flashinfer-jit-cache = { index = "flashinfer-cu130" }
-flash-attn = { index = "astral-cu130" }
-# Only needed for Option B (Git install):
-# skyrl-gym = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-gym" }
-# skyrl = { git = "https://github.com/NovaSky-AI/SkyRL" }
+skyrl = { git = "https://github.com/NovaSky-AI/SkyRL" }
+skyrl-gym = { git = "https://github.com/NovaSky-AI/SkyRL", subdirectory = "skyrl-gym" }
+flashinfer-jit-cache-sm110a = { index = "flashinfer-cu130" }
+flashinfer-jit-cache-sm121a = { index = "flashinfer-cu130" }
+
+[tool.uv]
+override-dependencies = [
+    # FA4 needs apache-tvm-ffi 0.1.12; vLLM 0.33 pins 0.1.11.
+    "tilelang==0.1.13",
+    "apache-tvm-ffi==0.1.12",
+    "nvidia-cutlass-dsl[cu13]==4.8.0",
+    "quack-kernels[cu13]==0.6.5",
+    "flashinfer-jit-cache-sm110a==0.7.2.post1; platform_machine == 'aarch64'",
+    "flashinfer-jit-cache-sm121a==0.7.2.post1; platform_machine == 'aarch64'",
+]
 
 [[tool.uv.index]]
 name = "flashinfer-cu130"
 url = "https://flashinfer.ai/whl/cu130"
 explicit = true
-
-[[tool.uv.index]]
-name = "astral-cu130"
-url = "https://wheels.astral.sh/simple/cu130/"
-explicit = true
 ```
-
-**Option A (PyPI)**: Use `skyrl[fsdp]`. No additional sources needed.
-
-**Option B (Git)**: Uncomment the `skyrl-gym` and `skyrl` sources to install from the latest commit.
-
-SkyRL is built against CUDA 13 and torch 2.11, so both indexes above are the cu130
-variants. `flash-attn` comes from Astral's prebuilt GPU wheel index, which stamps
-each wheel with the (CUDA, torch) pair it was built against as a PEP 440 local
-version — the pin has to name that build exactly. Keep it at `2.8.3`, not
-`2.8.3.post1`: Transformer Engine only accepts flash-attn up to `2.8.3`.

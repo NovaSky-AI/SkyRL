@@ -1,0 +1,63 @@
+---
+title: "GLM-5.3 / GLM-5.3-Flash"
+---
+
+Supported on `main` with the Megatron backend.
+
+| Model | Full FT | LoRA | Low precision | Min. hardware |
+|---|---|---|---|---|
+| GLM-5.3 (753B) | ✅ | ✅ | MXFP8 training, FP8 rollouts | 4x8 B300 (LoRA), 8x8 B200 (full FT) |
+| GLM-5.3-Flash (313B-A17B) | ✅ | ✅ | | 1x8 B300 (LoRA), 8x8 B200 (full FT) |
+
+Before running, prepare the data (`bash examples/train/algorithms/dapo/prepare_dapo_data.sh`) and start a Ray cluster. Every node needs the same checkout, model and data at the same paths.
+All DAPO scripts use a 2k prompt / 8k response budget. R3 (rollout routing replay) is on by default in the GLM-5.3 LoRA and GLM-5.3-Flash full FT scripts. For the others, pass `ENABLE_ROUTING_REPLAY=true`.
+
+## GLM-5.3
+
+| Task | Mode | Hardware | Script |
+|---|---|---|---|
+| DAPO | LoRA | 4x8 B300 | [`run_dapo_glm5p3_lora.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/glm5_3/run_dapo_glm5p3_lora.sh) |
+| DAPO | Full FT, FP8 rollouts | 8x8 B200 | [`run_dapo_glm5p3_fullft_fp8_rollout_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/glm5_3/run_dapo_glm5p3_fullft_fp8_rollout_8node.sh) |
+| GSM8K | LoRA, FP8 rollouts | 8x8 B200 | [`run_gsm8k_glm5p3_lora_fp8_rollout_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/glm5_3/run_gsm8k_glm5p3_lora_fp8_rollout_8node.sh) |
+
+```bash
+# LoRA
+RUN_ROOT=/shared/glm53-dapo RAY_ADDRESS=auto bash examples/train/glm5_3/run_dapo_glm5p3_lora.sh
+
+# Full FT with MXFP8 training, FP8 rollouts and R3
+FULL_FP8=true ENABLE_ROUTING_REPLAY=true bash examples/train/glm5_3/run_dapo_glm5p3_fullft_fp8_rollout_8node.sh
+```
+
+**Results:** full FT with MXFP8 + R3 on 8x8 B200 took AIME-2024 from 55.8% to 84.4% correct in 20 steps (~60 min/step).
+The [README](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/glm5_3/README.md) has the bf16 runs and caveats.
+
+Notes:
+- On B200, vLLM serves GLM-5.3 in FP8 (~89 GiB/GPU at TP8). bf16 (~176 GiB/GPU) does not fit.
+- Set `mlp_chunks_for_training=1`. The Flash scripts' 64 deadlocks `glm_moe_dsa` under EP.
+- MXFP8 training is ~1.6x slower than bf16 at TP8/EP64.
+- Trained text-only (`language_model_only=true`).
+
+## GLM-5.3-Flash
+
+~313B params (97% routed experts), ~17B active. Its KDA linear attention, DSA with the k-pool indexer and mHC residuals live in
+`skyrl/backends/skyrl_train/patches/megatron/glm5_next/` until they land upstream.
+
+| Task | Mode | Hardware | Script |
+|---|---|---|---|
+| GSM8K | LoRA | 1x8 B300 | [`run_gsm8k_glm5p3_flash_lora_1node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/glm5_3_flash/run_gsm8k_glm5p3_flash_lora_1node.sh) |
+| DAPO | LoRA | 2x8 B300 | [`run_dapo_glm5p3_flash_lora_sync_2node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/glm5_3_flash/run_dapo_glm5p3_flash_lora_sync_2node.sh) |
+| DAPO | Full FT | 8x8 B200 | [`run_dapo_glm5p3_flash_fullft_sync_8node.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/glm5_3_flash/run_dapo_glm5p3_flash_fullft_sync_8node.sh) |
+
+**Results:** full FT with R3 on 8x8 B200 took held-out AIME-2024 avg_score from 0.072 to 0.711 in 30 steps, still rising (~15-21 min/step).
+The rollout/train logprob gap stayed at ~0.008.
+
+Notes:
+- Point `MODEL_PATH` at the BF16 weights. zai-org/GLM-5.3-Flash ships FP8 with blockwise scales, which the import silently drops.
+- TP is the only way to split the model: KDA has no context-parallel path and megatron-core rejects mHC with PP>1.
+  To keep batches divisible, the scripts use 12 samples per prompt instead of DAPO's usual 16.
+- Sequences past `dsa_indexer_topk=2048` are handled by megatron-core's k-pool indexer.
+- Use `merge_lora=false`: it syncs a 3.9 GiB adapter in 29s, vs ~112s for the merged weights.
+
+## GLM-4.7
+
+GLM-4.7-Flash/GLM-4.7 are also supported, see [`run_megatron_grpo_glm4_7_30b.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/megatron/run_megatron_grpo_glm4_7_30b.sh).

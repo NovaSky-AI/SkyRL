@@ -127,10 +127,12 @@ class _StopBeforeWorkers(Exception):
     pass
 
 
-def _build_critic_until_workers(monkeypatch, lora: types.LoraConfig):
+def _build_critic_until_workers(monkeypatch, lora: types.LoraConfig, overrides: FSDPBackendOverrides | None = None):
     """Run _build_critic up to the point where it would start Ray workers."""
+    overrides = overrides or FSDPBackendOverrides()
     backend = SkyRLTrainBackend.__new__(SkyRLTrainBackend)
-    backend._cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora())
+    backend.config = overrides  # _build_critic reads backend_config (model_extra) for the alpha
+    backend._cfg = _build_skyrl_train_config(BASE_MODEL, overrides, _lora())
     backend._colocate_pg = None
 
     def stop(*args, **kwargs):
@@ -151,8 +153,25 @@ def test_critic_receives_the_flags(monkeypatch):
 def test_critic_rejects_unappliable_flags_before_workers_start(monkeypatch):
     """An invalid critic request raises before any critic worker is created."""
     backend = SkyRLTrainBackend.__new__(SkyRLTrainBackend)
+    backend.config = FSDPBackendOverrides()
     backend._cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora())
     backend._cfg.trainer.critic.model.lora.target_modules = ["q_proj"]
+    monkeypatch.setattr(skyrl_train_backend, "PPORayActorGroup", lambda *a, **k: pytest.fail("workers started"))
+    with pytest.raises(ValueError, match="narrow"):
+        backend._build_critic(CriticWorker=None, lora_config=_lora(train_mlp=False))
+
+
+def test_critic_rejects_an_init_adapter_path_before_workers_start(monkeypatch):
+    """A narrowed critic with an adapter to initialize from raises before the workers start.
+
+    Bugbot's case: the critic's pre-worker check did not pass the critic's ``init_adapter_path``,
+    so a narrowed critic with ``trainer.critic.model.lora.init_adapter_path`` set was rejected
+    only after the critic's workers had started. The regression test pins the kwarg.
+    """
+    backend = SkyRLTrainBackend.__new__(SkyRLTrainBackend)
+    backend.config = FSDPBackendOverrides()
+    backend._cfg = _build_skyrl_train_config(BASE_MODEL, FSDPBackendOverrides(), _lora())
+    backend._cfg.trainer.critic.model.lora.init_adapter_path = "/some/adapter"
     monkeypatch.setattr(skyrl_train_backend, "PPORayActorGroup", lambda *a, **k: pytest.fail("workers started"))
     with pytest.raises(ValueError, match="narrow"):
         backend._build_critic(CriticWorker=None, lora_config=_lora(train_mlp=False))
@@ -173,6 +192,18 @@ def test_backend_config_alpha_still_overrides_the_api_placeholder():
     overrides = FSDPBackendOverrides(**{"trainer.policy.model.lora.alpha": 64})
     cfg = _build_skyrl_train_config(BASE_MODEL, overrides, _lora())
     assert cfg.trainer.policy.model.lora.alpha == 64
+
+
+@pytest.mark.parametrize(
+    ("backend_alpha", "request_alpha", "expected"),
+    [(64, 32.0, 64), (None, 16.0, 16)],
+    ids=["backend_config_wins", "requests_alpha_used"],
+)
+def test_backend_config_critic_alpha_wins_over_the_api_placeholder(monkeypatch, backend_alpha, request_alpha, expected):
+    """A backend_config critic alpha wins, as for the policy; without one, the request's is used."""
+    overrides = FSDPBackendOverrides(**({"trainer.critic.model.lora.alpha": backend_alpha} if backend_alpha else {}))
+    critic_lora = _build_critic_until_workers(monkeypatch, _lora(alpha=request_alpha), overrides)
+    assert critic_lora.alpha == expected
 
 
 def test_backend_config_rank_is_allowed_without_a_request():

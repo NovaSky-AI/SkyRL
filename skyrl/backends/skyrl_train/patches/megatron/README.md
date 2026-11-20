@@ -33,6 +33,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
 | `patches/megatron/test_clip_grads_mixed_dtype.py` (CPU) | `patch_clip_grads_mixed_dtype.py` dtype split and the `multi_tensor_applier` wrapper |
 | `gpu_ci/patches/megatron/glm5_next/test_dsa_kpool_tp_shard.py` | `glm5_next/dsa.py` TP query sharding (two ranks) |
+| `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py` | `mcore_ext/kda.py` head-wise context parallelism vs CP=1 (two ranks) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_modules.py` (CPU) | `qwen4_exp/modules.py` gated residual, final mixer, packed PLE vs HF; PLE row-sharded over EP and under sequence parallelism (gloo) |
 | `patches/megatron/qwen4_exp/test_qwen4_exp_qsa.py` (CPU) | `qwen4_exp/modules.py` QSA indexer selection and sparse attention (outputs + grads, packed) vs HF |
 | `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
@@ -72,6 +73,11 @@ model, `glm5_next/` is deleted too.
 ### NVIDIA/Megatron-LM#7054: KDA (Kimi Delta Attention)
 
 - **Carried as:** `mcore_ext/kda.py` (`KimiDeltaAttention`, `get_kda_module_spec`).
+  - SkyRL addition: head-wise (Ulysses) context parallelism, reusing megatron-core's
+    `GatedDeltaNet` all-to-all helpers (`ssm/gated_delta_net/common.py`). #7054 has its own
+    head-/chunk-wise CP (`cp_partition_mode`); compare against it before switching. The DSA
+    layers need no SkyRL change under CP: megatron-core's `DSAttention` all-gathers the indexer
+    keys and the k-pool gate score (`cp_comm_type=allgather`).
 - **Landed?** megatron-core defines a KDA module or `experimental_attention_variant="kda"`, and
   `TransformerConfig` has `kda_gate_lower_bound`
   (`grep -rn "KimiDeltaAttention\|kda_gate_lower_bound" .venv/.../megatron/core`).
@@ -81,7 +87,8 @@ model, `glm5_next/` is deleted too.
   - `glm5_next/bridge.py`: re-check the KDA parameter names (`q/k/v_conv1d`, `A_log`, `dt_bias`,
     `f_a/f_b/g_a/g_b_proj`) against upstream's module.
   - Delete `mcore_ext/kda.py`.
-- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_kda_matches_hf`; the GLM roundtrip rows.
+- **Verify:** `gpu_ci/patches/megatron/mcore_ext/test_modules_vs_hf.py::test_kda_matches_hf`,
+  `gpu_ci/patches/megatron/mcore_ext/test_kda_context_parallel.py`; the GLM roundtrip rows.
 
 ### NVIDIA/Megatron-LM#7521: mHC (manifold-constrained hyper-connections)
 
@@ -106,6 +113,11 @@ Two pieces, which may land separately.
     so it chunks the MLP/MoE itself (`chunked_mlp`), in eval forwards as well as training. On real
     data, routing sends some expert ranks several times their share of tokens; chunking bounds their
     dispatch/expert/combine buffers.
+  - `chunked_mlp` keeps in sync with NVIDIA/Megatron-LM#8463 (equal MoE call counts, router
+    replay per chunk, quantile balancing rejected for padded chunks, replay row-count check).
+    Under selective `"moe"` recompute with router replay, it checkpoints each chunk itself so the
+    rerun replays the chunk's slice. Once the pin includes #8463, pass the slice as
+    `MoELayer.forward(replay_topk_idx=...)` instead and drop that checkpoint (`_checkpoint`).
   - Its `forward` calls the private `TransformerLayer._maybe_unflatten_for_moe` /
     `_maybe_reflatten_from_moe` helpers; on every megatron-core bump, check their signatures against
     `TransformerLayer._forward_mlp`.
@@ -173,7 +185,7 @@ Not carried. GLM-5.3-Flash runs bf16 end to end.
 - **Remove:**
   - `workers/megatron/model_bridges.py`: drop the `glm5_next` import that registers the bridge.
   - Tests that import from `glm5_next`: repoint them at Megatron-Bridge.
-  - `.agents/docs/backends/megatron.md` and `docs/content/docs/.../supported_models.mdx`: update
+  - `.agents/docs/backends/megatron.md` and `docs/content/docs/models/` (support matrix in `index.mdx` + the family page): update
     the model entry.
   - The `kimi_*` fields in `glm5_next/provider.py` and their assignments in `glm5_next/bridge.py`:
     check that the upstream provider sets the fields megatron-bridge's FLOPs formula
@@ -237,6 +249,31 @@ switch to it and delete `qwen4_exp/` as a whole; don't port pieces between imple
   `gpu_ci/megatron/test_megatron_{,lora_}models.py`, `gpu_ci/megatron/test_qwen38_qsa_long_context.py`
   (~8K tokens, sparse regime) and the `megatron_qwen3_8_flash_next_lora` row of
   `gpu_ci/test_trainer_full_checkpointing.py`; then a few steps of the DAPO recipe.
+
+## Beam (`beam`)
+
+Beam (`BeamForCausalLM`) comes from the pinned Megatron-Bridge (`megatron.bridge.models.beam`,
+`BeamBridge` -> `HybridModel`, registered when `megatron.bridge` is imported). Its fp32 router
+runs through the bridge's own `_BeamRouterGatingLinear`, so no megatron-core router-GEMM patch is
+needed. SkyRL still carries:
+
+- `../transformers/configuration_beam.py` (`BeamConfig` + `register_beam_config()`, called from
+  `skyrl/backends/skyrl_train/__init__.py`): transformers ships `BeamConfig` from 5.22, past the
+  `transformers<=5.16.1` pin. It keeps `rope_parameters` keyed by layer type, which `BeamBridge`
+  requires (vLLM's own `BeamConfig` flattens it). **Remove** once transformers >= 5.22 is pinned.
+- `default_cp_comm_type_for_sliding_window` in `workers/megatron/megatron_worker.py` (Beam only):
+  defaults `cp_comm_type="a2a"` under context parallelism, or `"all_gather"` when the per-TP-rank
+  head counts do not divide by CP, since TE has no `p2p` CP path for sliding-window attention.
+  **Remove** once the Bridge's Beam config sets it.
+- Not a patch, and not Beam-only: the fused LM-head log-prob path applies the provider's
+  `final_logit_softcapping` (`model_utils._capped_chunk_logits`) for any model that sets it,
+  because it bypasses the model's output layer (`BeamOutputLayer`, Megatron-Bridge's
+  `Gemma4OutputLayer`). Such models use the torch fused backend; the Triton one has no softcap.
+- On the vLLM side, `../vllm/patch_beam_lora.py` serves Beam with LoRA (vLLM 0.33's class has no `SupportsLoRA`);
+  its docstring has the removal plan.
+- **Verify:** the `beam-tiny_*` rows of `gpu_ci/megatron/test_megatron_{,lora_}models.py`,
+  `tests/backends/skyrl_train/patches/transformers/` and
+  `tests/backends/skyrl_train/distributed/test_fused_lm_head_softcap.py` (CPU).
 
 ## Standalone patches
 

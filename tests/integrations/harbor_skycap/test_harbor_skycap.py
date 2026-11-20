@@ -3,7 +3,6 @@ server in token mode, which calls a mock SkyRL router."""
 
 import asyncio
 import re
-from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -21,15 +20,6 @@ from aiohttp.test_utils import TestServer  # noqa: E402
 from examples.train_integrations.harbor.entrypoints.main_harbor import (
     HARBOR_DEFAULT_CONFIG,  # noqa: E402
 )
-from examples.train_integrations.harbor_skycap import harbor_generator  # noqa: E402
-from examples.train_integrations.harbor_skycap.compose import (  # noqa: E402
-    TrialOutcome,
-    compose,
-)
-from examples.train_integrations.harbor_skycap.engine import SkyRLEngine  # noqa: E402
-from examples.train_integrations.harbor_skycap.harbor_generator import (
-    HarborSkycapGenerator,  # noqa: E402
-)
 from skycap import CaptureService, Sample, record  # noqa: E402
 from skycap.graph import MessageGraph  # noqa: E402
 from skycap.paths import Row, final_path  # noqa: E402
@@ -38,6 +28,15 @@ from skycap.tokens.renderer import Media  # noqa: E402
 from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
     pack_sample_support_logprobs,  # noqa: E402
+)
+from skyrl.integration.harbor_skycap import harbor_generator  # noqa: E402
+from skyrl.integration.harbor_skycap.compose import (  # noqa: E402
+    TrialOutcome,
+    compose,
+)
+from skyrl.integration.harbor_skycap.engine import SkyRLEngine  # noqa: E402
+from skyrl.integration.harbor_skycap.harbor_generator import (
+    HarborSkycapGenerator,  # noqa: E402
 )
 from skyrl.train.generators.base import TrajectoryID  # noqa: E402
 from skyrl.train.generators.utils import concatenate_generator_outputs  # noqa: E402
@@ -168,7 +167,7 @@ async def generator(skycap):
     """Makes generators against the test's skycap, and closes each one's pool when the test ends."""
     made = []
 
-    def make(train_paths: str = "all", **cfg) -> HarborSkycapGenerator:
+    def make(train_paths: str = "all", check_first_batch: bool = True, **cfg) -> HarborSkycapGenerator:
         made.append(
             HarborSkycapGenerator(
                 generator_cfg(**cfg),
@@ -176,6 +175,7 @@ async def generator(skycap):
                 [skycap.url],
                 SimpleNamespace(weight_version=7),
                 train_paths=train_paths,
+                check_first_batch=check_first_batch,
             )
         )
         return made[-1]
@@ -346,7 +346,7 @@ async def test_a_custom_rule_by_import_path_picks_the_rows_and_is_recorded(skyca
 
 @pytest.mark.asyncio
 async def test_a_failing_path_rule_masks_the_trial_without_running_it_again(skycap, trials, generator) -> None:
-    out = await generator(train_paths=BROKEN).generate(batch("linear"), disable_tqdm=True)
+    out = await generator(train_paths=BROKEN, check_first_batch=False).generate(batch("linear"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     assert len(trials.configs) == 1
@@ -358,7 +358,7 @@ async def test_a_failing_path_rule_masks_the_trial_without_running_it_again(skyc
 
 @pytest.mark.asyncio
 async def test_a_crashing_trial_is_finished_with_the_configured_rule(skycap, trials, generator) -> None:
-    await generator(train_paths="final").generate(batch("crash"), disable_tqdm=True)
+    await generator(train_paths="final", check_first_batch=False).generate(batch("crash"), disable_tqdm=True)
 
     ids = list(record.list_ids(skycap.server.record_dir))
     assert len(ids) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
@@ -430,7 +430,7 @@ async def test_an_agent_that_exits_on_skycaps_context_length_error_is_a_context_
 
 @pytest.mark.asyncio
 async def test_a_crashing_trial_is_retried_on_a_fresh_trajectory_then_masked(skycap, trials, generator) -> None:
-    out = await generator().generate(batch("crash"), disable_tqdm=True)
+    out = await generator(check_first_batch=False).generate(batch("crash"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     urls = [config["agent"]["kwargs"]["api_base"] for config in trials.configs]
@@ -480,6 +480,30 @@ async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_reward
     assert metrics["generate/harbor/environment_setup_time_mean"] == pytest.approx(SETUP)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "batches, check, stops",
+    [
+        ([("silent",)], True, True),
+        ([("silent",)], False, False),
+        ([("silent", "linear")], True, False),
+        ([("linear",), ("silent",)], True, False),
+    ],
+    ids=["nothing trains", "check off", "one trajectory trains", "a later batch"],
+)
+async def test_a_first_batch_with_nothing_to_train_stops_the_run(skycap, trials, generator, batches, check, stops):
+    gen = generator(check_first_batch=check)
+    *earlier, last = batches
+    for scripts in earlier:
+        await gen.generate(batch(*scripts), disable_tqdm=True)
+    if stops:
+        with pytest.raises(RuntimeError, match=r"first batch \(1\).*~/trials.*skycap\.check_first_batch=false"):
+            await gen.generate(batch(*last), disable_tqdm=True)
+    else:
+        out = await gen.generate(batch(*last), disable_tqdm=True)
+        assert len(out["trajectory_ids"]) == len(last)
+
+
 def test_a_batch_with_nothing_to_train_still_carries_padded_support() -> None:
     outcome = TrialOutcome(trajectory_id=TrajectoryID("a", 0), stop_reason="error")
 
@@ -525,7 +549,7 @@ async def test_with_r3_a_masked_instance_gets_distinct_dummy_routes(generator, t
 @pytest.mark.asyncio
 async def test_with_r3_a_trial_without_routes_is_retried_then_masked(generator, router, trials) -> None:
     router.routes = False
-    out = await generator(inference_engine=R3).generate(batch("linear"), disable_tqdm=True)
+    out = await generator(inference_engine=R3, check_first_batch=False).generate(batch("linear"), disable_tqdm=True)
 
     assert out["loss_masks"] == [[0]] and out["stop_reasons"] == ["error"]
     assert len(trials.configs) == harbor_generator.MAX_NUM_RETRIES_PER_TRIAL
@@ -715,22 +739,6 @@ async def test_thinking_survives_litellm_so_the_replayed_history_stays_one_path(
         await asyncio.to_thread(service.stop)
 
 
-def test_remote_sandboxes_are_refused_without_a_concurrency_cap() -> None:
-    daytona = {"environment": {"type": "daytona"}}
-    labelled = {
-        "environment": {"import_path": "examples.train_integrations.harbor_skycap.daytona:LabelledDaytonaEnvironment"}
-    }
-    for template in (daytona, labelled):
-        for rate_limit in (None, RateLimiterConfig(), RateLimiterConfig(enabled=True, trajectories_per_second=5)):
-            with pytest.raises(ValueError, match="max_concurrency"):
-                HarborSkycapGenerator(generator_cfg(rate_limit=rate_limit), deepcopy(template), ["http://x"])
-        HarborSkycapGenerator(
-            generator_cfg(rate_limit={"enabled": True, "max_concurrency": 8}), deepcopy(template), ["http://x"]
-        )
-    # Docker runs on this machine: no provider quota to protect.
-    HarborSkycapGenerator(generator_cfg(rate_limit=None), {"environment": {"type": "docker"}}, ["http://x"])
-
-
 def _image(offset: int, patches: int, grid: list) -> Media:
     data = {"pixel_values": np.full((patches, 4), offset, np.float32), "image_grid_thw": np.array([grid])}
     return Media(modality="image", offset=offset, length=patches // 4, hash=f"h{offset}", data=data)
@@ -778,26 +786,3 @@ def test_images_fail_the_step_unless_the_trainer_can_take_them() -> None:
         compose([outcome(gemma)], overlong_filtering=False, include_images=True)
     with pytest.raises(ValueError, match="no processor output"):
         compose([outcome(replace(image, data=None))], overlong_filtering=False, include_images=True)
-
-
-def test_the_labelled_environment_tags_every_sandbox_and_bounds_its_life(monkeypatch) -> None:
-    from daytona import CreateSandboxFromImageParams
-
-    from examples.train_integrations.harbor_skycap import daytona
-
-    created = []
-
-    async def create(self, params, daytona=None):
-        created.append(params)
-
-    monkeypatch.setattr(daytona.DaytonaEnvironment, "_create_sandbox", create)
-    environment = object.__new__(daytona.LabelledDaytonaEnvironment)
-    environment._labels, environment._ttl_minutes = {"owner": "me", "run": "r1"}, 90
-
-    asyncio.run(environment._create_sandbox(CreateSandboxFromImageParams(image="x", labels={"kept": "1"})))
-
-    (params,) = created
-    assert params.labels == {"kept": "1", "owner": "me", "run": "r1"} and params.ttl_minutes == 90
-    with pytest.raises(ValueError, match="needs labels"):
-        daytona.LabelledDaytonaEnvironment(labels={})
-    assert daytona.command_is_unscoped({"owner": "me"}) and not daytona.command_is_unscoped({"owner": "me", "run": "r"})

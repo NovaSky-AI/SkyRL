@@ -100,6 +100,7 @@ uv run --isolated --extra megatron ${QSA_CUDNN_WHEEL:+--with "$QSA_CUDNN_WHEEL"}
   trainer.algorithm.eps_clip_high=$CLIP_RATIO_HIGH \
   trainer.algorithm.clip_ratio_c=$CLIP_RATIO_C \
   trainer.algorithm.loss_reduction=$LOSS_REDUCTION \
+  trainer.algorithm.grpo_norm_by_std=true \
   trainer.algorithm.use_kl_loss=false \
   trainer.algorithm.overlong_buffer_len=$OVERLONG_BUFFER_LEN \
   trainer.algorithm.overlong_buffer_penalty_factor=$OVERLONG_BUFFER_PENALTY_FACTOR \

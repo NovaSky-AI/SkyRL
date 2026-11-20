@@ -100,6 +100,7 @@ ${UV_RUN:-uv run --isolated} --extra megatron -m examples.train_scripts.full_con
   trainer.algorithm.eps_clip_high=0.28 \
   trainer.algorithm.clip_ratio_c=10.0 \
   trainer.algorithm.loss_reduction="token_mean" \
+  trainer.algorithm.grpo_norm_by_std=true \
   trainer.algorithm.use_kl_loss=false \
   trainer.policy.model.path="$MODEL_PATH" \
   trainer.placement.colocate_all=$COLOCATE_ALL \

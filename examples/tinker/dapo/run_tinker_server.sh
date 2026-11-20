@@ -55,8 +55,6 @@ fi
 # DAPO loss settings (client sends eps_clip_low/high per request)
 CLIP_RATIO_C="${CLIP_RATIO_C:-10.0}"
 LOSS_REDUCTION="${LOSS_REDUCTION:-token_mean_legacy}"
-WEIGHT_DECAY="${WEIGHT_DECAY:-0.1}"
-MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
 
 # Off-policy correction: geometric sequence masking (see docs/content/docs/algorithms/off_policy_correction.mdx)
 GEO_MASK_LOW="${GEO_MASK_LOW:-0.99}"
@@ -101,8 +99,6 @@ DEFAULT_BACKEND_CONFIG=$(cat <<JSON
   "trainer.algorithm.off_policy_correction.sequence_mask_metric": "geometric",
   "trainer.algorithm.off_policy_correction.geo_mask_low": $GEO_MASK_LOW,
   "trainer.algorithm.off_policy_correction.geo_mask_high": $GEO_MASK_HIGH,
-  "trainer.policy.optimizer_config.weight_decay": $WEIGHT_DECAY,
-  "trainer.policy.optimizer_config.max_grad_norm": $MAX_GRAD_NORM,
   "generator.inference_engine.num_engines": $NUM_INFERENCE_ENGINES,
   "generator.inference_engine.tensor_parallel_size": $INFERENCE_ENGINE_TENSOR_PARALLEL_SIZE,
   "generator.inference_engine.backend": "vllm",

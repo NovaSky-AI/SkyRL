@@ -103,6 +103,12 @@ def test_datum_to_types_preserves_values_and_returns():
     assert datum.loss_fn_inputs.returns.data == [0.4, 0.5, 0.6]
 
 
+def test_adam_params_carry_grad_clip_norm():
+    """The SDK sends grad_clip_norm (0.0 disables clipping); the backend compares it with max_grad_norm."""
+    assert api.AdamParams().to_types().grad_clip_norm == 0.0
+    assert api.AdamParams(grad_clip_norm=1.0).to_types().grad_clip_norm == 1.0
+
+
 @pytest.mark.parametrize("optimizer", [False, True])
 def test_load_weights_request_preserves_optimizer_choice(optimizer):
     request = api.LoadWeightsRequest(

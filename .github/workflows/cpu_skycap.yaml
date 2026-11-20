@@ -24,7 +24,7 @@ concurrency:
 jobs:
   test:
     # CI runs only in the upstream repo, as for the rest of the repository.
-    if: github.repository == 'NovaSky-AI/SkyRL'
+    if: github.repository == 'skyrl-project/SkyRL'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +45,7 @@ jobs:
 
   tokens:
     # The real `renderers` library on a real tokenizer, downloaded from the Hub.
-    if: github.repository == 'NovaSky-AI/SkyRL'
+    if: github.repository == 'skyrl-project/SkyRL'
     runs-on: ubuntu-latest
     defaults:
       run:

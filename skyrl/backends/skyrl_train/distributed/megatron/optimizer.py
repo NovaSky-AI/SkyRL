@@ -39,6 +39,9 @@ from skyrl.train.config.config import MegatronOptimizerOffloadToDiskConfig
 def init_megatron_optim_config(
     optim_config: Union[SkyRLOptimizerConfig, DictConfig], optimizer_config_kwargs: dict
 ) -> OptimizerConfig:
+    # The Tinker server rewrites lr/betas/eps/weight_decay and the per-step clip before every
+    # step (set_optimizer_hparams in the workers), so whatever this bakes in is only what runs
+    # until the first AdamParams-bearing optim_step arrives.
     adam_betas = getattr(optim_config, "adam_betas", (0.9, 0.999))
     optim_args = {
         "optimizer": getattr(optim_config, "optimizer", "adam"),

@@ -554,7 +554,13 @@ class RayPPOTrainer:
                         )
                     self.all_metrics.update(self.policy_mfu_metrics(training_input))
                     # log epoch info
-                    self.all_metrics.update({"trainer/epoch": epoch, "trainer/global_step": self.global_step})
+                    self.all_metrics.update(
+                        {
+                            "trainer/epoch": epoch,
+                            "trainer/global_step": self.global_step,
+                            "trainer/total_training_steps": self.total_training_steps,
+                        }
+                    )
                     interval_eval = self.cfg.trainer.eval_interval > 0 and (
                         self.global_step % self.cfg.trainer.eval_interval == 0
                         or self.global_step == self.total_training_steps

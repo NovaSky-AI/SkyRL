@@ -27,29 +27,25 @@ _CACHE_SALT_MAX_LEN = 128
 _CACHE_SALT_DIGEST_LEN = 12
 
 
-def _cache_salt_model_name(model_name: str, max_len: int) -> str:
-    digest = hashlib.sha256(model_name.encode("utf-8")).hexdigest()[:_CACHE_SALT_DIGEST_LEN]
-    component = _CACHE_SALT_MODEL_RE.sub("-", model_name).strip("-") or "model"
-
-    if component != model_name or len(component) > max_len:
-        prefix_len = max_len - len(digest) - 1
-        prefix = component[:prefix_len].rstrip("-") if prefix_len > 0 else ""
-        return f"{prefix}-{digest}" if prefix else digest[:max_len]
-
-    return component
-
-
 def build_vllm_cache_salt(weight_version: int, model_name: Optional[str] = None) -> str:
     """Build a deterministic vLLM prefix-cache salt that satisfies vLLM 0.30 validation.
 
     vLLM rejects salts longer than 128 characters and salts containing '@', '/', '\\', or NUL.
+    A model name that had to be sanitized or shortened carries a digest of the original, so that
+    distinct names (``a/b`` and ``a-b``) never share a salt.
     """
     version_part = str(weight_version)
     if model_name is None:
         return version_part
 
-    model_part = _cache_salt_model_name(model_name, max_len=_CACHE_SALT_MAX_LEN - len(version_part) - 1)
-    return f"{model_part}:{version_part}"
+    max_len = _CACHE_SALT_MAX_LEN - len(version_part) - 1
+    component = _CACHE_SALT_MODEL_RE.sub("-", model_name).strip("-") or "model"
+    if component != model_name or len(component) > max_len:
+        digest = hashlib.sha256(model_name.encode("utf-8")).hexdigest()[:_CACHE_SALT_DIGEST_LEN]
+        prefix_len = max_len - len(digest) - 1
+        prefix = component[:prefix_len].rstrip("-") if prefix_len > 0 else ""
+        component = f"{prefix}-{digest}" if prefix else digest[:max_len]
+    return f"{component}:{version_part}"
 
 
 def _validate_template_file_path(file_path: str) -> str:

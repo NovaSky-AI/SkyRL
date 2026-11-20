@@ -720,7 +720,7 @@ class MegatronConfig(BaseConfig):
     ``false`` to use the per-expert path. Ignored without ``expert_nvfp4``."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
-    Used for bridge and RoPE resolution. Not a general HF-config override -- use
+    Used for bridge resolution. Not a general HF-config override -- use
     ``transformer_config_kwargs`` instead."""
     dist_ckpt_optim_fully_reshardable: bool = False
     """When True, use the "fully-reshardable" format for the distributed-optimizer checkpoint.
@@ -786,6 +786,19 @@ class MegatronConfig(BaseConfig):
         # doesn't have to repeat every default just to set one value.
         if self.transformer_config_kwargs is None:
             self.transformer_config_kwargs = {}
+        # Megatron-Bridge builds the model from the checkpoint's own config, so these model_config overrides would
+        # never reach it (q_lora_rank used to, through a provider fixup that no longer exists). Checked here, where
+        # every entrypoint builds this config (SFT and Tinker never call validate_cfg), rather than in
+        # validate_megatron_cfg.
+        model_config_overrides = (self.model_config_kwargs or {}).get("model_config") or {}
+        unapplied = sorted(
+            {"rope_parameters", "rope_scaling", "rope_theta", "q_lora_rank"} & set(model_config_overrides)
+        )
+        if unapplied:
+            raise ValueError(
+                f"megatron_config.model_config_kwargs.model_config sets {unapplied}, which the Megatron backend does "
+                "not apply: Megatron-Bridge builds the model from the checkpoint's own config. Remove the override."
+            )
         # The top-level FP8 fields fold into the TransformerConfig kwargs; explicitly
         # configured kwargs take precedence.
         for key, value in (
@@ -847,6 +860,23 @@ class MegatronConfig(BaseConfig):
         if self.empty_cuda_cache is not None:
             return self.empty_cuda_cache
         return not expandable_segments
+
+    def check_expert_grid(self, world_size: int, prefix: str) -> None:
+        """Raise unless Megatron's expert grid (pp * ep * etp) divides ``world_size``, as Megatron requires at
+        startup even for a dense model. ``prefix`` is where this config sits, for the error message."""
+        pp, ep = self.pipeline_model_parallel_size, self.expert_model_parallel_size
+        # Megatron's own fallback: an unset expert_tensor_parallel_size is the tensor parallel size.
+        etp = (
+            self.tensor_model_parallel_size
+            if self.expert_tensor_parallel_size is None
+            else self.expert_tensor_parallel_size
+        )
+        if world_size % (pp * ep * etp):
+            raise ValueError(
+                f"world_size {world_size} should be divisible by Megatron's expert grid (pp * ep * etp) {pp * ep * etp}. "
+                f"{prefix}.expert_model_parallel_size and expert_tensor_parallel_size lay it out, and Megatron builds "
+                "it even for a dense model, where expert_model_parallel_size=1 works."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1130,8 +1160,9 @@ class AlgorithmConfig(BaseConfig):
     """Normalize advantages by the (global) training-batch mean and standard deviation."""
     value_head_prefix: str = "value_head"
     """Name used to identify the value head in the critic model."""
-    policy_loss_type: str = "regular"
-    """Type of policy loss to use, or custom via ``PolicyLossRegistry``:
+    policy_loss_type: str = "dppo"
+    """Policy loss, defaulting to ``"dppo"``; register a custom one via ``PolicyLossRegistry``.
+    Available losses:
 
     - ``"regular"``: vanilla PPO loss with token-level importance sampling.
     - ``"dual_clip"``: dual-clip PPO loss (https://arxiv.org/pdf/1912.09729).
@@ -1155,8 +1186,9 @@ class AlgorithmConfig(BaseConfig):
     - ``"reinforce"``: plain policy gradient ``-A log π`` with no importance ratio, the objective
       score centering builds on (https://arxiv.org/abs/2609.20807).
     """
-    loss_reduction: str = "token_mean"
-    """Type of loss reduction to use, applied per mini-batch by rescaling advantages:
+    loss_reduction: str = "prompt_mean"
+    """Loss reduction defaults to ``"prompt_mean"`` and rescales advantages per mini-batch.
+    Available modes:
 
     - ``"token_mean"``: average loss over all valid tokens in the batch, as in DAPO
       (https://dapo-sia.github.io/).
@@ -1171,9 +1203,10 @@ class AlgorithmConfig(BaseConfig):
       tokens its responses contain.
     - ``"token_mean_legacy"``: also accepted, retaining the previous ``"token_mean"`` behavior.
     """
-    grpo_norm_by_std: bool = True
-    """Normalize advantages by the standard deviation in GRPO.
-    Set to False for Dr. GRPO (https://arxiv.org/abs/2503.20783)."""
+    grpo_norm_by_std: bool = False
+    """Normalize advantages by the per-prompt reward standard deviation in GRPO.
+    ``False`` (the default) follows Dr. GRPO (https://arxiv.org/abs/2503.20783); set ``True`` for
+    the original GRPO normalization."""
     zero_variance_filter: bool = False
     """Loss-mask prompts with zero-variance rewards. Only applicable when rewards are response-level."""
     zero_variance_filter_tol: float = 1e-6
@@ -1201,7 +1234,7 @@ class AlgorithmConfig(BaseConfig):
     enable_sample_support_replay: bool = False
     """Renormalize policy logprobs over the sampler's recorded bounded support. Requires
     ``generator.inference_engine.enable_return_sample_support_set`` to capture it."""
-    enable_score_centering: bool = False
+    enable_score_centering: Optional[bool] = None
     """Score centering (https://arxiv.org/abs/2609.20807): subtract each token's expected weighted
     score under the sampler, cancelling the drift a training-inference mismatch adds to the policy
     gradient.
@@ -1214,7 +1247,11 @@ class AlgorithmConfig(BaseConfig):
     ``cispo_anchor="rollout"`` (its clamp) or ``"dppo"`` (its trust region). Incompatible with
     ``off_policy_correction.tis_ratio_type`` and the token-mask IS thresholds, which weight only the
     sampled token by ``π_old / π_rollout``; sequence and outlier masks apply to both terms but are
-    approximate, because each depends on the sampled token's own ratio."""
+    approximate, because each depends on the sampled token's own ratio.
+
+    ``None`` (the default) resolves at config construction: ``True`` when
+    ``enable_sample_support_replay`` is on and the loss and off-policy correction settings above
+    allow it, otherwise ``False``. ``True`` raises if they do not."""
     sapo: SAPOConfig = field(default_factory=SAPOConfig)
     """Only used when ``policy_loss_type="sapo"``."""
     value_clip: float = 0.2
@@ -1811,6 +1848,18 @@ class TrainerConfig(BaseConfig):
     longer than ``max_tokens_per_microbatch`` is placed alone in its own microbatch that exceeds the
     cap (no error, no truncation). The true peak microbatch size is therefore
     ``max(max_tokens_per_microbatch, longest_sequence_in_batch)``."""
+    balance_dp_tokens: bool = False
+    """Balance tokens across data-parallel ranks.
+
+    When False (the default), the behavior is the same as before this option existed. A batch is
+    cut into ``dp_size`` chunks with the same number of samples, in batch order. Samples of one
+    prompt have similar lengths and are next to each other, so some ranks get many more tokens
+    than others. The lighter ranks then wait for the busiest rank in every collective.
+
+    When True, the driver deals the samples of each batch (or mini-batch) to the ranks by length.
+    Every rank still gets the same number of samples, and the ranks get similar numbers of tokens.
+    Each rank forms its micro-batches as before, so this option does not depend on
+    ``max_tokens_per_microbatch``. Outputs keep the batch order."""
     recompute_old_logprobs_per_minibatch: bool = True
     """When True, recomputes policy/ref model logprobs (and critic values) per mini-batch using
     the same mini-batch + DP partition as the training step. When False, a single full-batch forward is run.
@@ -2135,6 +2184,34 @@ def build_nested_dataclass(datacls: Type[T], d: dict) -> T:
 # ---------------------------------------------------------------------------
 
 
+def _score_centering_incompatibility(algorithm: AlgorithmConfig) -> Optional[str]:
+    """Why score centering cannot run with ``algorithm``, or ``None`` if it can."""
+    if not algorithm.enable_sample_support_replay:
+        return "trainer.algorithm.enable_score_centering requires enable_sample_support_replay"
+    from skyrl.backends.skyrl_train.utils.ppo_utils import score_centering_weight
+
+    try:
+        # Raises for a loss whose weight is not relative to the sampler.
+        score_centering_weight(algorithm.policy_loss_type, algorithm)
+    except ValueError as e:
+        return str(e)
+    off_policy = algorithm.off_policy_correction
+    # The deprecated use_tis becomes tis_ratio_type="token" only later, in validate_cfg.
+    if off_policy.tis_ratio_type is not None or algorithm.use_tis:
+        return (
+            "score centering does not compose with off_policy_correction.tis_ratio_type (or the deprecated "
+            "use_tis), which weights only the sampled token by pi_old / pi_rollout; the loss's own weight is "
+            "the importance correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
+        )
+    if off_policy.token_mask_is_threshold_low is not None or off_policy.token_mask_is_threshold_high is not None:
+        return (
+            "score centering does not compose with the token_mask_is_threshold_* masks, which drop "
+            "sampled tokens by pi_old / pi_rollout; rollout_is's eps_clip band is the masked "
+            "importance weight that score centering applies to every support member"
+        )
+    return None
+
+
 @dataclass
 class SkyRLTrainConfig(BaseConfig):
     """Root configuration object for SkyRL training with the ``fsdp`` and ``megatron`` backends.
@@ -2177,31 +2254,11 @@ class SkyRLTrainConfig(BaseConfig):
                 )
 
         algorithm = self.trainer.algorithm
-        if algorithm.enable_score_centering:
-            from skyrl.backends.skyrl_train.utils.ppo_utils import (
-                score_centering_weight,
-            )
-
-            if not algorithm.enable_sample_support_replay:
-                raise ValueError("trainer.algorithm.enable_score_centering requires enable_sample_support_replay")
-            # Raises for a loss whose weight is not relative to the sampler.
-            score_centering_weight(algorithm.policy_loss_type, algorithm)
-            off_policy = algorithm.off_policy_correction
-            if off_policy.tis_ratio_type is not None:
-                raise ValueError(
-                    "score centering does not compose with off_policy_correction.tis_ratio_type, which weights "
-                    "only the sampled token by pi_old / pi_rollout; the loss's own weight is the importance "
-                    "correction (rollout_is's band, or cispo's clamp with cispo_anchor='rollout' for TIS)"
-                )
-            if (
-                off_policy.token_mask_is_threshold_low is not None
-                or off_policy.token_mask_is_threshold_high is not None
-            ):
-                raise ValueError(
-                    "score centering does not compose with the token_mask_is_threshold_* masks, which drop "
-                    "sampled tokens by pi_old / pi_rollout; rollout_is's eps_clip band is the masked "
-                    "importance weight that score centering applies to every support member"
-                )
+        if algorithm.enable_score_centering is not False:
+            reason = _score_centering_incompatibility(algorithm)
+            if algorithm.enable_score_centering and reason is not None:
+                raise ValueError(reason)
+            algorithm.enable_score_centering = reason is None
 
         # Eval requests opt out of capture and do not use these constraints.
         if self.generator.inference_engine.enable_return_sample_support_set:

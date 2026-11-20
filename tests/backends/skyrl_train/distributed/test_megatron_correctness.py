@@ -91,7 +91,9 @@ def test_packed_fused_active_mask_is_cp_local_and_two_dimensional():
     tp_group = object()
     cp_group = object()
 
-    def fused_apply(*args):
+    def fused_apply(*args, **kwargs):
+        # No final logit softcap here; a softcapped model (Beam) passes it by keyword.
+        assert kwargs.get("softcap") is None
         local_mask = args[-3]
         assert local_mask.shape == (1, 4)
         torch.testing.assert_close(local_mask, torch.tensor([[True, False, True, False]]))

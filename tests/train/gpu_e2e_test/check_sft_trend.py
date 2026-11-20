@@ -9,7 +9,7 @@ Checks performed (any failure exits non-zero):
     (defaults to ``2 * window``, i.e. enough for non-overlapping windows).
   * No NaN/inf in the logged loss history.
   * ``mean(last N losses) < mean(first N losses)`` where N is ``--window``.
-  * Optionally: the run's final ``_step`` >= ``--expected_steps`` (skipped if
+  * Optionally: the last logged ``train/global_step`` >= ``--expected_steps`` (skipped if
     ``--expected_steps`` is not provided).
 
 The first 4 checks are CI-critical; the last is opt-in because some callers
@@ -19,6 +19,7 @@ don't know the exact step count up front.
 import argparse
 import math
 import sys
+import time
 
 import wandb
 
@@ -56,7 +57,7 @@ def parse_args() -> argparse.Namespace:
         "--expected_steps",
         type=int,
         default=None,
-        help="If set, assert the run's final _step is >= this value (completion check).",
+        help="If set, assert the training history reaches this step (completion check).",
     )
     return parser.parse_args()
 
@@ -66,30 +67,40 @@ def main() -> int:
     min_steps = args.min_steps if args.min_steps is not None else 2 * args.window
     project_path = f"{args.entity}/{args.project_name}" if args.entity else args.project_name
 
-    api = wandb.Api()
-    runs = api.runs(project_path, filters={"display_name": args.run_name}, order="-created_at")
-    matched_run = next(iter(runs), None)
-    if matched_run is None:
-        print(f"FAIL: run '{args.run_name}' not found in project '{project_path}'", file=sys.stderr)
-        return 1
-    print(f"Matched run: id={matched_run.id} state={matched_run.state} url={matched_run.url}")
-
-    # Pull the full loss history. scan_history streams every logged row (vs.
-    # the sampled 500-point default from .history()).
-    rows = list(matched_run.scan_history(keys=[args.metric]))
-    losses = [row[args.metric] for row in rows if args.metric in row]
-    print(f"Pulled {len(losses)} '{args.metric}' rows from wandb history.")
-
-    # ---- Completion check (optional) ----
-    if args.expected_steps is not None:
-        final_step = matched_run.summary_metrics.get("_step")
-        if final_step is None or final_step < args.expected_steps:
+    deadline = time.monotonic() + 180
+    while True:
+        # Query fresh history: the summary and cached history may lag the final loss rows.
+        api = wandb.Api()
+        runs = api.runs(project_path, filters={"display_name": args.run_name}, order="-created_at")
+        matched_run = next(iter(runs), None)
+        if matched_run is None:
+            print(f"FAIL: run '{args.run_name}' not found in project '{project_path}'", file=sys.stderr)
+            return 1
+        keys = [args.metric, "train/global_step"] if args.expected_steps is not None else [args.metric]
+        rows = list(matched_run.scan_history(keys=keys, use_cache=False))
+        training_rows = [row for row in rows if row.get(args.metric) is not None]
+        if args.expected_steps is not None:
+            training_rows = [row for row in training_rows if row.get("train/global_step") is not None]
+        final_step = (
+            max((row["train/global_step"] for row in training_rows), default=None)
+            if args.expected_steps is not None
+            else None
+        )
+        if args.expected_steps is None or (final_step is not None and final_step >= args.expected_steps):
+            break
+        if time.monotonic() >= deadline:
             print(
-                f"FAIL: run final _step={final_step} < expected_steps={args.expected_steps}",
+                f"FAIL: last logged train/global_step={final_step} < expected_steps={args.expected_steps}",
                 file=sys.stderr,
             )
             return 1
-        print(f"PASS: run completed (final _step={final_step} >= {args.expected_steps}).")
+        time.sleep(10)
+
+    print(f"Matched run: id={matched_run.id} state={matched_run.state} url={matched_run.url}")
+    losses = [row[args.metric] for row in training_rows]
+    print(f"Pulled {len(losses)} '{args.metric}' rows from wandb history.")
+    if args.expected_steps is not None:
+        print(f"PASS: run completed (train/global_step={final_step} >= {args.expected_steps}).")
 
     # ---- Minimum-rows check ----
     if len(losses) < min_steps:

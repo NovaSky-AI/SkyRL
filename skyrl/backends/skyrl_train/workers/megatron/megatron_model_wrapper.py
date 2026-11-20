@@ -226,6 +226,9 @@ class MegatronModelWrapper:
         self._pending_grad_sync: Optional[dict] = None
 
         config = get_model_config(self.actor_module[0])
+        # The fused path computes log-probs from the hidden states and the head weight, bypassing
+        # the output layer's forward, so it applies the model's final logit softcap (Beam) itself.
+        self._logit_softcap = getattr(config, "final_logit_softcapping", None) or None
         # megatron-core's mlp_chunks_for_training splits the sequence with Tensor.chunk(n), which yields fewer
         # than n pieces unless n divides the length. Each MoE call is a set of expert-parallel collectives, so
         # a per-rank piece count hangs the EP group. Pad the unpacked length (remove_left_padding and the replay
@@ -469,6 +472,7 @@ class MegatronModelWrapper:
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    softcap=self._logit_softcap,
                 )
             elif fused_lm_head:
                 token_logprobs = from_parallel_hidden_to_logprobs(
@@ -483,6 +487,7 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    softcap=self._logit_softcap,
                 )
             elif packed_seq_params is not None and packed_targets is not None:
                 token_logprobs = from_parallel_logits_to_logprobs_packed_sequences(
@@ -879,6 +884,7 @@ class MegatronModelWrapper:
                     sub_seq_lengths=data.get("sub_seq_lengths_list"),
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    softcap=self._logit_softcap,
                     active_mask=sparse_active_mask,
                     return_entropy=compute_fused_entropy,
                     entropy_requires_grad=compute_fused_entropy and loss_config.use_entropy_loss,
@@ -900,6 +906,7 @@ class MegatronModelWrapper:
                     chunk_size=self.cfg.logprobs_chunk_size,
                     temperature=temperature,
                     fused_backend=self._fused_lm_head_backend,
+                    softcap=self._logit_softcap,
                     active_mask=sparse_active_mask,
                     return_entropy=compute_fused_entropy,
                     entropy_requires_grad=compute_fused_entropy and loss_config.use_entropy_loss,

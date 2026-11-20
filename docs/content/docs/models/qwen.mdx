@@ -1,0 +1,63 @@
+---
+title: "Qwen3 / Qwen-3.5 / Qwen3.6"
+---
+
+Supported on `main` with the Megatron backend. Qwen3.8-Flash-Next has [its own page](/docs/models/qwen3_8_flash_next). Dense models also work with FSDP, and Qwen3 and Qwen-3.5 Dense work with JAX.
+
+| Family | Sizes | Full FT | LoRA | Low precision |
+|---|---|---|---|---|
+| Qwen3.6 | 27B, 35B-A3B | ✅ | ✅ | INT4 QAT (35B-A3B) |
+| Qwen-3.5 | Dense: 0.8B/2B/4B/9B/27B, MoE: 35B-A3B/122B-A10B/397B-A17B, VL | ✅ | ✅ | FP8 (Hopper), MXFP8 (Blackwell) |
+| Qwen3 | Dense: 0.6B/1.7B/4B/8B/32B, MoE: 30B-A3B/235B-A22B | ✅ | ✅ | |
+
+## Example scripts
+
+Scripts are in [`examples/train/megatron/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/megatron) unless linked otherwise. Prepare the data first:
+
+```bash
+uv run examples/train/gsm8k/gsm8k_dataset.py --output_dir $HOME/data/gsm8k
+bash examples/train/algorithms/dapo/prepare_dapo_data.sh
+```
+
+### Qwen3.6
+
+| Model | Task | Mode | Hardware | Script |
+|---|---|---|---|---|
+| 27B | DAPO | LoRA | 4x8 H200 | `run_megatron_dapo_qwen3.6_27b_lora.sh` |
+| 35B-A3B | DAPO | LoRA | 4x8 H100 | `run_megatron_dapo_qwen3.6_35b_a3b_lora.sh` |
+| 35B-A3B INT4 | DAPO | LoRA + INT4 QAT | 1x8 H200 | `run_megatron_dapo_qwen3.6_35b_a3b_lora_int4_qat.sh` |
+
+The INT4 script uses the same setup as [Kimi K2.7](/docs/models/kimi): vLLM serves INT4 (W4A16), and the trainer fake-quantizes its BF16 experts onto the same INT4 grid, with TIS correcting what's left of the mismatch.
+`QAT_MODE=off` disables fake-quant and TIS, as a baseline.
+
+### Qwen-3.5
+
+| Model | Task | Mode | Hardware | Script |
+|---|---|---|---|---|
+| 0.8B | GSM8K | Full FT | 1x4 GPUs | `run_megatron_qwen3.5.sh` |
+| 0.8B | GSM8K | Full FT (FSDP) | 1x4 GPUs | [`examples/train/models/run_qwen3.5_0.8b.sh`](https://github.com/NovaSky-AI/SkyRL/blob/main/examples/train/models/run_qwen3.5_0.8b.sh) |
+| 9B | DAPO | Full FT | 1x8 H100 | `run_megatron_dapo_qwen3.5_9b.sh` |
+| 9B (VL) | Geometry-3K | Full FT | 1x8 H100 | `run_megatron_qwen3.5_vl_geometry3k.sh` |
+| 35B-A3B | GSM8K | Full FT | 1x8 H100 | `run_megatron_qwen3.5_35b_a3b.sh` |
+| 35B-A3B | DAPO | Full FT | 2x8 H100 | `run_megatron_dapo_qwen3.5_35b_a3b.sh` |
+
+FP8 (Hopper) and MXFP8 (Blackwell) scripts for 9B and 35B-A3B are in [`examples/train/fp8/`](https://github.com/NovaSky-AI/SkyRL/tree/main/examples/train/fp8). See also [Quantized rollouts](/docs/examples/quantized_rollouts).
+
+### Qwen3
+
+| Model | Task | Mode | Hardware | Script |
+|---|---|---|---|---|
+| 0.6B | GSM8K | Full FT | 1x4 GPUs | `run_megatron.sh` |
+| 0.6B | GSM8K | LoRA | 1x8 GPUs | `run_megatron_lora_qwen3-0.6b.sh` |
+| 4B-Base | DAPO | Full FT / LoRA | 1x8 GPUs | `run_megatron_dapo_qwen3_4b.sh`, `run_megatron_dapo_qwen3_4b_lora.sh` |
+| 30B-A3B | GSM8K | Full FT | 2x8 H100 | `run_megatron_qwen3-30b-a3b.sh` |
+| 30B-A3B | GSM8K | LoRA | 1x8 H100 | `run_megatron_lora_qwen3-30b-a3b.sh` |
+| 30B-A3B-Base | DAPO | Full FT / LoRA | 2x8 H100 | `run_megatron_dapo_qwen3_30b_a3b.sh`, `run_megatron_dapo_qwen3_30b_a3b_lora.sh` |
+| 235B-A22B | GSM8K | Full FT | 8x8 H100 | `run_megatron_qwen3-235b-a22b.sh` |
+| 235B-A22B | DAPO | LoRA | 4x8 H100 | `run_megatron_dapo_qwen3_235b_a22b_lora.sh` |
+
+## Notes
+
+- Qwen-3.5/3.6 on Blackwell: set `FLA_TILELANG=0` (fla's TileLang GDN backend aborts in the packed backward). Leave it unset on Hopper, where Triton's GDN backward is broken.
+- Qwen-3.5 VL trains the vision tower and supports sequence packing and context parallelism. Set `language_model_only=true` to train text-only.
+- Qwen3-235B-A22B: max TP is 4 (it has 4 KV groups).

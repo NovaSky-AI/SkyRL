@@ -39,6 +39,7 @@ from skyrl.tinker.config import (
     TinkerTorchProfilerConfig,
     add_model,
     config_to_argv,
+    flatten_backend_config,
 )
 from skyrl.tinker.db_models import (
     CheckpointDB,
@@ -232,7 +233,7 @@ def _should_forward_sample_requests(config: EngineConfig) -> bool:
     """Return whether samples can bypass the engine for managed inference."""
     if config.backend not in ("megatron", "fsdp") or config.runtime_role != "combined":
         return False
-    backend_config = config.backend_config or {}
+    backend_config = flatten_backend_config(config.backend_config or {})
     return not bool(backend_config.get("trainer.placement.colocate_all", True))
 
 
@@ -817,6 +818,7 @@ class AdamParams(BaseModel):
     beta2: float = Field(default=0.95, ge=0.0, lt=1.0)
     eps: float = Field(default=1e-12, gt=0.0)
     weight_decay: float = Field(default=0.0, ge=0.0)
+    grad_clip_norm: float = Field(default=0.0, ge=0.0)
 
     def to_types(self) -> types.AdamParams:
         return types.AdamParams(
@@ -825,6 +827,7 @@ class AdamParams(BaseModel):
             beta2=self.beta2,
             eps=self.eps,
             weight_decay=self.weight_decay,
+            grad_clip_norm=self.grad_clip_norm,
         )
 
 
@@ -1108,7 +1111,7 @@ def _validate_worker_profiler_config(worker_config: dict, engine_config: EngineC
     """
     from skyrl.train.config.config import TorchProfilerConfig
 
-    backend_cfg = engine_config.backend_config or {}
+    backend_cfg = flatten_backend_config(engine_config.backend_config or {})
     probe = TorchProfilerConfig(**{**worker_config, "save_path": "/tmp/skyrl_profiler_validate"})
     probe.validate(
         strategy=engine_config.backend,

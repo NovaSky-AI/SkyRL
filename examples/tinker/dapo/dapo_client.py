@@ -112,9 +112,10 @@ FORWARD_BATCH_SIZE = POLICY_MINI_BATCH_SIZE * N_SAMPLES_PER_PROMPT
 LORA_LEARNING_RATE = 1.0e-5  # run_dapo_qwen3_30b_a3b_lora_megatron_aime.sh
 FULL_FT_LEARNING_RATE = 1.0e-6  # run_dapo_qwen3_30b_a3b_megatron_aime.sh
 NUM_WARMUP_STEPS = _env_int("NUM_WARMUP_STEPS", 160)  # counted in optimizer (mini-batch) steps
-# Applied server-side: set trainer.policy.optimizer_config.weight_decay=0.1 in backend_config.
-# max_grad_norm=1.0 is the SkyRL optimizer default and is also applied server-side.
-WEIGHT_DECAY = 0.1
+# Sent with every optim_step's AdamParams and applied there; the server's optimizer_config only
+# holds the build-time defaults a request replaces on each step.
+WEIGHT_DECAY = _env_float("WEIGHT_DECAY", 0.1)
+MAX_GRAD_NORM = _env_float("MAX_GRAD_NORM", 1.0)
 
 # Soft overlong punishment / overlong filtering (DAPO)
 OVERLONG_BUFFER_LEN = _env_int("OVERLONG_BUFFER_LEN", 1024 * 4)
@@ -467,14 +468,16 @@ def policy_learning_rate(optim_step: int, peak_lr: float) -> float:
 
 
 def adam_params(learning_rate: float) -> types.AdamParams:
-    # The SkyRL-Train Tinker backend applies only `learning_rate` at optim_step (via set_lr).
-    # betas/eps/weight_decay/max_grad_norm are fixed at optimizer creation from the server's
-    # trainer.policy.optimizer_config, so weight_decay=0.1 must be set in backend_config.
+    # Every field is applied on each optim_step (set_optimizer_hparams), so these are the
+    # values actually in force for training; optimizer_config on the server only holds the
+    # build-time defaults they replace.
     return types.AdamParams(
         learning_rate=learning_rate,
         beta1=0.9,
         beta2=0.999,
         eps=1.0e-8,
+        weight_decay=WEIGHT_DECAY,
+        grad_clip_norm=MAX_GRAD_NORM,
     )
 
 

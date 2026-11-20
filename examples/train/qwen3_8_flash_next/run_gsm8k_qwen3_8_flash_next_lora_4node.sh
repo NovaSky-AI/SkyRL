@@ -49,6 +49,9 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
 MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-32}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 MAX_TOKENS_PER_MICROBATCH=8192
+# Token-balanced data-parallel split: the driver deals the samples of each mini-batch to the ranks
+# by length. Every rank gets the same number of samples and a similar number of tokens.
+BALANCE_DP_TOKENS="${BALANCE_DP_TOKENS:-true}"
 # vLLM sizes its KV pool at engine start; the trainer's post-offload residual grows to ~24 GiB/GPU
 # after the first optimizer step, and 0.85 OOMed adding the adapter at step 2. At 0.6 vLLM has
 # ~950 GDN state blocks, one per running sequence, so max_num_seqs is capped below the 1024 default.
@@ -113,6 +116,7 @@ uv run --isolated --extra megatron -m skyrl.train.entrypoints.main_base \
   trainer.use_expandable_segments=true \
   trainer.fused_lm_head_logprob=true \
   trainer.max_tokens_per_microbatch=$MAX_TOKENS_PER_MICROBATCH \
+  trainer.balance_dp_tokens=$BALANCE_DP_TOKENS \
   trainer.micro_forward_batch_size_per_gpu=1 \
   trainer.micro_train_batch_size_per_gpu=1 \
   trainer.train_batch_size=$TRAIN_BATCH_SIZE \

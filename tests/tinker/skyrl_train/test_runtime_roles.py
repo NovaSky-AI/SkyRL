@@ -88,6 +88,7 @@ def test_inference_runtime_unload_preserves_other_model_aliases():
     backend.config = MegatronBackendOverrides(runtime_role="inference")
     backend._model_ids_to_role = {"model-a": "policy", "model-b": "policy"}
     backend._model_metadata = {"model-a": Mock(), "model-b": Mock()}
+    backend._adam_params_checked = set()
     inference_client = object()
     backend._inference_engine_client = inference_client
 

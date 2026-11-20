@@ -95,6 +95,9 @@ from skyrl.backends.skyrl_train.patches.megatron.patch_shared_expert_lora_tp imp
 from skyrl.backends.skyrl_train.patches.megatron.patch_sparse_mla_nope import (
     patch_sparse_mla_nope,
 )
+from skyrl.backends.skyrl_train.patches.megatron.patch_triton_kernels_int64_offsets import (
+    apply_triton_kernels_int64_offsets_patch,
+)
 from skyrl.backends.skyrl_train.patches.megatron.patch_vision_attention_backend import (
     patch_vision_attention_backend,
 )
@@ -139,6 +142,7 @@ from skyrl.backends.skyrl_train.workers.worker import (
     CriticWorkerBase,
     PolicyWorkerBase,
     RefWorkerBase,
+    _apply_adam_params_to_group,
 )
 from skyrl.backends.skyrl_train.workers.worker_utils import (
     BaseBatchIterator,
@@ -149,6 +153,7 @@ from skyrl.backends.skyrl_train.workers.worker_utils import (
     reduce_metrics,
 )
 from skyrl.env_vars import SKYRL_MEGATRON_RANDOM_INIT, SKYRL_WORKER_NCCL_TIMEOUT_IN_S
+from skyrl.tinker import types
 from skyrl.train.config.config import MegatronDDPConfig, get_config_as_dict
 from skyrl.train.utils.utils import update_model_config
 from skyrl.utils.tok import get_tokenizer
@@ -174,6 +179,8 @@ apply_dsa_hybrid_indexer_patch()
 apply_dist_ckpt_exchange_wait_patch()
 apply_dist_optim_te_load_state_dict_patch()
 apply_dsa_head_full_patch()
+# megatron-core Triton kernels (fused mHC, MLA RoPE): int64 row offsets for long sequences (DSv4 / V4.1 at >64k).
+apply_triton_kernels_int64_offsets_patch()
 # Distributed-optimizer checkpoint index for param groups mixing fp32 and bf16 params (mHC models).
 # TODO: remove once NVIDIA/Megatron-LM#2872 is in the pinned megatron-core (see patches/megatron/README.md).
 apply_distopt_mixed_dtype_group_index_patch()
@@ -206,6 +213,32 @@ def drop_unsupported_recompute_modules(provider) -> None:
         f"recompute_granularity={provider.recompute_granularity}, "
         f"recompute_modules={provider.recompute_modules}"
     )
+
+
+def default_cp_comm_type_for_sliding_window(config) -> None:
+    """Default ``cp_comm_type`` to ``"a2a"`` under context parallelism with sliding-window attention.
+
+    Transformer Engine has no ``"p2p"`` (or ``"a2a+p2p"``) context-parallel path for sliding-window
+    attention, and megatron-core uses ``"p2p"`` when ``cp_comm_type`` is unset, so the sliding-window
+    layers would fail at the first forward. When nothing is set this picks ``"a2a"``, which needs the
+    per-TP-rank query and KV head counts divisible by the context-parallel size, and falls back to
+    ``"all_gather"`` when they are not. A ring-based choice is rejected up front. Used for Beam, whose
+    Megatron-Bridge provider leaves it unset.
+    """
+    cp = getattr(config, "context_parallel_size", 1) or 1
+    if cp <= 1 or getattr(config, "window_size", None) is None:
+        return
+    if config.cp_comm_type is None:
+        tp = getattr(config, "tensor_model_parallel_size", 1) or 1
+        heads = config.num_attention_heads
+        kv_heads = getattr(config, "num_query_groups", None) or heads
+        a2a_ok = heads % tp == 0 and kv_heads % tp == 0 and (heads // tp) % cp == 0 and (kv_heads // tp) % cp == 0
+        config.cp_comm_type = "a2a" if a2a_ok else "all_gather"
+    elif isinstance(config.cp_comm_type, str) and config.cp_comm_type in ("p2p", "a2a+p2p"):
+        raise ValueError(
+            f"cp_comm_type={config.cp_comm_type!r} does not support sliding-window attention under "
+            "context parallelism; use 'a2a' or 'all_gather'."
+        )
 
 
 class MegatronWorker:
@@ -384,22 +417,6 @@ class MegatronWorker:
             provider.mtp_num_layers = None
             _clear_mtp_hybrid_pattern(provider)
 
-        # Workaround for megatron-bridge CONFIG_MAPPING dropping None values:
-        # MLA models like Moonlight-16B have q_lora_rank=None (no Q compression),
-        # but CONFIG_MAPPING skips None so the MCoreMLATransformerConfig default
-        # (512) is used instead, causing the wrong model architecture to be built.
-        # see: https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/c8eb587c5fd43163dbcd9c40980225b3fe1981f8/src/megatron/bridge/recipes/moonlight/moonlight_16b.py#L60
-        if hasattr(provider, "q_lora_rank") and hasattr(hf_config, "q_lora_rank"):
-            provider.q_lora_rank = hf_config.q_lora_rank
-
-        # Workaround for transformers v5 moving rope_theta into rope_parameters
-        # (previously it was a top-level config attribute). megatron-bridge's
-        # CONFIG_MAPPING reads config.rope_theta which no longer exists in v5,
-        # causing it to fall back to the default rotary_base of 10000.
-        rope_params = getattr(hf_config, "rope_parameters", None) or getattr(hf_config, "rope_scaling", None)
-        if isinstance(rope_params, dict) and "rope_theta" in rope_params:
-            provider.rotary_base = rope_params["rope_theta"]
-
         provider.tensor_model_parallel_size = megatron_config.tensor_model_parallel_size
         provider.pipeline_model_parallel_size = megatron_config.pipeline_model_parallel_size
         provider.pipeline_dtype = torch.bfloat16 if bf16 else torch.float32
@@ -527,6 +544,9 @@ class MegatronWorker:
                 f"mtp_loss_topk={megatron_config.mtp_loss_topk} "
                 "(native process_mtp_loss disabled)"
             )
+
+        if getattr(hf_config, "model_type", None) == "beam":
+            default_cp_comm_type_for_sliding_window(provider)
 
         provider.finalize()
 
@@ -686,7 +706,11 @@ class MegatronWorker:
             adapter,
             tp_size=mpu.get_tensor_model_parallel_world_size(),
             pp_size=mpu.get_pipeline_model_parallel_world_size(),
-            target_modules=None if lora_config.target_modules == "all-linear" else list(lora_config.target_modules),
+            target_modules=(
+                None
+                if isinstance(lora_config.target_modules, str) and lora_config.target_modules.lower() == "all-linear"
+                else list(lora_config.target_modules)
+            ),
         )
         if "output_layer" in plan.target_modules and self.cfg.fused_lm_head_logprob:
             raise ValueError(
@@ -1665,30 +1689,32 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             return opt.param_groups[0]["lr"]
         return self.optimizer.param_groups[0]["lr"]
 
-    def set_lr(self, learning_rate: float) -> None:
-        """
-        Set learning rate for the optimizer.
+    def set_optimizer_hparams(self, adam_params: types.AdamParams) -> None:
+        """Apply the request's ``AdamParams`` to the live optimizer before each ``optim_step``.
 
-        Handles both regular optimizers and ChainedOptimizer (used with
-        distributed optimizer). Updates all param_groups across all
-        underlying optimizers.
-
-        Note: This bypasses the scheduler. The next scheduler.step() call
-        will override this value unless the scheduler is configured for
-        constant LR. No-op when ``policy.inference_only_init=True``.
+        Megatron's distributed optimizer is a ``ChainedOptimizer`` whose inner optimizers
+        each own param groups and a config (``init_megatron_optim_config`` bakes the
+        build-time values into both). The param groups are rewritten per step through the
+        shared helper — no-decay groups keep their ``0`` — and ``grad_clip_norm`` is written
+        to each inner optimizer's ``config.clip_grad``, which its own ``step`` clips with.
+        No-op when the worker was initialized with ``policy.inference_only_init=True``.
         """
         if self.optimizer is None:
             return
         if isinstance(self.optimizer, ChainedOptimizer):
-            # ChainedOptimizer wraps multiple optimizers (e.g., for different param groups)
             for opt in self.optimizer.chained_optimizers:
                 if opt.optimizer is None:
                     continue
                 for param_group in opt.param_groups:
-                    param_group["lr"] = learning_rate
+                    _apply_adam_params_to_group(param_group, adam_params)
+                opt.config.clip_grad = adam_params.grad_clip_norm
         else:
             for param_group in self.optimizer.param_groups:
-                param_group["lr"] = learning_rate
+                _apply_adam_params_to_group(param_group, adam_params)
+            if hasattr(self.optimizer, "config"):
+                # The offload-to-disk and the generated Megatron optimizers both carry
+                # the OptimizerConfig they clip with; anything else would have no attr.
+                self.optimizer.config.clip_grad = adam_params.grad_clip_norm
 
     async def init_weight_sync_state(self, inference_engine_client, inference_engine_cfg: "InferenceEngineConfig"):
         """Resolve serialized FP8 before the parent builds the weight source."""
@@ -1974,9 +2000,12 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         from megatron.bridge.models.conversion.peft_bridge import (
             build_adapter_config_dict,
-            infer_target_modules_from_adapter_weights,
         )
         from safetensors.torch import save_file
+
+        from skyrl.backends.skyrl_train.weight_sync.sources import (
+            adapter_target_modules,
+        )
 
         # Every rank must participate in the bridge's collective export, but only
         # the writer ranks materialize the gathered tensors: with MoE expert
@@ -2035,9 +2064,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 adapter_state, num_moe_experts=getattr(self.provider, "num_moe_experts", None)
             )
 
-            target_modules = sorted(
-                set(infer_target_modules_from_adapter_weights(adapter_state.keys())) - {"base_layer"}
-            )
+            target_modules = adapter_target_modules(self.bridge, adapter_state.keys())
             base_model_name_or_path = str(
                 getattr(self, "_logical_model_path", "")
                 or getattr(self.bridge.hf_pretrained, "model_name_or_path", "")

@@ -6,10 +6,11 @@ import os
 import socket
 import sys
 import time
+from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import ray
 import torch
@@ -18,6 +19,7 @@ from ray.util.placement_group import (
     PlacementGroup,
     placement_group,
     placement_group_table,
+    remove_placement_group,
 )
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
@@ -44,6 +46,7 @@ from skyrl.env_vars import (
 )
 from skyrl.train.config.config import (
     SUPPORTED_SPECULATIVE_DECODING_METHODS,
+    MegatronConfig,
     SkyRLTrainConfig,
     get_config_as_dict,
 )
@@ -84,6 +87,23 @@ class Timer:
             self.update_dict[self.message] = self.update_dict.get(self.message, 0.0) + time.time() - self.start_time
 
 
+def _megatron_dp_size(role: str, world_size: int, megatron_config: MegatronConfig) -> int:
+    """The data parallel size of a Megatron model (``role``: policy or ref) on ``world_size`` GPUs.
+
+    Megatron lays the GPUs out twice: a dense grid (tp * cp * pp) and an expert grid (etp * ep * pp), and
+    builds the expert grid even for a dense model. Both must divide the world size (see MegatronConfig).
+    """
+    pp = megatron_config.pipeline_model_parallel_size
+    cp = megatron_config.context_parallel_size
+    tp = megatron_config.tensor_model_parallel_size
+    assert world_size % (pp * cp * tp) == 0, (
+        f"{role}_world_size {world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
+        "This ensures that the data parallel size is an integer."
+    )
+    megatron_config.check_expert_grid(world_size, f"trainer.{role}.megatron_config")
+    return world_size // (pp * cp * tp)
+
+
 def validate_batch_sizes(cfg: SkyRLTrainConfig):
     """
     Validate configured batch sizes.
@@ -111,14 +131,7 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     policy_world_size = cfg.trainer.placement.policy_num_nodes * cfg.trainer.placement.policy_num_gpus_per_node
 
     if cfg.trainer.strategy == "megatron":
-        pp = cfg.trainer.policy.megatron_config.pipeline_model_parallel_size
-        cp = cfg.trainer.policy.megatron_config.context_parallel_size
-        tp = cfg.trainer.policy.megatron_config.tensor_model_parallel_size
-        assert policy_world_size % (pp * cp * tp) == 0, (
-            f"policy_world_size {policy_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-            "This ensures that the data parallel size is an integer."
-        )
-        policy_dp_size = policy_world_size // (pp * cp * tp)
+        policy_dp_size = _megatron_dp_size("policy", policy_world_size, cfg.trainer.policy.megatron_config)
     else:
         policy_dp_size = policy_world_size // cfg.trainer.policy.sequence_parallel_size
 
@@ -199,14 +212,7 @@ def validate_batch_sizes(cfg: SkyRLTrainConfig):
     if use_ref_model:
         ref_world_size = cfg.trainer.placement.ref_num_nodes * cfg.trainer.placement.ref_num_gpus_per_node
         if cfg.trainer.strategy == "megatron":
-            pp = cfg.trainer.ref.megatron_config.pipeline_model_parallel_size
-            cp = cfg.trainer.ref.megatron_config.context_parallel_size
-            tp = cfg.trainer.ref.megatron_config.tensor_model_parallel_size
-            assert ref_world_size % (pp * cp * tp) == 0, (
-                f"ref_world_size {ref_world_size} should be divisible by (pp * cp * tp) {pp * cp * tp}. "
-                "This ensures that the data parallel size is an integer."
-            )
-            ref_dp_size = ref_world_size // (pp * cp * tp)
+            ref_dp_size = _megatron_dp_size("ref", ref_world_size, cfg.trainer.ref.megatron_config)
         else:
             ref_dp_size = ref_world_size // cfg.trainer.ref.sequence_parallel_size
         lcm_dp_size = math.lcm(lcm_dp_size, ref_dp_size)
@@ -1383,21 +1389,39 @@ def initialize_ray(cfg: SkyRLTrainConfig):
     sync_registries()
 
 
-def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
-    try:
-        ray.get(pg.ready(), timeout=timeout)
-    except Exception as e:
-        # Extract resource demands from the placement group
-        bundles = pg.bundle_specs
-        total_gpus = sum(bundle.get("GPU", 0) for bundle in bundles)
-        total_cpus = sum(bundle.get("CPU", 0) for bundle in bundles)
+@contextmanager
+def cleanup_on_error(cleanup: Callable[[], Any], description: str):
+    """Run ``cleanup`` if the body raises, then re-raise the body's exception.
 
-        raise RuntimeError(
-            f"Failed to create placement group with {len(bundles)} bundles "
-            f"(requiring {total_gpus} GPUs, {total_cpus} CPUs total) in {timeout} seconds. "
-            f"This might indicate insufficient GPU resources.\n"
-            f"Error: {e}"
-        )
+    A failure in ``cleanup`` is attached to that exception as a note instead of replacing it.
+    """
+    try:
+        yield
+    except BaseException as primary:
+        try:
+            cleanup()
+        except Exception as cleanup_exc:
+            primary.add_note(f"{description} also failed during cleanup: {cleanup_exc!r}")
+        raise
+
+
+def get_ray_pg_ready_with_timeout(pg: PlacementGroup, timeout: int = 60):
+    """Wait until ``pg`` is ready, removing it if that does not happen within ``timeout`` seconds."""
+    with cleanup_on_error(lambda: remove_placement_group(pg), "Removing the placement group"):
+        try:
+            ray.get(pg.ready(), timeout=timeout)
+        except Exception as e:
+            # Extract resource demands from the placement group
+            bundles = pg.bundle_specs
+            total_gpus = sum(bundle.get("GPU", 0) for bundle in bundles)
+            total_cpus = sum(bundle.get("CPU", 0) for bundle in bundles)
+
+            raise RuntimeError(
+                f"Failed to create placement group with {len(bundles)} bundles "
+                f"(requiring {total_gpus} GPUs, {total_cpus} CPUs total) in {timeout} seconds. "
+                f"This might indicate insufficient GPU resources.\n"
+                f"Error: {e}"
+            )
 
 
 @ray.remote(num_gpus=1)

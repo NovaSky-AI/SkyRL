@@ -15,11 +15,9 @@
 #                             over many tasks measures each task's pass@GROUP_SIZE without training
 #   MAX_CONCURRENCY           trials (so sandboxes) in flight at once, eval included (default 64). The
 #                             Daytona org is shared: keep it well under what others leave free
-#   SANDBOX_OWNER             required: the `owner` label on every sandbox; `run` is the experiment name.
-#                             After a crash: uv run --isolated --extra harbor python -m
-#                             examples.train_integrations.harbor_skycap.daytona cleanup
-#                             --label owner=$SANDBOX_OWNER --label run=<experiment>
-#   SANDBOX_TTL_MINUTES       hard lifetime of a sandbox, whatever happens to this run (default 180)
+#   SANDBOX_OWNER             required: the `owner` label on every sandbox; `run` is the experiment name
+#   SANDBOX_IDLE_MINUTES      Daytona stops a sandbox idle this long and then deletes it, so a crashed run's
+#                             sandboxes go away on their own (default 30)
 #   SANDBOX_CPUS, SANDBOX_MEMORY_MB, SANDBOX_STORAGE_MB   per sandbox (default 1, 16384, 10240). The agent's own
 #                             Jest runs start a worker per host CPU (Daytona shows 64): a whole suite peaks at
 #                             ~11.6 GB, so 4 GB sandboxes get OOM-killed. 16 GB counts as 4 of the org's 4 GB slots
@@ -67,7 +65,7 @@ TASKS="${TASKS:-}"
 EPOCHS="${EPOCHS:-20}"
 LR="${LR:-1.0e-6}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-64}"
-SANDBOX_TTL_MINUTES="${SANDBOX_TTL_MINUTES:-180}"
+SANDBOX_IDLE_MINUTES="${SANDBOX_IDLE_MINUTES:-30}"
 SANDBOX_CPUS="${SANDBOX_CPUS:-1}"
 SANDBOX_MEMORY_MB="${SANDBOX_MEMORY_MB:-16384}"
 SANDBOX_STORAGE_MB="${SANDBOX_STORAGE_MB:-10240}"
@@ -156,7 +154,7 @@ AGENT_CONFIG="$RUN_DIR/mini_swe_agent.yaml"
 sed "s/^  step_limit: [0-9]*$/  step_limit: $STEP_LIMIT/" "$HERE/mini_swe_agent_textbased.yaml" > "$AGENT_CONFIG"
 grep -q "^  step_limit: $STEP_LIMIT$" "$AGENT_CONFIG" || { echo "could not set step_limit in $AGENT_CONFIG" >&2; exit 1; }
 echo "==> $NUM_PROMPTS tasks x $GROUP_SIZE samples, at most $MAX_CONCURRENCY sandboxes at once"
-echo "==> sandboxes labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, ttl ${SANDBOX_TTL_MINUTES}m"
+echo "==> sandboxes labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, deleted after ${SANDBOX_IDLE_MINUTES}m idle"
 
 if [[ "$SNAPSHOTS" == 1 ]]; then
   # build_snapshots.py names each snapshot after the sandbox size and the task; Harbor fills in {name}.
@@ -240,12 +238,11 @@ uv run --isolated --extra "$STRATEGY" --extra harbor --extra skycap \
   harbor_trial_config.agent.override_timeout_sec="$AGENT_TIMEOUT_SEC" \
   harbor_trial_config.agent.kwargs.config_file="$AGENT_CONFIG" \
   harbor_trial_config.agent.kwargs.version="$MINI_SWE_AGENT_VERSION" \
-  harbor_trial_config.environment.import_path=examples.train_integrations.harbor_skycap.daytona:LabelledDaytonaEnvironment \
   harbor_trial_config.environment.kwargs.labels.owner="$SANDBOX_OWNER" \
   harbor_trial_config.environment.kwargs.labels.project=skyrl-swebm \
   harbor_trial_config.environment.kwargs.labels.run="$EXPERIMENT" \
-  harbor_trial_config.environment.kwargs.ttl_minutes="$SANDBOX_TTL_MINUTES" \
-  harbor_trial_config.environment.kwargs.auto_stop_interval_mins=30 \
+  harbor_trial_config.environment.kwargs.auto_stop_interval_mins="$SANDBOX_IDLE_MINUTES" \
+  harbor_trial_config.environment.kwargs.auto_delete_interval_mins=0 \
   harbor_trial_config.environment.override_cpus="$SANDBOX_CPUS" \
   harbor_trial_config.environment.override_memory_mb="$SANDBOX_MEMORY_MB" \
   harbor_trial_config.environment.override_storage_mb="$SANDBOX_STORAGE_MB" \
@@ -298,5 +295,4 @@ echo
 echo "==> done: $EXPERIMENT"
 echo "    skycap records: $RUN_DIR/skycap"
 echo "    Harbor trials:  $RUN_DIR/trials"
-echo "    leftover sandboxes: uv run --isolated --extra harbor python -m examples.train_integrations.harbor_skycap.daytona list \\"
-echo "        --label owner=$SANDBOX_OWNER --label run=$EXPERIMENT"
+echo "    leftover sandboxes: labelled owner=$SANDBOX_OWNER run=$EXPERIMENT, deleted after ${SANDBOX_IDLE_MINUTES}m idle"

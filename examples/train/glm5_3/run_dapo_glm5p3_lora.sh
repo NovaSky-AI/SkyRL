@@ -75,6 +75,7 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.algorithm.eps_clip_high=0.28 \
   trainer.algorithm.clip_ratio_c=10.0 \
   trainer.algorithm.loss_reduction=token_mean \
+  trainer.algorithm.grpo_norm_by_std=true \
   trainer.algorithm.use_kl_loss=false \
   trainer.algorithm.dynamic_sampling.type=null \
   trainer.algorithm.overlong_buffer_len=4096 \
