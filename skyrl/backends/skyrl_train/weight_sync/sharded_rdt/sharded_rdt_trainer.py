@@ -31,6 +31,7 @@ from typing import Any, ClassVar
 
 import ray
 import torch
+from loguru import logger as _loguru
 from torch.multiprocessing.reductions import (
     StorageWeakRef,
     rebuild_cuda_tensor,
@@ -134,6 +135,28 @@ PRODUCE_METHOD_NAME = "rdt_produce_weights_batched"
 # cross-replica coupling and the slot-reuse hazard together. The cost is a D2H
 # bounce on the serve path, which has been the bottleneck before, so it needs
 # measuring rather than assuming.
+
+
+def _release_cuda_cache_for_sidecar(rank: int) -> "dict[str, float] | None":
+    """Return this process's cached-but-free CUDA memory to the driver, so the producer sidecar (a
+    separate process on the same GPU) can allocate its serve rings. Returns the logged GiB figures,
+    or None without CUDA."""
+    if not torch.cuda.is_available():
+        return None
+    gib = float(1 << 30)
+    before = torch.cuda.memory_reserved() / gib
+    torch.cuda.empty_cache()
+    free, total = torch.cuda.mem_get_info()
+    info = {
+        "allocated_gib": round(torch.cuda.memory_allocated() / gib, 2),
+        "reserved_before_gib": round(before, 2),
+        "reserved_after_gib": round(torch.cuda.memory_reserved() / gib, 2),
+        "device_free_gib": round(free / gib, 2),
+        "device_total_gib": round(total / gib, 2),
+    }
+    # loguru: vLLM's logger has no handler outside ``vllm.*`` (see rdt_send).
+    _loguru.info("[rdt-mem] rank {} before sidecar spawn: {}", rank, info)
+    return info
 
 
 @dataclass
@@ -570,7 +593,19 @@ class _RDTProducerServer:
             for i in range(self._nring):
                 slot = rings[i]
                 if slot is None or slot.numel() < alloc:
-                    rings[i] = self._new_serve_buffer(alloc)
+                    try:
+                        rings[i] = self._new_serve_buffer(alloc)
+                    except torch.OutOfMemoryError as e:
+                        held = sum(int(s.numel()) for r in self._serve_rings.values() for s in r if s is not None)
+                        free, _total = torch.cuda.mem_get_info(self._serve_device)
+                        raise RuntimeError(
+                            f"sharded_rdt producer OOM reserving serve ring slot {i} of sharing group {sg} "
+                            f"({alloc / 2**20:.0f} MiB; {len(self._serve_rings)} ring(s) x {self._nring} slots, "
+                            f"{held / 2**30:.2f} GiB already held; {free / 2**30:.2f} GiB free on the device). "
+                            "The trainer rank sharing this GPU holds the rest: its caching allocator must be "
+                            "released (torch.cuda.empty_cache) before the inference-side init, or "
+                            "SKYRL_RDT_NUM_BUFFERS lowered."
+                        ) from e
 
     def _share_group(self, consumer_id: int) -> int:
         """The slot-sharing group ``consumer_id`` belongs to: its index within
@@ -988,6 +1023,10 @@ class SkyRLShardedRDTTrainerWeightTransferEngine(TrainerWeightTransferEngine[Sky
 
         world, rank = engine._world_and_rank()
         engine._resolve_ownership(world, rank)
+        # The sidecar is a separate process on this GPU and cannot use memory held in this
+        # process's caching allocator. The worker init after the barrier below reserves every
+        # consumer's serve ring on it, so release the cache first, on every rank.
+        _release_cuda_cache_for_sidecar(rank)
         engine._spawn_server(sorted(engine._held_names or []))
 
         # Every rank's server must exist before the sender's init RPC (the worker
