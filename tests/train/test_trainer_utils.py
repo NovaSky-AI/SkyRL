@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 from typing import Union
-from unittest.mock import Mock, mock_open, patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -282,13 +282,9 @@ def test_calculate_per_dataset_metrics_multiple_sources():
     assert result["eval/unknown/pass_at_2"] == 1.0
 
 
-@patch("builtins.open", new_callable=mock_open)
-def test_dump_per_dataset_eval_results_comprehensive(mock_file):
-    """Test dump_per_dataset_eval_results comprehensive functionality."""
-    # Mock dump directory path
-    mock_dump_dir = Mock()
-    mock_dump_dir.__truediv__ = Mock(side_effect=lambda x: f"mock_path/{x}")
-
+def test_dump_per_dataset_eval_results_comprehensive(tmp_path):
+    """Keep each row in its dataset and write the aggregate metrics separately."""
+    dump_dir = tmp_path / "evals"
     # Mock tokenizer
     mock_tokenizer = Mock()
     mock_tokenizer.decode.side_effect = lambda x: f"decoded_{x}"
@@ -307,38 +303,29 @@ def test_dump_per_dataset_eval_results_comprehensive(mock_file):
 
     # Call the function
     dump_per_dataset_eval_results(
-        mock_dump_dir, mock_tokenizer, generator_outputs, data_sources, all_envs, env_extras, eval_metrics
+        dump_dir, mock_tokenizer, generator_outputs, data_sources, all_envs, env_extras, eval_metrics
     )
 
-    # Verify tokenizer was called for decoding
-    assert mock_tokenizer.decode.call_count == 6  # 3 prompts + 3 responses
-
-    # Verify files were opened (2 per-dataset files + 1 aggregated file)
-    assert mock_file.call_count == 3
-
-    # Verify file writes occurred
-    handle = mock_file.return_value
-    assert handle.write.call_count > 0
-
-    # Verify JSON structure by checking some write calls contain expected data
-    write_calls = [call[0][0] for call in handle.write.call_args_list]
-    json_writes = [call for call in write_calls if call.strip() and not call.startswith("Dumped")]
-
-    # At least one JSON line should contain our test data
-    assert len(json_writes) > 0
-
-    # Parse one of the JSON writes to verify structure
-    for write_call in json_writes:
-        try:
-            data = json.loads(write_call.strip())
-            if "input_prompt" in data:
-                # This is a per-dataset entry
-                assert "output_response" in data
-                assert "score" in data
-                assert "data_source" in data
-                break
-        except json.JSONDecodeError:
-            continue
+    assert {path.name for path in dump_dir.iterdir()} == {
+        "dataset1.jsonl",
+        "unknown.jsonl",
+        "aggregated_results.jsonl",
+    }
+    for dataset, indices in (("dataset1", [0, 2]), ("unknown", [1])):
+        rows = [json.loads(line) for line in (dump_dir / f"{dataset}.jsonl").read_text().splitlines()]
+        assert rows == [
+            {
+                "input_prompt": f"decoded_{generator_outputs['prompt_token_ids'][i]}",
+                "output_response": f"decoded_{generator_outputs['response_ids'][i]}",
+                "score": generator_outputs["rewards"][i],
+                "stop_reason": generator_outputs["stop_reasons"][i],
+                "env_class": all_envs[i],
+                "env_extras": env_extras[i],
+                "data_source": dataset,
+            }
+            for i in indices
+        ]
+    assert json.loads((dump_dir / "aggregated_results.jsonl").read_text()) == eval_metrics
 
 
 def test_handle_dynamic_sampling_null_strategy():

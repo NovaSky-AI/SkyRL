@@ -5,8 +5,10 @@ uv run --isolated --extra dev pytest tests/train/test_eval.py
 import json
 from unittest.mock import MagicMock
 
+import fsspec
 import pytest
 
+from skyrl.backends.skyrl_train.utils.io import io
 from skyrl.train.config import EnvironmentConfig, SamplingParams
 from skyrl.train.evaluate import evaluate
 from skyrl.train.generators.base import (
@@ -43,6 +45,105 @@ class DummyGenerator(GeneratorInterface):
     async def generate(self, input_batch):
         self.seen_inputs.append(input_batch)
         return self.outputs[min(len(self.seen_inputs), len(self.outputs)) - 1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["local", "s3", "gs", "gcs"])
+@pytest.mark.parametrize("step", [None, 0, 5])
+@pytest.mark.parametrize("export_prefix", ["exports", r"exports\literal"])
+async def test_eval_dumps_use_native_storage_and_include_all_returned_metrics(
+    dummy_config,
+    tmp_path,
+    monkeypatch,
+    protocol,
+    step,
+    export_prefix,
+):
+    monkeypatch.chdir(tmp_path)
+    cfg = dummy_config
+    cfg.trainer.dump_eval_results = True
+    cfg.trainer.export_path = (
+        str(tmp_path / export_prefix) if protocol == "local" else f"{protocol}://bucket/{export_prefix}"
+    )
+    if protocol != "local":
+        filesystem = fsspec.filesystem("memory")
+        filesystem.store.clear()
+        monkeypatch.setattr(io, "_get_filesystem", lambda _path: filesystem)
+    cfg.generator.eval_n_samples_per_prompt = 1
+    loader = DummyStatefulDataLoader(
+        [
+            [
+                {
+                    "prompt": [{"role": "user", "content": "question"}],
+                    "env_class": "gsm8k",
+                    "env_extras": {"data_source": "dataset/a"},
+                    "uid": "uid-1",
+                }
+            ]
+        ]
+    )
+    generator = DummyGenerator(
+        {
+            "prompt_token_ids": [[101]],
+            "response_ids": [[201]],
+            "rewards": [1.0],
+            "loss_masks": [[1]],
+            "stop_reasons": ["stop"],
+            "rollout_logprobs": None,
+        }
+    )
+    tokenizer = MagicMock()
+    tokenizer.decode.side_effect = lambda tokens: f"decoded {tokens[0]}"
+
+    metrics = await evaluate(loader, generator, cfg, step, tokenizer)
+
+    suffix = "eval_only" if step is None else f"global_step_{step}_evals"
+    directory = f"{cfg.trainer.export_path}/dumped_evals/{suffix}"
+    with io.open_file(f"{directory}/dataset_a.jsonl", "r") as stream:
+        assert json.loads(stream.read()) == {
+            "input_prompt": "decoded 101",
+            "output_response": "decoded 201",
+            "score": 1.0,
+            "stop_reason": "stop",
+            "env_class": "gsm8k",
+            "env_extras": {"data_source": "dataset/a"},
+            "data_source": "dataset/a",
+        }
+    with io.open_file(f"{directory}/aggregated_results.jsonl", "r") as stream:
+        assert json.loads(stream.read()) == metrics
+    assert "timing/eval_generate" in metrics
+    if protocol != "local":
+        assert not (tmp_path / f"{protocol}:").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_file", ["dataset_a.jsonl", "aggregated_results.jsonl"])
+async def test_evaluate_propagates_cloud_dump_failure(dummy_config, tmp_path, monkeypatch, failed_file):
+    monkeypatch.chdir(tmp_path)
+    cfg = _configure_eval(dummy_config, tmp_path, step_wise=False, dump_results=True)
+    cfg.trainer.export_path = "s3://bucket/exports"
+    filesystem = fsspec.filesystem("memory")
+    filesystem.store.clear()
+    open_file = filesystem.open
+
+    def deny_write(path, mode="rb", **kwargs):
+        if path.endswith(failed_file) and "w" in mode:
+            raise PermissionError("evaluation output access denied")
+        return open_file(path, mode, **kwargs)
+
+    monkeypatch.setattr(filesystem, "open", deny_write)
+    monkeypatch.setattr(io, "_get_filesystem", lambda _path: filesystem)
+
+    with pytest.raises(PermissionError, match="evaluation output access denied"):
+        await evaluate(
+            DummyStatefulDataLoader([_PROMPTS_BATCH]),
+            DummyGenerator(_plain_output()),
+            cfg,
+            5,
+            _tokenizer(),
+        )
+    assert not filesystem.exists("s3://bucket/exports/dumped_evals/global_step_5_evals/aggregated_results.jsonl")
+    assert not (tmp_path / "s3:").exists()
 
 
 @pytest.mark.asyncio

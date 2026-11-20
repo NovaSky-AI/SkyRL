@@ -1,7 +1,7 @@
+import posixpath
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
@@ -254,16 +254,16 @@ async def evaluate(
     for key, value in concat_generator_outputs["rollout_metrics"].items():
         eval_metrics[f"eval/all/{key}"] = value
 
+    eval_metrics["timing/eval_generate"] = eval_generate_time
+
     # 4. Prepare dumping data. The dump keeps every row (every step when step-wise).
-    # TODO[Ben] update this to be cloud-compatible
     if cfg.trainer.dump_eval_results:
         with Timer("dump_eval_results"):
-            data_save_dir = (
-                Path(cfg.trainer.export_path)
-                / "dumped_evals"
-                / ("eval_only" if global_step is None else f"global_step_{global_step}_evals")
+            data_save_dir = posixpath.join(
+                cfg.trainer.export_path,
+                "dumped_evals",
+                "eval_only" if global_step is None else f"global_step_{global_step}_evals",
             )
-            data_save_dir.mkdir(parents=True, exist_ok=True)
             dump_per_dataset_eval_results(
                 data_save_dir,
                 tokenizer,
@@ -274,5 +274,4 @@ async def evaluate(
                 eval_metrics,
             )
 
-    eval_metrics["timing/eval_generate"] = eval_generate_time
     return eval_metrics
