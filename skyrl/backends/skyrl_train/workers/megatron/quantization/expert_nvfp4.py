@@ -535,6 +535,8 @@ def install_expert_nvfp4(
     ``activation_block_scale``: the weights' / inputs' block scales; ``weight_stochastic`` / ``activation_stochastic``
     round the values stochastically (weights: one draw per weight version under ``seed``, set by
     :func:`set_weight_version`). Returns the number of rounded weights."""
+    from skyrl.backends.skyrl_train.kernels.nvfp4_quant import fused_rt
+
     if mode not in EXPERT_NVFP4_MODES:
         raise ValueError(f"expert_nvfp4_mode must be one of {EXPERT_NVFP4_MODES}, got {mode!r}")
     if torch.cuda.is_available() and torch.cuda.get_device_capability() not in NVFP4_DEVICE_CAPABILITIES:
@@ -555,6 +557,8 @@ def install_expert_nvfp4(
             bf16_layers=bf16_layers,
             stochastic=activation_stochastic,
         )
+    # Builds the fused round-trip kernels now (once per node, a few seconds) rather than in the first step.
+    fused = torch.cuda.is_available() and fused_rt.available()
     logger.info(
         f"expert_nvfp4 ({mode}): {count} routed-expert weights rounded to NVFP4 (block_scale={block_scale}, "
         + ("stochastic" if weight_stochastic else "round-to-nearest")
@@ -565,6 +569,7 @@ def install_expert_nvfp4(
             else ""
         )
         + f"; BF16 layers {bf16_layers}); fprop on "
-        + ("NVFP4 tensor cores." if w4a4 else "bf16 GEMMs of the round trips.")
+        + ("NVFP4 tensor cores" if w4a4 else "bf16 GEMMs of the round trips")
+        + f"; round trips and packs on {'the fused sm_100 kernels' if fused else 'FlashInfer + the Triton decode'}."
     )
     return count

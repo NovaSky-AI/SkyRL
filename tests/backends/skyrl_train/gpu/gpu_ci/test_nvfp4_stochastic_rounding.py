@@ -1,6 +1,7 @@
 """GPU test for expert_nvfp4's stochastic rounding (``kernels.nvfp4_quant.stochastic``): weight draws are fixed by
 (seed, version, expert), activation draws by the CUDA generator; the round trip, the packed operand and the in-place
-write-back agree; and the rounding is unbiased where round-to-nearest is not.
+write-back agree; and the rounding is unbiased where round-to-nearest is not. Each test runs on the fused sm_100
+kernels (hardware ``cvt.rs``) and on the torch reference (``SKYRL_QAT_NVFP4_FUSED=0``).
 
 uv run --isolated --extra dev --extra fsdp pytest tests/backends/skyrl_train/gpu/gpu_ci/test_nvfp4_stochastic_rounding.py
 """
@@ -17,6 +18,7 @@ pytestmark = [
 
 pytest.importorskip("flashinfer")
 
+from skyrl.backends.skyrl_train.kernels.nvfp4_quant import fused_rt  # noqa: E402
 from skyrl.backends.skyrl_train.kernels.nvfp4_quant.fake_experts import (  # noqa: E402
     fake_quantize_expert_weights,
     pack_expert_weights,
@@ -29,12 +31,22 @@ from skyrl.backends.skyrl_train.kernels.nvfp4_quant.per_token import (  # noqa: 
     pack_per_token,
 )
 from skyrl.backends.skyrl_train.kernels.nvfp4_quant.stochastic import (  # noqa: E402
+    E2M1_GRID,
     WeightDraw,
+    decode_e2m1,
     weight_seed,
 )
 
 BLOCK_SCALES = ["absmax", "four_over_six"]
 DRAWS = 256
+
+
+@pytest.fixture(autouse=True, params=["fused", "reference"])
+def path(request, monkeypatch):
+    monkeypatch.setenv("SKYRL_QAT_NVFP4_FUSED", "1" if request.param == "fused" else "0")
+    if request.param == "fused" and not fused_rt.available():
+        pytest.skip("fused NVFP4 kernels unavailable")
+    return request.param
 
 
 def _experts(e=4, n=256, k=512, seed=0):
@@ -114,3 +126,39 @@ def test_activation_rounding_is_unbiased(four_over_six):
     mean = sum(fake_quantize_per_token(x, four_over_six=four_over_six, stochastic=True).float() for _ in range(DRAWS))
     mean /= DRAWS
     assert _bias(mean, x) < 0.25 * _bias(rn, x)
+
+
+def _scaled(w: torch.Tensor, packed) -> torch.Tensor:
+    """``w * gs / sf``: each weight in units of its block's E4M3 scale, on the pack's scales."""
+    e, n, k = w.shape
+    sf = packed.sf_linear.view(torch.float8_e4m3fn).float().repeat_interleave(16, -1)
+    gs = (1.0 / packed.alpha).view(e, 1, 1)
+    return torch.where(sf > 0, w.float() * gs / sf, torch.zeros_like(sf))
+
+
+@pytest.mark.parametrize("block_scale", BLOCK_SCALES)
+def test_weight_codes_are_grid_neighbours_on_rn_scales(block_scale):
+    """Every stochastic code is one of its scaled value's two E2M1 neighbours (a misrouted random-bit lane or element
+    order would not be), on the round-to-nearest scales, one E4M3 step larger only where those would clip."""
+    ws = _experts()
+    w = torch.stack(ws)
+    rn = pack_expert_weights(ws, block_scale, keep_linear=True)
+    sr = pack_expert_weights(ws, block_scale, keep_linear=True, draw=_draw(5))
+    bump = sr.sf_linear.int() - rn.sf_linear.int()
+    assert bump.min() >= 0 and bump.max() <= 1
+    vmax = _scaled(w, rn).abs().view(*w.shape[:-1], -1, 16).amax(-1)
+    clips = vmax > 6.0
+    # A block whose largest value lands exactly on 6 is common (its amax shares the expert amax's bf16 mantissa, so its
+    # RN scale is exact) and goes either way on an ulp of the scale arithmetic; every other block must agree.
+    decided = (vmax - 6.0).abs() > 1e-5
+    assert torch.equal((bump.bool() & decided), (clips & (rn.sf_linear > 0) & decided))
+    assert clips.any()
+    q = sr.q
+    codes = torch.stack([q & 0xF, q >> 4], -1).view(w.shape)
+    vals, x = decode_e2m1(codes), _scaled(w, sr)
+    grid = torch.tensor(E2M1_GRID, device=w.device)
+    lo = grid[(torch.bucketize(x.abs(), grid, right=True) - 1).clamp(0, 7)]
+    hi = grid[torch.bucketize(x.abs(), grid, right=True).clamp(max=7)]
+    near = lambda a, b: (a - b).abs() <= 1e-3 * b.clamp_min(1)  # noqa: E731 - scale rounding differs by an ulp
+    ok = (near(vals.abs(), lo) | near(vals.abs(), hi)) & ((vals == 0) | (torch.sign(vals) == torch.sign(x)))
+    assert ok.float().mean().item() > 0.9999
