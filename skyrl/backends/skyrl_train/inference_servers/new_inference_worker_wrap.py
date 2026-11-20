@@ -198,15 +198,6 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import
 
 apply_pp_kv_cache_projection_patch()
 
-# Expert NVFP4 with the 4/6 E4M3 bound 256 on activations: vLLM's GEMM1 per-token base scale is a module constant
-# (1/(448*6)); FlashInfer's GEMM2 side follows the env on its own. No-op unless FLASHINFER_NVFP4_4OVER6=1 and
-# FLASHINFER_NVFP4_4OVER6_E4M3_USE_256=1 (derived by weight_sync/nvfp4.py:nvfp4_runtime_env).
-from skyrl.backends.skyrl_train.patches.vllm.patch_nvfp4_per_token_e4m3_256 import (  # noqa: E402
-    apply_nvfp4_per_token_e4m3_256_patch,
-)
-
-apply_nvfp4_per_token_e4m3_256_patch()
-
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"
 

@@ -8,8 +8,8 @@ batches, so stacked layers span batches -> ``finalize_layerwise_reload``). After
 parameter and buffer and runs greedy decoding with logprobs. Both must match exactly, and the stacked pass must
 have taken the direct path on every NVFP4 layer.
 
-The NVFP4 bytes come from a deterministic stand-in quantizer (valid E2M1 / E4M3 bytes, no TE needed): the
-receiver is under test here, not TE; both paths get the same bytes.
+The NVFP4 bytes come from a deterministic stand-in quantizer (valid E2M1 / E4M3 bytes): the
+receiver is under test here, not the quantizer; both paths get the same bytes.
 
 Needs SM100 (NVFP4 TRT-LLM MoE). Run:
 
@@ -91,9 +91,7 @@ def _worker_sync(worker, mode, seed):
     nvfp4_stacked.quantize_nvfp4_matrix = _fake_quantize
     model = worker.model_runner.model
     device = worker.device
-    settings = nvfp4.Nvfp4WeightQuantSettings(
-        use_4over6=False, e4m3_max=448, err_mode="MAE", row_scaled_activation=True, backward_override=None
-    )
+    settings = nvfp4.Nvfp4WeightQuantSettings("absmax")
     if mode == "stacked":
         serializer = nvfp4_stacked.Nvfp4StackedExpertSerializer(settings, num_experts=NUM_EXPERTS)
     else:
@@ -155,14 +153,14 @@ def test_stacked_sync_matches_per_expert_bitwise(tmp_path, tp, ep):
     import cloudpickle
     from vllm import LLM
 
+    from skyrl.backends.skyrl_train.kernels.nvfp4_quant import flashinfer_nvfp4_env
     from skyrl.backends.skyrl_train.weight_sync.nvfp4 import (
         get_nvfp4_vllm_engine_overrides,
-        nvfp4_runtime_env,
     )
 
     # The worker function and its helpers travel by value: the workers cannot import this test module.
     cloudpickle.register_pickle_by_value(sys.modules[__name__])
-    os.environ.update(nvfp4_runtime_env(dict(os.environ)))
+    os.environ.update(flashinfer_nvfp4_env(True))  # the engines' activation env (prepare_runtime_environment)
     os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"  # collective_rpc with a callable
     model_dir = str(tmp_path / "tiny_qwen3_moe")
     _write_tiny_qwen3_moe(model_dir)

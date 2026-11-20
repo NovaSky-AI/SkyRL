@@ -289,6 +289,41 @@ class MegatronWorker:
             )
         return fq.bf16_base_path or None
 
+    def _maybe_setup_expert_nvfp4(self) -> None:
+        """``expert_nvfp4``: round this worker's routed-expert GEMMs to the rollouts' NVFP4 grid
+        (``quantization/expert_nvfp4.py``).
+
+        Reads the *policy's* ``megatron_config`` (the ref mirrors it, keeping the KL anchor in the same weight
+        space). Runs after model construction, so the registered parameters are the final (DDP-wrapped) ones.
+        """
+        mc = self.cfg.policy.megatron_config
+        self._expert_nvfp4_cache_flush_pending = mc.expert_nvfp4
+        if not mc.expert_nvfp4:
+            return
+        if not self.cfg.bf16:
+            raise ValueError("expert_nvfp4 needs bf16=True: TE's grouped GEMM must receive the bf16 parameters")
+        from skyrl.backends.skyrl_train.distributed.megatron.quantization_utils import (
+            resolve_text_config,
+        )
+        from skyrl.backends.skyrl_train.weight_sync.nvfp4 import nvfp4_bf16_layers
+        from skyrl.backends.skyrl_train.workers.megatron.quantization.expert_nvfp4 import (
+            block_scale_name,
+            install_expert_nvfp4,
+        )
+
+        hf = resolve_text_config(self.strategy.hf_config)
+        weights, inputs = mc.expert_nvfp4_weight_rounding, mc.expert_nvfp4_activation_rounding
+        install_expert_nvfp4(
+            self.actor_module,
+            mc.expert_nvfp4_mode,
+            block_scale_name(weights.four_over_six),
+            block_scale_name(inputs.four_over_six),
+            nvfp4_bf16_layers(hf.num_hidden_layers, mc),
+            weight_stochastic=weights.stochastic_rounding,
+            activation_stochastic=inputs.stochastic_rounding,
+            seed=self.cfg.seed,
+        )
+
     def init_configs(
         self,
         model_path,
@@ -456,13 +491,6 @@ class MegatronWorker:
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
             setattr(provider, k, v)
-
-        if megatron_config.expert_nvfp4:
-            from skyrl.backends.skyrl_train.workers.megatron.quantization.expert_nvfp4 import (
-                configure_expert_nvfp4,
-            )
-
-            configure_expert_nvfp4(provider)
 
         # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
         # the residual it would re-materialize is the n-stream tensor consumed by the mHC
@@ -1191,6 +1219,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
             experts_shared_outer_loras=self.cfg.policy.megatron_config.lora_config.experts_shared_outer_loras,
             bf16=self.cfg.bf16,
         )
+        self._maybe_setup_expert_nvfp4()
 
         if self._local_rank == 0 and not os.path.exists(
             model_path
@@ -1558,6 +1587,13 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
 
         if self.empty_cuda_cache_after_backward:
             torch.cuda.empty_cache()
+        elif self._expert_nvfp4_cache_flush_pending:
+            # Once, before the first optimizer step: NCCL creates the optimizer step's communicators lazily and
+            # cudaMallocs outside PyTorch's pool. expert_nvfp4's short-lived NVFP4 buffers leave that pool more
+            # fragmented (GLM-5.3 512k: +13 GiB reserved at step 1, same allocated peak as bf16), which otherwise OOMs
+            # NCCL there. Later steps reuse the cached blocks, so one flush is enough.
+            self._expert_nvfp4_cache_flush_pending = False
+            torch.cuda.empty_cache()
 
         # Aggregate metrics across micro-batches
         loss_fn_output_batches = []
@@ -1629,6 +1665,22 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         seconds, self._train_compute_seconds = self._train_compute_seconds, 0.0
         return seconds
 
+    def _sync_expert_nvfp4_weight_version(self) -> None:
+        """``expert_nvfp4`` stochastic weight rounding draws per optimizer step: its version is the LR scheduler's
+        step count, which the checkpoint restores, so a run resumed at a step draws as a continuous one does."""
+        if not self.cfg.policy.megatron_config.expert_nvfp4 or self.scheduler is None:
+            return
+        from skyrl.backends.skyrl_train.workers.megatron.quantization.expert_nvfp4 import (
+            set_weight_version,
+        )
+
+        set_weight_version(self.scheduler.num_steps)
+
+    def load_checkpoint(self, ckpt_dir: str, load_optimizer_states: bool = True, load_lr_scheduler_states: bool = True):
+        states = super().load_checkpoint(ckpt_dir, load_optimizer_states, load_lr_scheduler_states)
+        self._sync_expert_nvfp4_weight_version()
+        return states
+
     @_counts_train_compute
     def optim_step(self) -> Optional[float]:
         """
@@ -1656,6 +1708,8 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
         self.model.run_pending_grad_sync()
 
         grad_norm = self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler, name="actor")
+        # New weights: stochastic weight rounding draws afresh.
+        self._sync_expert_nvfp4_weight_version()
 
         # Clear the DDP grad buffers for the next window. `optimizer.zero_grad()` inside
         # `optimizer_step` only drops `param.grad` / the fp32 main-param grads -- the
@@ -1796,7 +1850,7 @@ class MegatronPolicyWorkerBase(MegatronWorker, PolicyWorkerBase):
                 min_packed_bytes = max_stacked_wire_bytes(stacked_num_experts, hf.hidden_size, moe_inter)
             return SerializedNvfp4WeightSource(
                 source,
-                Nvfp4WeightQuantSettings.from_te_recipe(),
+                Nvfp4WeightQuantSettings(megatron_config.expert_nvfp4_block_scale),
                 bf16_layers=nvfp4_bf16_layers(self.strategy.hf_config.num_hidden_layers, megatron_config),
                 stacked_num_experts=stacked_num_experts,
                 min_packed_buffer_bytes=min_packed_bytes,
@@ -2324,6 +2378,7 @@ class MegatronRefWorkerBase(MegatronWorker, RefWorkerBase):
             ddp_config=None,
             bf16=self.cfg.bf16,
         )
+        self._maybe_setup_expert_nvfp4()
 
         # download model weights from huggingface (need to be done for ref worker as well, else errors when colocate_all=False)
         if self._local_rank == 0 and not os.path.exists(
