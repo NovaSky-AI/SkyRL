@@ -33,6 +33,7 @@ from urllib.request import url2pathname
 import litellm
 from harbor.agents.factory import AgentFactory
 from harbor.agents.installed.base import BaseInstalledAgent
+from harbor.agents.installed.codex import Codex
 from harbor.models.agent.name import AgentName
 from harbor.models.trial.config import TrialConfig
 from harbor.trial.trial import Trial
@@ -145,6 +146,8 @@ class HarborSkycapGenerator(GeneratorInterface):
 
         self._template = deepcopy(harbor_cfg)
         agent = self._template.setdefault("agent", {})
+        if agent_class(agent) is Codex:
+            raise ValueError("harbor_trial_config.agent.name=codex can't sample through skycap: use SkycapCodex.")
         self._in_sandbox = runs_in_sandbox(agent)
         self._warned_unexposed = False
         if self._in_sandbox:
@@ -217,6 +220,8 @@ class HarborSkycapGenerator(GeneratorInterface):
         output = compose(
             outcomes,
             overlong_filtering=self.generator_cfg.apply_overlong_filtering,
+            mask_groups=phase != "eval",
+            timeout_mask_instance_threshold=self.generator_cfg.timeout_mask_instance_threshold,
             top_k=self.generator_cfg.sampling_params.top_k,
             sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
             routed_experts=self._routed_experts,
@@ -289,13 +294,15 @@ class HarborSkycapGenerator(GeneratorInterface):
             # The trajectory opens only once the trial may run: one queued behind the rate limiter for longer
             # than skycap.ttl would otherwise be abandoned as idle before its agent's first call.
             async with self._rate_limiter, self.pool.trajectory(meta, paths=self.train_paths) as trajectory:
-                config = self._trial_config(prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key)
+                config = self._trial_config(
+                    prompt, self._agent_url(trajectory), cache_salt, trajectory.api_key, phase=phase, step=step
+                )
                 results = await (await Trial.create(TrialConfig.model_validate(config))).run()
 
                 attempts.record(results)
                 exception = results.exception_info.exception_type if results.exception_info else None
                 if exception == "AgentTimeoutError":
-                    # Masked, not retried, as the sibling does.
+                    # Not retried, as the sibling does; compose masks it, alone or with its instance.
                     reward, stop_reason = 0.0, "agent_timeout"
                 elif await asyncio.to_thread(_ran_out_of_context, results):
                     # Trains with reward 0, as the sibling does.
@@ -311,6 +318,14 @@ class HarborSkycapGenerator(GeneratorInterface):
             if self.records is not None and trajectory is not None:
                 self.records.add(phase, trajectory_id, attempt, trajectory)
 
+        if stop_reason == "agent_timeout":
+            # Masked whatever skycap captured, so a capture problem below must not turn it into a retried error.
+            return TrialOutcome(
+                trajectory_id=trajectory_id,
+                samples=finished.samples,
+                stop_reason=stop_reason,
+                unbridged_calls=finished.unbridged_calls,
+            )
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.
             logger.warning(f"Trajectory {trajectory_id}: skycap status {finished.status!r}, not training on it")
@@ -358,10 +373,19 @@ class HarborSkycapGenerator(GeneratorInterface):
         base_url: str,
         cache_salt: Optional[str],
         api_key: Optional[str] = None,
+        *,
+        phase: str = "train",
+        step: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """The trial's Harbor config. ``api_key`` is the trajectory's own key (``skycap.require_api_key``)."""
+        """The trial's Harbor config. ``api_key`` is the trajectory's own key (``skycap.require_api_key``).
+
+        The trial's directory goes under ``<trials_dir>/<phase>/global_step_<step>/``, so a step's eval trials can
+        be read apart from its training trials.
+        """
         config = deepcopy(self._template)
         config["task"] = {"path": prompt}
+        if config.get("trials_dir"):
+            config["trials_dir"] = os.path.join(str(config["trials_dir"]), trials_subdir(phase, step))
         key = api_key or PLACEHOLDER_API_KEY
         if self._in_sandbox:
             # Installed agents read their endpoint and key from the sandbox's environment, not from agent kwargs.
@@ -387,16 +411,25 @@ class HarborSkycapGenerator(GeneratorInterface):
         return config
 
 
-def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
-    """Whether Harbor's agent ``agent`` (a ``TrialConfig.agent``) is installed in the sandbox and calls the model
-    from there, as mini-swe-agent and Claude Code do, rather than from this process, as Terminus-2 does."""
+def trials_subdir(phase: str, step: Optional[int]) -> str:
+    """Where under ``trials_dir`` a trial of ``phase`` at ``step`` goes; eval-only runs have no step."""
+    return os.path.join(phase, f"global_step_{step}") if step is not None else phase
+
+
+def agent_class(agent: Dict[str, Any]) -> Optional[type]:
+    """The class Harbor runs for ``agent`` (a ``TrialConfig.agent``), or None when it names none (Harbor's default)."""
     # As Harbor picks the agent (AgentFactory.create_agent_from_config): a known name wins over an import path.
     name, import_path = agent.get("name"), agent.get("import_path")
     if name is not None and name in AgentName.values():
-        cls = AgentFactory.get_agent_class(AgentName(name))
-    elif import_path:
+        return AgentFactory.get_agent_class(AgentName(name))
+    if import_path:
         module, _, attribute = import_path.partition(":")
-        cls = getattr(importlib.import_module(module), attribute)
-    else:
-        return False
+        return getattr(importlib.import_module(module), attribute)
+    return None
+
+
+def runs_in_sandbox(agent: Dict[str, Any]) -> bool:
+    """Whether Harbor's agent ``agent`` (a ``TrialConfig.agent``) is installed in the sandbox and calls the model
+    from there, as mini-swe-agent and Claude Code do, rather than from this process, as Terminus-2 does."""
+    cls = agent_class(agent)
     return isinstance(cls, type) and issubclass(cls, BaseInstalledAgent)

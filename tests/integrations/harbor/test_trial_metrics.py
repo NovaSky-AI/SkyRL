@@ -1,5 +1,6 @@
 """Harbor's per-attempt trial metrics, and the plain Harbor generator logging them without skycap."""
 
+import json
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -100,6 +101,71 @@ def test_a_healthy_step_charts_zero_failures() -> None:
             assert metrics[f"generate/harbor/{phase}_time_{stat}"] == pytest.approx(seconds)
 
 
+def agent_step(*calls: tuple[str, str]) -> dict:
+    """An ATIF agent step with one ``(function_name, output)`` tool call per pair, as Harbor writes Codex's."""
+    return {
+        "source": "agent",
+        "tool_calls": [{"tool_call_id": f"call_{i}", "function_name": name} for i, (name, _) in enumerate(calls)],
+        "observation": {
+            "results": [{"source_call_id": f"call_{i}", "content": out} for i, (_, out) in enumerate(calls)]
+        },
+    }
+
+
+REJECTED = ("apply_patch", "apply_patch verification failed: Failed to read file to update /app/solution.py")
+APPLIED = ("apply_patch", "Exit code: 0\nOutput:\nSuccess. Updated the following files:\nA /app/solution.py\n")
+SHELL = ("exec_command", "Exit code: 0\nOutput:\n5\n")
+CODEX = [{"source": "user", "message": "task"}, agent_step(REJECTED), agent_step(APPLIED, SHELL), agent_step()]
+TERMINUS = [{"source": "user", "message": "task"}, agent_step(SHELL)]
+
+
+def attempt_at(tmp_path, name: str, trajectory: Any) -> TrialAttempts:
+    """One recorded attempt whose trial directory holds ``trajectory`` (a step list, raw text, or None for no file)."""
+    trial_dir = tmp_path / name
+    (trial_dir / "agent").mkdir(parents=True)
+    if trajectory is not None:
+        text = trajectory if isinstance(trajectory, str) else json.dumps({"steps": trajectory})
+        (trial_dir / "agent" / "trajectory.json").write_text(text)
+    trial = TrialAttempts()
+    trial.start()
+    trial.record(SimpleNamespace(**vars(completed()), trial_uri=trial_dir.as_uri()))
+    return trial
+
+
+@pytest.mark.parametrize(
+    "trajectories, expected",
+    [
+        (
+            # A patch rejected, then applied with a shell call, then a turn without a call; an attempt that never
+            # called a tool; one with no trajectory and one whose trajectory doesn't parse, both left out.
+            [CODEX, [agent_step()], None, "{not json"],
+            {
+                "avg_agent_steps": 2.0,
+                "avg_tool_calls": 1.5,
+                "frac_attempts_without_tool_calls": 0.5,
+                "avg_patches_applied": 0.5,
+                "avg_patches_rejected": 0.5,
+                "patch_success_rate": 0.5,
+            },
+        ),
+        # No apply_patch call (Terminus-2): no patch counts at all.
+        ([TERMINUS], {"avg_agent_steps": 1.0, "avg_tool_calls": 1.0, "frac_attempts_without_tool_calls": 0.0}),
+        # Nothing readable: no tool metrics.
+        ([None], {}),
+    ],
+    ids=["codex", "no apply_patch", "no trajectory"],
+)
+def test_tool_use_is_counted_from_each_attempts_agent_trajectory(tmp_path, trajectories, expected) -> None:
+    trials = [attempt_at(tmp_path, f"trial_{i}", t) for i, t in enumerate(trajectories)]
+    metrics = trial_metrics(trials)
+    tool_keys = {
+        k for k in metrics if k.startswith(("generate/harbor/avg_", "generate/harbor/frac_", "generate/harbor/patch_"))
+    }
+    assert tool_keys == {f"generate/harbor/{k}" for k in expected}
+    for key, value in expected.items():
+        assert metrics[f"generate/harbor/{key}"] == pytest.approx(value)
+
+
 class FakeTrial:
     """Replaces Harbor's ``Trial``: each task path's attempts return its results in turn."""
 
@@ -134,6 +200,7 @@ async def test_the_plain_harbor_generator_logs_a_start_timeout_rescued_by_a_retr
             "step_wise_trajectories": True,
             "merge_stepwise_output": True,
             "apply_overlong_filtering": False,
+            "timeout_mask_instance_threshold": 2,
             "rate_limit": None,
         }
     )

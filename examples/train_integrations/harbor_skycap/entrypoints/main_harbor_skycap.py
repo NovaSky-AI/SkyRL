@@ -75,6 +75,10 @@ class SkycapConfig:
     """CPUs reserved per server, for rendering and HTTP."""
     placement_strategy: str = "SPREAD"
     """Ray placement-group strategy for the servers: SPREAD (default, for availability), STRICT_SPREAD, PACK."""
+    tokenizer: Optional[str] = None
+    """The Hugging Face model name the servers render prompts with. Defaults to ``trainer.policy.model.path``.
+    Set it when that is a local directory (e.g. a merged export to resume from): ``renderers`` picks the
+    renderer by exact model name, and a path falls back to its default renderer."""
     record_dir: Optional[str] = None
     """Where ended trajectories are written. Defaults to ``{trainer.export_path}/skycap``; each server writes
     on its own node, so point it at a shared filesystem to have one directory for the run."""
@@ -97,7 +101,9 @@ class SkycapConfig:
     """Answer with the completion's own text as ``content``, a thinking model's reasoning inline, as
     SkyRL's vLLM does (it runs no reasoning parser). Terminus-2 replays ``content``, and LiteLLM's
     ``hosted_vllm/`` provider strips ``reasoning_content`` from what it sends back; with parsed
-    replies every replayed turn would lose its reasoning, edit history and fork the graph."""
+    replies every replayed turn would lose its reasoning, edit history and fork the graph. Chat Completions
+    calls only: Responses calls (Codex's) always get parsed replies, since that API carries reasoning as items
+    of its own."""
     train_paths: str = "all"
     """Which captured paths train (skycap's path rule). ``all``: every root-to-leaf path of a rollout's graph,
     each sampled message trained once, so a reply the harness discarded and asked again for trains with the
@@ -140,7 +146,7 @@ def start_skycap(cfg: Any, engine_url: str) -> SkycapServers:
     load_rule(train_paths)
     settings = {
         "upstream_url": engine_url,
-        "tokenizer": cfg.trainer.policy.model.path,
+        "tokenizer": cfg.skycap.tokenizer or cfg.trainer.policy.model.path,
         "renderer_pool_size": cfg.skycap.renderer_pool_size,
         "model": ie.served_model_name,
         "max_model_len": engine_init.get("max_model_len") or cfg.trainer.algorithm.max_seq_len,
@@ -180,6 +186,32 @@ def _require_api_key(cfg: Any) -> bool:
     """``skycap.require_api_key``, on by default whenever the servers are exposed."""
     required = cfg.skycap.require_api_key
     return cfg.skycap.exposure.type != "none" if required is None else bool(required)
+
+
+#: What skycap's servers apply to every call (``start_skycap``'s ``sampling_overrides``).
+SKYCAP_SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "min_p")
+
+
+def _check_eval_sampling(cfg: Any) -> None:
+    """Raise when eval is on and ``generator.eval_sampling_params`` differ from what skycap samples with.
+
+    skycap's servers apply ``generator.sampling_params`` to every call, eval calls included, so the trainer's
+    logprobs match what was sampled.
+    """
+    if cfg.trainer.eval_interval <= 0 or not cfg.data.val_data:
+        return
+    train, evaluate = cfg.generator.sampling_params, cfg.generator.eval_sampling_params
+    different = [
+        f"{name} {getattr(evaluate, name)} vs {getattr(train, name)}"
+        for name in SKYCAP_SAMPLING_FIELDS
+        if getattr(evaluate, name) != getattr(train, name)
+    ]
+    if different:
+        raise ValueError(
+            "skycap samples every call with generator.sampling_params, eval calls included: set "
+            f"generator.eval_sampling_params to the same values ({', '.join(different)}), or turn eval off "
+            "with trainer.eval_interval=-1."
+        )
 
 
 def _exposure(cfg: Any) -> Optional[str]:
@@ -246,6 +278,7 @@ def main() -> None:
     cfg.harbor_trial_config = _deep_merge(defaults, cfg.harbor_trial_config)
     validate_cfg(cfg)
     _exposure(cfg)
+    _check_eval_sampling(cfg)
     if cfg.trainer.algorithm.max_seq_len is None:
         raise ValueError("trainer.algorithm.max_seq_len must be set for Harbor training")
     initialize_ray(cfg)

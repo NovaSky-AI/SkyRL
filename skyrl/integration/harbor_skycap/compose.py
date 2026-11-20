@@ -16,9 +16,13 @@ trial, from the last row, and applies it to all of the trial's rows. Each row is
 trained token: everything before is prompt, and the loss mask says which of the
 rest the model sampled.
 
-The masking policy is the sibling's: an instance with any rollout that timed
-out or failed is masked whole, and a trial that hit the context limit trains
-with its reward unless overlong filtering is on.
+The masking policy is the sibling's, from ``harbor/masking.py``: an instance
+with a failed rollout is masked whole, and so is one with at least
+``timeout_mask_instance_threshold`` timed-out rollouts; fewer timeouts mask only
+themselves. A trial that hit the context limit trains with its reward unless
+overlong filtering is on. In eval (``mask_groups=False``) there is no group
+baseline to protect, so a trial that timed out or failed scores 0 on its own and
+the other trials of its instance keep their rewards.
 
 With ``include_images``, each row carries its path's ``pixel_values`` and ``image_grid_thw``, its images in
 placeholder order. A row without images (a masked rollout's placeholder) carries zero-row tensors, as the
@@ -48,10 +52,13 @@ from skyrl.backends.skyrl_train.utils.sample_support import (
     SAMPLE_SUPPORT_LOGPROBS_DTYPE,
     CompactSampleSupport,
 )
+from skyrl.integration.harbor.masking import (
+    TIMEOUT_MASK_INSTANCE_THRESHOLD,
+    mask_failed_trials,
+)
 from skyrl.train.generators.base import GeneratorOutput, TrajectoryID
 from skyrl.train.generators.utils import get_rollout_metrics
 
-MASKED_STOP_REASONS = frozenset({"agent_timeout", "error"})
 #: The processor output the trainer takes for an image: Qwen-VL's and Qwen3.5's.
 VISION_KEYS = frozenset({"pixel_values", "image_grid_thw"})
 
@@ -126,6 +133,8 @@ def compose(
     outcomes: List[TrialOutcome],
     *,
     overlong_filtering: bool,
+    mask_groups: bool = True,
+    timeout_mask_instance_threshold: int = TIMEOUT_MASK_INSTANCE_THRESHOLD,
     top_k: int = -1,
     sample_support: bool = False,
     routed_experts: bool = False,
@@ -133,17 +142,31 @@ def compose(
 ) -> GeneratorOutput:
     """``top_k`` bounds sampler-support rows, as SkyRL's own capture does.
 
+    ``mask_groups`` applies ``harbor/masking.py``'s rule, so GRPO never computes a baseline from a group with
+    holes in it; eval turns it off and scores each failed trial 0 alone.
+    ``timeout_mask_instance_threshold`` is ``generator.timeout_mask_instance_threshold``.
     ``sample_support`` says the engine returns sampler support, so a batch with nothing to train
     still carries (empty) support rows, as every other batch will. ``routed_experts`` says the same
     of routes (R3); every trained row must then have them. ``include_images`` adds each row's vision features.
     """
-    masked_instances = {o.trajectory_id.instance_id for o in outcomes if o.stop_reason in MASKED_STOP_REASONS}
+    trials = [(o.trajectory_id.instance_id, o.stop_reason) for o in outcomes]
+    if mask_groups:
+        masked, masking_counts = mask_failed_trials(trials, timeout_mask_instance_threshold)
+    else:
+        masked = [stop_reason in ("agent_timeout", "error") for _, stop_reason in trials]
+        masking_counts = {
+            "num_timeout_trajectories": sum(stop_reason == "agent_timeout" for _, stop_reason in trials),
+            "num_error_trajectories": sum(stop_reason == "error" for _, stop_reason in trials),
+            "num_masked_instances": 0,
+            "num_instance_with_timeouts_unmasked": 0,
+            "num_traj_masked_individually": sum(masked),
+        }
 
     groups: List[List[_Row]] = []
     trained: List[TrialOutcome] = []
-    for outcome in outcomes:
+    for outcome, is_masked in zip(outcomes, masked):
         rows: List[_Row] = []
-        if outcome.trajectory_id.instance_id not in masked_instances:
+        if not is_masked:
             rows = [row for row in map(split, outcome.samples) if row is not None]
             if rows:
                 trained.append(outcome)
@@ -175,15 +198,14 @@ def compose(
         )
     }
     times: List[Optional[float]] = []
-    for outcome, rows in zip(outcomes, groups):
-        masked = outcome.trajectory_id.instance_id in masked_instances
+    for outcome, rows, is_masked in zip(outcomes, groups, masked):
         for position, row in enumerate(rows):
             last = position == len(rows) - 1
             out["prompt_token_ids"].append(row.prompt)
             out["response_ids"].append(row.response)
-            out["rewards"].append(0.0 if masked else outcome.reward)
+            out["rewards"].append(0.0 if is_masked else outcome.reward)
             out["loss_masks"].append(row.loss_mask)
-            out["stop_reasons"].append("error" if masked else outcome.stop_reason)
+            out["stop_reasons"].append("error" if is_masked and mask_groups else outcome.stop_reason)
             out["rollout_logprobs"].append(row.logprobs)
             out["trajectory_ids"].append(outcome.trajectory_id)
             out["is_last_step"].append(last)
@@ -196,7 +218,7 @@ def compose(
         trajectory_generation_times=None if any(t is None for t in times) else times,
         rollout_expert_indices=routes,
         rollout_sample_support=support,
-        rollout_metrics=_metrics(outcomes, trained, masked_instances),
+        rollout_metrics=_metrics(outcomes, trained, masking_counts),
     )
 
 
@@ -278,7 +300,9 @@ def _rollout_routes(groups: List[List[_Row]], real: List[_Row]) -> Optional[List
     return [dummy if row.routes is None else row.routes for rows in groups for row in rows]
 
 
-def _metrics(outcomes: List[TrialOutcome], trained: List[TrialOutcome], masked_instances: set) -> Dict[str, Any]:
+def _metrics(
+    outcomes: List[TrialOutcome], trained: List[TrialOutcome], masking_counts: Dict[str, int]
+) -> Dict[str, Any]:
     metrics: Dict[str, Any] = {}
     if trained:
         # One entry per rollout: its longest path, which holds the most of what it generated.
@@ -295,9 +319,7 @@ def _metrics(outcomes: List[TrialOutcome], trained: List[TrialOutcome], masked_i
         metrics["generate/skycap/trajectories_context_length_exceeded"] = sum(
             o.stop_reason == "context_length" for o in trained
         )
-    metrics["generate/skycap/num_timeout_trajectories"] = sum(o.stop_reason == "agent_timeout" for o in outcomes)
-    metrics["generate/skycap/num_error_trajectories"] = sum(o.stop_reason == "error" for o in outcomes)
-    metrics["generate/skycap/num_masked_instances"] = len(masked_instances)
+    metrics.update({f"generate/skycap/{name}": count for name, count in masking_counts.items()})
     # Which trajectories to open in the viewer: each forks at its first unbridged call.
     metrics["generate/skycap/num_unbridged_trajectories"] = sum(o.unbridged_calls > 0 for o in outcomes)
     metrics["generate/skycap/num_unbridged_calls"] = sum(o.unbridged_calls for o in outcomes)

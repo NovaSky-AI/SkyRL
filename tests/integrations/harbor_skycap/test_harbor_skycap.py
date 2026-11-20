@@ -29,6 +29,9 @@ from skyrl.backends.skyrl_train.inference_servers.generate_wire import (
     pack_sample_support,  # noqa: E402
     pack_sample_support_logprobs,  # noqa: E402
 )
+from skyrl.integration.harbor.masking import (  # noqa: E402
+    TIMEOUT_MASK_INSTANCE_THRESHOLD,
+)
 from skyrl.integration.harbor_skycap import harbor_generator  # noqa: E402
 from skyrl.integration.harbor_skycap.compose import (  # noqa: E402
     TrialOutcome,
@@ -89,6 +92,7 @@ def generator_cfg(**overrides):
         merge_stepwise_output=False,
         use_cache_salt=True,
         apply_overlong_filtering=False,
+        timeout_mask_instance_threshold=TIMEOUT_MASK_INSTANCE_THRESHOLD,
         # The default Harbor config runs sandboxes on Daytona, which needs a cap.
         rate_limit=RateLimiterConfig(enabled=True, max_concurrency=64),
         inference_engine=SimpleNamespace(served_model_name="policy"),
@@ -395,16 +399,23 @@ async def test_the_harness_is_pointed_at_skycap_not_the_engine(skycap, trials, g
     assert kwargs["llm_kwargs"]["api_key"] and kwargs["llm_kwargs"]["extra_body"]["cache_salt"]
 
 
+@pytest.mark.parametrize("threshold, masked_instances, masked_alone", [(2, 1, 0), (3, 0, 2)])
 @pytest.mark.asyncio
-async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> None:
-    out = await generator().generate(batch("timeout", "linear", repetitions=2), disable_tqdm=True)
+async def test_timeouts_mask_their_instance_from_the_threshold_on(
+    skycap, trials, generator, threshold, masked_instances, masked_alone
+) -> None:
+    out = await generator(timeout_mask_instance_threshold=threshold).generate(
+        batch("timeout", "linear", repetitions=2), disable_tqdm=True
+    )
     # 4 prompts: two instances ("timeout", "linear"), two repetitions each.
     validate_generator_output(4, out, step_wise=True)
 
+    # Both of "timeout"'s trials time out: that masks the instance at the threshold, each trial alone below it.
     timed_out = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "timeout"]
     assert all(out["loss_masks"][i] == [0] and out["rewards"][i] == 0.0 for i in timed_out)
     metrics = out["rollout_metrics"]
-    assert metrics["generate/skycap/num_masked_instances"] == 1
+    assert metrics["generate/skycap/num_masked_instances"] == masked_instances
+    assert metrics["generate/skycap/num_traj_masked_individually"] == masked_alone
     # A timed-out agent isn't retried; its attempts count as failed, and its verifier never ran.
     assert metrics["generate/harbor/num_attempts"] == 4
     assert metrics["generate/harbor/num_retried_attempts"] == 0
@@ -414,6 +425,96 @@ async def test_a_timeout_masks_the_whole_instance(skycap, trials, generator) -> 
     assert metrics["generate/harbor/verifier_time_mean"] == pytest.approx(VERIFY)
     # The masked rows still carry support, so the batch collates.
     assert len(out["rollout_sample_support"]) == len(out["response_ids"])
+
+
+def _outcome(instance: str, repetition: int, reward: float = 0.0, stop_reason: str = "complete") -> TrialOutcome:
+    sample = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[1, 2, 3], loss_mask=[0, 1, 1])
+    return TrialOutcome(
+        trajectory_id=TrajectoryID(instance, repetition),
+        samples=[] if stop_reason == "error" else [sample],
+        reward=reward,
+        stop_reason=stop_reason,
+    )
+
+
+@pytest.mark.parametrize(
+    "mask_groups, rewards, stop_reasons",
+    [
+        # One timeout in instance a masks only itself (timeout_mask_instance_threshold 2); b's error masks b.
+        (
+            True,
+            [1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            ["complete", "complete", "error", "complete", "error", "error"],
+        ),
+        (
+            False,
+            [1.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            ["complete", "complete", "agent_timeout", "complete", "error", "complete"],
+        ),
+    ],
+    ids=["training-masks-the-group", "eval-scores-each-trial"],
+)
+def test_a_failed_trial_masks_its_group_in_training_and_only_itself_in_eval(mask_groups, rewards, stop_reasons) -> None:
+    outcomes = [
+        _outcome("a", 0, 1.0),
+        _outcome("a", 1, 1.0),
+        _outcome("a", 2, stop_reason="agent_timeout"),
+        _outcome("a", 3),
+        _outcome("b", 0, stop_reason="error"),
+        _outcome("b", 1, 1.0),
+    ]
+
+    out = compose(outcomes, overlong_filtering=False, mask_groups=mask_groups)
+    validate_generator_output(6, out, step_wise=True)
+    assert out["rewards"] == rewards
+    assert out["stop_reasons"] == stop_reasons
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase, timeout_stop_reason", [("train", "error"), ("eval", "agent_timeout")])
+async def test_the_phase_picks_the_trials_directory_and_whether_groups_are_masked(
+    skycap, trials, generator, phase, timeout_stop_reason
+) -> None:
+    inputs = batch("timeout", "linear")
+    inputs["batch_metadata"] = SimpleNamespace(global_step=3, training_phase=phase)
+
+    out = await generator().generate(inputs, disable_tqdm=True)
+    assert all(str(config["trials_dir"]).endswith(f"trials/{phase}/global_step_3") for config in trials.configs)
+    timed_out = [i for i, t in enumerate(out["trajectory_ids"]) if t.instance_id == "timeout"]
+    assert [out["stop_reasons"][i] for i in timed_out] == [timeout_stop_reason]
+
+
+@pytest.mark.parametrize(
+    "overrides, error",
+    [
+        ([], r"\(temperature 0.0 vs 1.0\)"),
+        (["trainer.eval_interval=-1"], None),
+        (["generator.eval_sampling_params.temperature=1.0"], None),
+        (["generator.eval_sampling_params.temperature=1.0", "generator.eval_sampling_params.top_p=0.9"], "top_p 0.9"),
+    ],
+    ids=["defaults", "eval-off", "matching", "top-p-differs"],
+)
+def test_eval_must_sample_with_the_settings_skycap_applies(overrides, error) -> None:
+    from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
+
+    cfg = main_harbor_skycap.HarborSkycapConfig.from_cli_overrides(overrides)
+    if error is None:
+        main_harbor_skycap._check_eval_sampling(cfg)
+    else:
+        with pytest.raises(ValueError, match=error):
+            main_harbor_skycap._check_eval_sampling(cfg)
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_before_the_first_model_call_is_still_a_timeout(skycap, trials, generator) -> None:
+    out = await generator().generate(batch("stuck", "linear"), disable_tqdm=True)
+
+    # Not retried, and masked as a lone timeout rather than as an error that masks its instance.
+    metrics = out["rollout_metrics"]
+    assert metrics["generate/harbor/num_retried_attempts"] == 0
+    assert metrics["generate/skycap/num_timeout_trajectories"] == 1
+    assert metrics["generate/skycap/num_traj_masked_individually"] == 1
+    assert metrics["generate/skycap/num_masked_instances"] == 0
 
 
 @pytest.mark.asyncio
@@ -592,6 +693,24 @@ def test_the_servers_are_started_with_a_custom_rule_and_without_a_built_in_one(m
     assert len(started) == 2
 
 
+@pytest.mark.parametrize(
+    "tokenizer, rendered_with",
+    [(None, "/exports/step-16"), ("Qwen/Qwen3-8B", "Qwen/Qwen3-8B")],
+    ids=["the policy path by default", "skycap.tokenizer when set"],
+)
+def test_the_servers_render_with_skycap_tokenizer_over_the_policy_path(monkeypatch, tokenizer, rendered_with) -> None:
+    from examples.train_integrations.harbor_skycap.entrypoints import main_harbor_skycap
+
+    started = []
+    monkeypatch.setattr(main_harbor_skycap, "start_servers", lambda settings, **_: started.append(settings))
+    cfg = main_harbor_skycap.HarborSkycapConfig()
+    cfg.trainer.algorithm.max_seq_len = 1024
+    cfg.trainer.policy.model.path = "/exports/step-16"
+    cfg.skycap.tokenizer = tokenizer
+    main_harbor_skycap.start_skycap(cfg, "http://router")
+    assert [settings["tokenizer"] for settings in started] == [rendered_with]
+
+
 def test_the_engine_rejects_support_that_does_not_cover_the_completion() -> None:
     support = pack_sample_support(csr(np.zeros((1, TOP_K), dtype=np.int32)))
     body = {
@@ -697,6 +816,17 @@ def test_overlong_filtering_masks_a_context_length_trial_but_keeps_it() -> None:
 
     assert compose([outcome], overlong_filtering=True)["loss_masks"] == [[0, 0]]
     assert compose([outcome], overlong_filtering=False)["loss_masks"] == [[1, 1]]
+
+
+def test_a_lone_timeout_is_masked_by_itself_and_its_sibling_trains() -> None:
+    sample = Sample(leaf=1, path=[0, 1], messages=[], targets=[1], input_ids=[1, 2, 3], loss_mask=[0, 1, 1])
+    passed = TrialOutcome(trajectory_id=TrajectoryID("a", 0), samples=[sample], reward=1.0)
+    timed_out = TrialOutcome(trajectory_id=TrajectoryID("a", 1), samples=[sample], stop_reason="agent_timeout")
+
+    out = compose([passed, timed_out], overlong_filtering=False)
+
+    assert out["rewards"] == [1.0, 0.0] and out["loss_masks"] == [[1, 1], [0]]
+    assert out["stop_reasons"] == ["complete", "error"]
 
 
 @pytest.mark.asyncio

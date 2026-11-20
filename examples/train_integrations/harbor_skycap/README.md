@@ -30,6 +30,25 @@ Harbor's `TrialConfig`, with defaults from `../harbor/harbor_trial_config/defaul
 the idle TTL, the renderer pool size, which paths train and how agents inside
 remote sandboxes reach skycap ([below](#agents-inside-remote-sandboxes)).
 
+### Eval
+
+With `data.val_data` set and `trainer.eval_interval > 0`, SkyRL's eval runs its
+trials through the same generator. Three things differ from training:
+
+- **Each trial is scored on its own.** In training, one trial that timed out or
+  failed masks every trial of its task, so GRPO never computes a baseline from a
+  group with holes in it. In eval it scores 0 alone, and the counts reach W&B as
+  `eval/all/generate/skycap/num_timeout_trajectories` and `..._num_error_trajectories`.
+- **Eval samples with `generator.sampling_params`.** skycap applies them to every
+  call, so the trainer's logprobs match what was sampled. The entrypoint raises at
+  startup when `generator.eval_sampling_params` differ in temperature, top_p, top_k
+  or min_p.
+- **Trials go to `<trials_dir>/<phase>/global_step_<N>/`**, so a step's held-out
+  trajectories can be read apart from its training ones.
+
+Eval metrics are grouped by the directories in `data.val_data`
+(`eval/<directory name>/avg_score`, `pass_at_<n>`).
+
 ## Which paths train
 
 `skycap.train_paths` picks the rows of each rollout:
@@ -95,6 +114,53 @@ generator stops the run instead of taking zero-gradient steps. Each trial's
 `exception.txt` and agent logs under
 `harbor_trial_config.trials_dir` say why. `skycap.check_first_batch=false`
 skips the check, e.g. for an agent that never calls the model.
+
+## Codex
+
+Harbor's `codex` agent runs Codex with its defaults, which skycap can't serve
+(the WebSocket transport, tools that aren't functions, unmarked retries), so the
+generator refuses it. [`SkycapCodex`](codex.py) runs Codex through a provider of
+its own at the trajectory's URL: function tools only, no retries, no WebSocket.
+skycap answers its Responses calls with parsed replies whatever
+`skycap.use_raw_content` says, since that API carries reasoning as items of its
+own. Codex calls the model from its sandbox, so it needs an exposure (above).
+Select it by import path, with the name cleared, since Harbor runs a known agent
+name before an import path:
+
+```bash
+  harbor_trial_config.agent.name=null \
+  harbor_trial_config.agent.import_path=examples.train_integrations.harbor_skycap.codex:SkycapCodex \
+  harbor_trial_config.agent.kwargs.context_window=<the engine's max_model_len> \
+  skycap.exposure.type=cloudflare
+```
+
+`SkycapCodex` installs the Codex release its settings were validated with
+(`CODEX_VERSION`); `harbor_trial_config.agent.kwargs.version` names another.
+Codex's config keys aren't a stable API, so check a new release before bumping it.
+
+Codex has no metadata for open-weight models, and without it Codex leaves out
+its `apply_patch` tool while its instructions still tell the model to use it.
+`SkycapCodex` gives each trial's Codex a model catalog entry for the served
+model: Codex's fallback metadata with `apply_patch` on, carrying the release's
+own instructions (`prompt.md`). The driver fetches them from
+`raw.githubusercontent.com` once per process; when that fails, the trial fails.
+With the version set to `null`, Harbor installs the latest Codex and the
+instructions come from Codex's `main` branch, with a warning.
+
+Codex leaves its `update_plan` tool off by default, and leaves that tool's
+guidance out of its own instructions, but it sends a catalog's instructions
+unedited. `SkycapCodex` therefore makes the same edit before writing the entry,
+so the model gets the instructions it gets without a catalog, plus `apply_patch`.
+
+`harbor_trial_config.agent.kwargs.agents_md=<a local file>` gives Codex that
+file as its global `AGENTS.md` (in `CODEX_HOME`, outside the task's workspace),
+which Codex sends the model as a user message ahead of the task.
+`run_codecontests.sh` passes [`codecontests_codex_instructions.md`](codecontests_codex_instructions.md):
+how to create a file with `apply_patch`, to run the solution on the example,
+and to act through tool calls, the most common ways Codex's trials failed on
+CodeContests. With `AGENT=codex` it also trains with
+`trainer.algorithm.loss_reduction=prompt_mean`, so a task whose trials loop
+for a hundred turns doesn't take most of the update.
 
 ## Sharing a sandbox provider
 
@@ -187,10 +253,17 @@ What's imposed on every call:
 - **`cache_salt`:** derived from the policy's weight version. It rides in the request body and skycap forwards it.
 - **Session id:** the trajectory id, sent to the router as `X-Session-ID`.
 
-Masking is the sibling's:
-- **Timeout or failed rollout:** the whole instance is masked.
+Masking is the sibling's, from the same function (`skyrl/integration/harbor/masking.py`):
+- **Failed rollout** (a sandbox that never started, no verifier result, a crash, nothing captured, or a
+  trajectory skycap failed, e.g. on an unattributable prompt): the whole instance is masked.
+- **Agent timeout** (`AgentTimeoutError`, not retried): when at least `generator.timeout_mask_instance_threshold`
+  (default 2) trials of an instance time out, the whole instance is masked. Below that, only the timed-out
+  trials are, and the instance's other trials train. `1` masks the instance on any timeout.
 - **Context-length stop:** trains with reward 0, unless overlong filtering is on.
-- **Failed inside skycap** (e.g. an unattributable prompt): the trial isn't trained on.
+
+Advantage estimators that compare an instance's trials (`grpo`, `rloo`, `maxrl`) still count a masked trial as
+reward 0. `trainer.algorithm.zero_variance_filter` ignores masked trials, so it drops a group whose other trials
+all have the same reward.
 
 R3 (rollout routing replay) needs
 `generator.inference_engine.enable_return_routed_experts=true` and

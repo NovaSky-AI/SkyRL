@@ -71,6 +71,9 @@ class CallInfo:
     #: The API the call came in on: a ``skycap.dialects.DialectType`` value, e.g. ``openai_responses``.
     #: ``None`` in records written before dialects.
     dialect: str | None = None
+    #: Token mode: whether the reply was the completion's raw text (``use_raw_content``, on an API that carries
+    #: it) rather than parsed. ``None`` in text mode, where the upstream decides, and in records written before it.
+    raw_content: bool | None = None
 
 
 @dataclass(slots=True)
