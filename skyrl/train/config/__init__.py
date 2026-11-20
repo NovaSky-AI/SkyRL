@@ -1,4 +1,5 @@
 from skyrl.train.config.config import (
+    ADAPOConfig,
     AlgorithmConfig,
     BaseConfig,
     ChatTemplateConfig,
@@ -75,6 +76,7 @@ __all__ = [
     "SAPOConfig",
     "CISPOConfig",
     "DPPOConfig",
+    "ADAPOConfig",
     "ClipCovConfig",
     "KLCovConfig",
     "KLCtrlConfig",
