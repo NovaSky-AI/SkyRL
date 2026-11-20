@@ -38,6 +38,35 @@ cd skyrl-agent
 
 Then head to the `examples/` folder to run tasks (training and inference). Each task’s script/YAML documents its own knobs and environment requirements.
 
+### Optional anonymous web search
+
+Select `parallel_search_engine` in your task's `tools` list to use
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp) without a search API key:
+
+```yaml
+tools: ["parallel_search_engine", "finish"]
+```
+
+Existing task defaults and providers stay selected unless you change that list.
+Leaving Parallel out of the list makes no Parallel requests. Selecting `search_engine`
+or `youcom_search_engine` still requires that provider's key; errors do not switch providers.
+The Parallel tool is anonymous only and does not read provider credentials. Anonymous
+requests use Parallel's documented server-managed Fast defaults and may be rate limited.
+
+With the SkyRL-Agent dependencies installed, try a registry call from `skyrl-agent/`
+without starting an inference server:
+
+```bash
+uv run --isolated --frozen python -c 'from skyrl_agent.tools import TOOL_REGISTRY; print(TOOL_REGISTRY["parallel_search_engine"]().call({"query": ["NASA Webb telescope first deep field SMACS 0723"]}))'
+```
+
+Results include source URLs and excerpts. The tool uses `https://mcp.parallel.ai/mcp`
+and the same `SEARCH_BLOCKLIST_DOMAINS`, `SEARCH_BLOCKLIST_KEYWORDS`, and
+`SEARCH_NEGATIVE_FILTERS` controls and leakage-protection defaults as You.com search.
+Only web search is exposed; the existing browser tool remains separately selectable.
+Search failures are returned as tool errors. Run the focused synthetic checks with
+`uv run --isolated --with pytest pytest tests/tools/test_parallel_search_engine.py`.
+
 ## Results & Profiling (glimpses)
 
 <p align="center">

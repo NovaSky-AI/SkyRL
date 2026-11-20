@@ -1,4 +1,4 @@
-from skyrl_agent.tools.base import BaseTool, register_tool, json_loads
+from skyrl_agent.tools.base import BaseTool, register_tool, normalize_search_params
 import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Union
@@ -27,9 +27,12 @@ class SearchEngine(BaseTool):
         },
         "required": ["query"],
     }
-    google_search_key = os.getenv("GOOGLE_SEARCH_KEY")
-    if not google_search_key:
-        raise ValueError("GOOGLE_SEARCH_KEY environment variable is required")
+
+    def __init__(self):
+        super().__init__()
+        self.google_search_key = os.getenv("GOOGLE_SEARCH_KEY")
+        if not self.google_search_key:
+            raise ValueError("GOOGLE_SEARCH_KEY environment variable is required")
 
     # Optional blocklists to prevent data leakage (e.g., excluding benchmark/dataset sites)
     # Configure via env vars:
@@ -157,46 +160,8 @@ class SearchEngine(BaseTool):
         Returns:
             str or dict: The search results or an error message.
         """
-        # Normalize and validate parameters robustly
-        # 1) Parse to dict (be tolerant of JSON5/markdowny inputs)
-        raw: dict
-        if isinstance(params, dict):
-            raw = dict(params)
-        else:
-            try:
-                raw = json_loads(params) if isinstance(params, str) else {"query": params}
-            except Exception:
-                raw = {"query": params}
-
-        # 2) Normalize "query" into a flat list[str]
-        def _normalize_query(q):
-            if q is None:
-                return None
-            # If it's a JSON-like string representing an array, try to parse
-            if isinstance(q, str):
-                s = q.strip()
-                if s.startswith("[") and s.endswith("]"):
-                    try:
-                        parsed = json.loads(s)
-                        q = parsed
-                    except Exception:
-                        # fall back to single string query
-                        return [q]
-                else:
-                    return [q]
-            # If it's a list, flatten nested lists and stringify items
-            if isinstance(q, list):
-                flat = []
-                for item in q:
-                    if isinstance(item, list):
-                        flat.extend([str(x) for x in item])
-                    else:
-                        flat.append(str(item))
-                return flat
-            # Any other type → cast to single string element
-            return [str(q)]
-
-        normalized_query = _normalize_query(raw.get("query"))
+        raw = normalize_search_params(params)
+        normalized_query = raw["query"]
         if not normalized_query:
             return {
                 "error": "Query parameter is required.",
@@ -204,9 +169,7 @@ class SearchEngine(BaseTool):
                 "example": {"query": ["term1", "term2"]},
             }
 
-        raw["query"] = normalized_query
-
-        # 3) Schema-validate, but catch any schema error and return actionable hint
+        # Schema-validate and return an actionable hint on error.
         try:
             params = self._verify_json_format_args(raw)
         except Exception as e:
