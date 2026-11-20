@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple
 
+import numpy as np
 import torch
 
 from skyrl.backends.skyrl_train.utils.torch_utils import masked_mean
 from skyrl.train.generators.base import GeneratorInput
 
+if TYPE_CHECKING:
+    from skyrl.train.opd.config import OPDConfig
+
 TEACHER_LOGPROBS_KEY = "teacher_logprobs"
+# Floor on the student's logprob in the OPD term. A -inf would make the term inf and the pointwise KL NaN.
+STUDENT_LOGPROB_FLOOR = -99999.0
 
 
 def split_generator_input(input_batch: GeneratorInput, group_size: int) -> List[GeneratorInput]:
@@ -83,9 +89,9 @@ def apply_opd_to_advantages(
     action_log_probs: torch.Tensor,
     teacher_logprobs: torch.Tensor,
     loss_mask: torch.Tensor,
-    kl_coef: float,
+    opd: OPDConfig,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """``advantages - kl_coef * (log pi_student - log pi_teacher)`` on trainable tokens.
+    """``advantages + kl_coef * a`` on trainable tokens, with ``a = log pi_teacher - log pi_student``.
 
     The per-token term is the k1 (sampled-token) estimate of the reverse KL to the teacher; as a
     detached per-token coefficient it is the exact policy-gradient signal for minimizing that KL
@@ -93,6 +99,12 @@ def apply_opd_to_advantages(
     *after* the advantage estimator so it composes with any of them: with zero task rewards the
     estimator emits zeros and this is pure on-policy distillation; with task rewards it is the
     additive recipe.
+
+    ``opd``'s stabilization settings act on ``a`` alone, before ``kl_coef``, so their bounds are in nats and a
+    task-reward advantage passes through untouched: the divergence clip, then either the advantage bounds or log
+    compression (alternatives, see ``validate_opd_cfg``). With none set this is
+    ``advantages - kl_coef * (log pi_student - log pi_teacher)`` exactly, with ``log pi_student`` floored at
+    ``STUDENT_LOGPROB_FLOOR``.
 
     Returns the new advantages and metrics under ``opd/``.
     """
@@ -103,14 +115,37 @@ def apply_opd_to_advantages(
             f"teacher_logprobs={tuple(teacher_logprobs.shape)} loss_mask={tuple(loss_mask.shape)}"
         )
     mask = loss_mask.to(dtype=torch.bool)
+    action_log_probs = action_log_probs.clamp(min=STUDENT_LOGPROB_FLOOR)
     reverse_kl = torch.where(mask, action_log_probs - teacher_logprobs, torch.zeros_like(action_log_probs))
-    new_advantages = advantages - kl_coef * reverse_kl
+    signal = -reverse_kl
+    divergence_clipped = torch.zeros_like(mask)
+    if opd.divergence_clip is not None:
+        divergence_clipped = mask & (action_log_probs.exp() * reverse_kl > opd.divergence_clip)
+        signal = torch.where(divergence_clipped, torch.zeros_like(signal), signal)
+    advantage_clipped = torch.zeros_like(mask)
+    if opd.advantage_clip_min is not None or opd.advantage_clip_max is not None:
+        clamped = signal.clamp(min=opd.advantage_clip_min, max=opd.advantage_clip_max)
+        advantage_clipped = clamped != signal
+        signal = clamped
+    if opd.advantage_log_compress:
+        signal = signal.sign() * signal.abs().log1p()
+    opd_term = opd.kl_coef * signal
+    new_advantages = advantages + opd_term
+
     mask_f = mask.to(dtype=advantages.dtype)
     metrics = {
         "opd/reverse_kl": masked_mean(reverse_kl, mask_f).item(),
         "opd/reverse_kl_abs_max": reverse_kl.abs().max().item() if reverse_kl.numel() else 0.0,
         "opd/adv_rl_abs_mean": masked_mean(advantages.abs(), mask_f).item(),
-        "opd/adv_opd_abs_mean": kl_coef * masked_mean(reverse_kl.abs(), mask_f).item(),
-        "opd/kl_coef": float(kl_coef),
+        "opd/adv_opd_abs_mean": masked_mean(opd_term.abs(), mask_f).item(),
+        "opd/kl_coef": float(opd.kl_coef),
+        "opd/divergence_clip_fraction": masked_mean(divergence_clipped.to(mask_f.dtype), mask_f).item(),
+        "opd/advantage_clip_fraction": masked_mean(advantage_clipped.to(mask_f.dtype), mask_f).item(),
     }
+    log_ratio = -reverse_kl[mask]
+    if log_ratio.numel():
+        # Percentiles of the raw log-ratio, to pick the advantage bounds from a run. NumPy, because torch.quantile
+        # refuses inputs above 2**24 elements and a math step has about 25M tokens.
+        low, high = np.quantile(log_ratio.float().cpu().numpy(), [0.01, 0.99])
+        metrics["opd/log_ratio_p01"], metrics["opd/log_ratio_p99"] = float(low), float(high)
     return new_advantages, metrics

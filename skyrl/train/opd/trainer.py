@@ -6,7 +6,7 @@
 - ``postprocess_generator_output`` zeroes the rewards in pure mode, after their metrics are logged.
 - ``convert_to_training_input`` pads the teacher logprobs into the batch, right-aligned like ``rollout_logprobs``.
 - ``compute_advantages_and_returns`` subtracts ``kl_coef * (action_log_probs - teacher_logprobs)`` on trainable
-  tokens, after the configured advantage estimator.
+  tokens, after the configured advantage estimator and regulated by the ``opd`` stabilization settings.
 """
 
 import asyncio
@@ -136,7 +136,7 @@ class OPDTrainer(RayPPOTrainer):
             action_log_probs=action_log_probs,
             teacher_logprobs=teacher_logprobs.to(action_log_probs.device),
             loss_mask=data["loss_mask"],
-            kl_coef=self.cfg.trainer.algorithm.opd.kl_coef,
+            opd=self.cfg.trainer.algorithm.opd,
         )
         data["advantages"] = advantages
         self.all_metrics.update(metrics)
