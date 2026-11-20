@@ -213,7 +213,9 @@ def _weights_index() -> Tuple[List[int], List[Any]]:
 
 def _map_allocation(data: Any) -> None:
     """Re-map one asleep allocation at its old address, restoring its CPU backup if any."""
-    from vllm.device_allocator.cumem import create_and_map, libcudart
+    from vllm.device_allocator.cumem import CuMemAllocator, libcudart
+
+    create_and_map = CuMemAllocator._create_and_map
 
     create_and_map(data.handle)
     data.is_asleep = False
@@ -313,7 +315,9 @@ def _sleep_keeping(allocator: Any, offload_tags: Tuple[str, ...], keep: set) -> 
     """``CuMemAllocator.sleep`` with the allocations in ``keep`` offloaded as well."""
     import gc
 
-    from vllm.device_allocator.cumem import libcudart, unmap_and_release
+    from vllm.device_allocator.cumem import CuMemAllocator, libcudart
+
+    unmap_and_release = CuMemAllocator._unmap_and_release
 
     try:
         from vllm.device_allocator.cumem import PIN_MEMORY

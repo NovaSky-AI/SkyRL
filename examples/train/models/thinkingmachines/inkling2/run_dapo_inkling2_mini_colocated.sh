@@ -1,13 +1,12 @@
 set -x
 
-# DAPO on DAPO-Math-17k (eval: AIME 2024 + 2025) for an Inkling2 checkpoint small enough for one node of 8xB200,
-# colocated: Megatron (EP8) and NUM_INFERENCE_ENGINES vLLM engines share the 8 GPUs, taking turns. Same budget,
-# data and reward shaping as the 4-node recipes (run_dapo_inkling2_{fullft,lora}_colocated.sh); looped checkpoints
-# (loop_config) included.
+# DAPO on DAPO-Math-17k (eval: AIME 2024 + 2025) for Inkling 2 Mini (or any Inkling2 checkpoint small enough for one
+# node of 8xB200), colocated: Megatron (EP8) and NUM_INFERENCE_ENGINES vLLM engines share the 8 GPUs, taking turns.
+# Same budget, data and reward shaping as the 4-node recipes (run_dapo_inkling2_{fullft,lora}_colocated.sh).
 #
 #   DATA_DIR=$HOME/data/dapo bash examples/train/algorithms/dapo/prepare_dapo_data.sh
-#   MODEL_PATH=/path/to/checkpoint PRESET=bf16_fft \
-#     bash examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_1node_colocated.sh
+#   MODEL_PATH=/path/to/models/Inkling-2-Mini PRESET=bf16_fft \
+#     bash examples/train/models/thinkingmachines/inkling2/run_dapo_inkling2_mini_colocated.sh
 #
 # PRESET picks one of the configurations the 4-node recipes were run with (each knob can still be overridden):
 # - bf16_fft: full fine-tuning, dual-clip PPO loss, BF16 rollout experts, no replays.
@@ -16,7 +15,7 @@ set -x
 # - lora: LoRA rank 128 / alpha 32 on every linear at LR 2e-5, dual-clip PPO loss, synced as an adapter
 #   (MERGE_LORA=false; vLLM serves it with its LoRA support) (run_dapo_inkling2_lora_colocated.sh's defaults).
 
-: "${MODEL_PATH:?set MODEL_PATH to the checkpoint directory}"
+MODEL_PATH="${MODEL_PATH:-thinkingmachines/Inkling-2-Mini}"
 PRESET="${PRESET:-bf16_fft}"
 DATA_DIR="${DATA_DIR:-$HOME/data/dapo}"
 TRAIN_FILE="${TRAIN_FILE:-$DATA_DIR/dapo-math-17k-cleaned.parquet}"
@@ -96,7 +95,7 @@ else
   )
 fi
 
-RUN_NAME="${RUN_NAME:-inkling2_1node_${PRESET}_lr${LR}}"
+RUN_NAME="${RUN_NAME:-inkling2_mini_${PRESET}_lr${LR}}"
 
 uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   data.train_data="['$TRAIN_FILE']" \

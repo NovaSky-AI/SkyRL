@@ -123,7 +123,7 @@ fsdp = [
     "skyrl[skyrl-train]",
     # DO NOT MERGE: Inkling2 needs a vLLM build of the Inkling2 vLLM branch (torch 2.14, cu130,
     # x86_64 only) until a vLLM release ships the model; aarch64 stays on the release.
-    "vllm @ https://github.com/NovaSky-AI/skyrl-wheels/releases/download/vllm-inkling2-b6efe5297-cu13torch2.14/vllm-0.33.1.dev792%2Binkling2.gb6efe5297.cu130.torch214-cp38-abi3-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "vllm @ https://github.com/NovaSky-AI/skyrl-wheels/releases/download/vllm-inkling2-76a43a186-cu13torch2.14/vllm-0.34.0rc1.dev955%2Binkling2loop.g76a43a186.cu130.torch214-cp38-abi3-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "vllm==0.33.0; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
@@ -140,17 +140,17 @@ fsdp = [
     "causal-conv1d==1.7.0; sys_platform == 'linux'",
     "flash-attn==2.8.3.post1; sys_platform == 'linux'",
     "torch==2.14.0; sys_platform == 'linux'",
-    "flashinfer-python==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm100a==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm103a==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm120f==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm80==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm89==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm90a==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm110a==0.7.2.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "flashinfer-jit-cache-sm121a==0.7.2.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "flashinfer-cubin==0.7.2.post1; sys_platform == 'linux'",
+    "flashinfer-python==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm100a==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm103a==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm120f==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm80==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm89==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm90a==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm110a==0.7.4; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flashinfer-jit-cache-sm121a==0.7.4; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flashinfer-cubin==0.7.4; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
 ]
 
@@ -185,7 +185,7 @@ megatron = [
     "flash-mla==1.0.0+cu.13.0.torch.2.14.b7643bd; sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')",
     # DO NOT MERGE: Inkling2 needs a vLLM build of the Inkling2 vLLM branch (torch 2.14, cu130,
     # x86_64 only) until a vLLM release ships the model; aarch64 stays on the release.
-    "vllm @ https://github.com/NovaSky-AI/skyrl-wheels/releases/download/vllm-inkling2-b6efe5297-cu13torch2.14/vllm-0.33.1.dev792%2Binkling2.gb6efe5297.cu130.torch214-cp38-abi3-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "vllm @ https://github.com/NovaSky-AI/skyrl-wheels/releases/download/vllm-inkling2-76a43a186-cu13torch2.14/vllm-0.34.0rc1.dev955%2Binkling2loop.g76a43a186.cu130.torch214-cp38-abi3-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "vllm==0.33.0; sys_platform == 'linux' and platform_machine == 'aarch64'",
     "vllm-router; sys_platform == 'linux'",
     # The `nixl` shim provides that namespace and dispatches on `torch.version.cuda`,
@@ -197,21 +197,21 @@ megatron = [
     # vLLM does not declare nixl, so the floor lives here.
     "nixl>=1.5.0; sys_platform == 'linux'",
     "torch==2.14.0; sys_platform == 'linux'",
-    "flashinfer-python==0.7.2.post1; sys_platform == 'linux'",
+    "flashinfer-python==0.7.4; sys_platform == 'linux'",
     "torchvision; sys_platform == 'linux'",
     "megatron-bridge; sys_platform == 'linux'",
     "megatron-core; sys_platform == 'linux'",
     "nvidia-resiliency-ext; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm100a==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm103a==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm120f==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm80==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm89==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm90a==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm110a==0.7.2.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "flashinfer-jit-cache-sm121a==0.7.2.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "flashinfer-cubin==0.7.2.post1; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm100a==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm103a==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm120f==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm80==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm89==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm90a==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm110a==0.7.4; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flashinfer-jit-cache-sm121a==0.7.4; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flashinfer-cubin==0.7.4; sys_platform == 'linux'",
     "nvidia-modelopt; sys_platform == 'linux'",
     "fast-hadamard-transform; sys_platform == 'linux'",
 ]
@@ -353,7 +353,7 @@ override-dependencies = [
     # `nixl` hard-depends on both nixl-cu12 and nixl-cu13; drop the cu12 variant
     # so it doesn't pull a second, unused CUDA runtime in alongside the cu13 one.
     "nixl-cu12; sys_platform == 'never'",
-    # vLLM 0.33.0 pins flashinfer-python==0.7.2.post1, while Megatron-Bridge pins
+    # vLLM 0.33.0 pins flashinfer-python==0.7.4, while Megatron-Bridge pins
     # flashinfer-python/flashinfer-cubin==0.6.18.post1, so the flashinfer packages
     # are held here. flashinfer hard-errors when an installed cubin's version
     # differs from its own, so python, cubin and jit-cache must move together.
@@ -370,11 +370,11 @@ override-dependencies = [
     # additionally needs sm110a and sm121a, which have no x86_64 wheels. uv applies
     # one wheel's metadata to every platform, so those two are scoped to aarch64
     # here or x86_64 fails to resolve.
-    "flashinfer-python==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache==0.7.2.post1; sys_platform == 'linux'",
-    "flashinfer-jit-cache-sm110a==0.7.2.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "flashinfer-jit-cache-sm121a==0.7.2.post1; sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "flashinfer-cubin==0.7.2.post1; sys_platform == 'linux'",
+    "flashinfer-python==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache==0.7.4; sys_platform == 'linux'",
+    "flashinfer-jit-cache-sm110a==0.7.4; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flashinfer-jit-cache-sm121a==0.7.4; sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "flashinfer-cubin==0.7.4; sys_platform == 'linux'",
     # mamba-ssm 2.3.2.post1 pins tilelang==0.1.8 and apache-tvm-ffi<=0.1.9, while
     # vLLM 0.33.0 pins tilelang==0.1.12 and apache-tvm-ffi==0.1.11. Both are
     # overridden here; these two MUST be bumped together.

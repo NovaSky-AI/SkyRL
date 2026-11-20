@@ -155,6 +155,8 @@ def _build_skyrl_ipc_trainer() -> "tuple[type, type]":
         skyrl_last_send_stats: Optional[dict] = None
 
         def _skyrl_ring_enabled(self) -> bool:
+            # The slot ring sends whole tensors per chunk with their byte sizes (``skyrl_tensor_sizes``), received
+            # by SkyRL's IPC engine (``weight_receivers``), not by vLLM's packed layout.
             return self.skyrl_num_buffers > 1 or self.skyrl_layer_aligned or self.skyrl_local_shard
 
         def _send_packed(self, source: WeightSource) -> None:

@@ -347,7 +347,7 @@ def test_ipc_engine_lora_round_releases_packed_buffer_mapping(monkeypatch):
         get_skyrl_ipc_engine,
     )
 
-    # ``PackedBufferImporter.rebuild`` imports ``rebuild_cuda_tensor`` from this
+    # ``MultiSlotImporter.rebuild`` imports ``rebuild_cuda_tensor`` from this
     # module at call time, so patching the module attribute reaches it.
     rebuilt = [torch.zeros(8, dtype=torch.uint8)]
     mapping_ref = weakref.ref(rebuilt[0])
@@ -357,8 +357,8 @@ def test_ipc_engine_lora_round_releases_packed_buffer_mapping(monkeypatch):
     engine = get_skyrl_ipc_engine()(None, vllm_config, torch.device("cpu"), _FakeModel([]))
     engine.skyrl_set_lora_receive_target(build_lora_receive_target("t", {}, {}))
     engine.start_weight_update()
-    # What ``packed_ipc_consumer`` does with each chunk of a packed transfer.
-    engine._packed_importer.rebuild(["handle"])
+    # What a colocated slot-ring chunk does with its slot's IPC handle.
+    engine._skyrl_ring_importer.rebuild(["handle"])
     engine._skyrl_lora_staged["a"] = torch.ones(1)
     assert mapping_ref() is not None
 

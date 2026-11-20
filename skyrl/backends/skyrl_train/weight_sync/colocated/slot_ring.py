@@ -245,7 +245,7 @@ class SlotRingSender:
                 "dtype_names": g0["dtype_names"],
                 "shapes": g0["shapes"],
                 "ipc_handles": merged,
-                "tensor_sizes": g0["tensor_sizes"],
+                "skyrl_tensor_sizes": g0["tensor_sizes"],
             }
         per_server: List[List[Any]] = [[{} for _ in range(max(idx) + 1)] for idx in plan.server_worker_indices]
         filled = set()
@@ -257,7 +257,7 @@ class SlotRingSender:
                 "dtype_names": g["dtype_names"],
                 "shapes": g["shapes"],
                 "ipc_handles": g["handle"],
-                "tensor_sizes": g["tensor_sizes"],
+                "skyrl_tensor_sizes": g["tensor_sizes"],
             }
         for s, idx in enumerate(plan.server_worker_indices):
             missing = [w for w in idx if (s, w) not in filled]

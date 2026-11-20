@@ -141,3 +141,4 @@ def test_looped_config_serializes(tmp_path):
 def test_release_config_of_looped_pre_release_checkpoint():
     converted = configuration.release_config({"model_type": "inkling2_mm_model", "text_config": LOOPED})
     assert converted["model_type"] == "inkling2_loop"
+    assert converted["architectures"] == ["Inkling2LoopForConditionalGeneration"]

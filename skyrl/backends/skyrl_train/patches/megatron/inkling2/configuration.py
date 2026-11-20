@@ -18,6 +18,8 @@ MODEL_TYPE = "inkling2"
 LOOP_MODEL_TYPE = "inkling2_loop"
 LEGACY_MODEL_TYPE = "inkling2_mm_model"
 TEXT_MODEL_TYPE = "inkling2_model"
+ARCHITECTURE = "Inkling2ForConditionalGeneration"
+LOOP_ARCHITECTURE = "Inkling2LoopForConditionalGeneration"
 # Renamed in the release config.
 LEGACY_KEYS = {"n_layers_per_attnres_block": "n_layers_per_attn_res_block"}
 
@@ -272,12 +274,16 @@ def register() -> None:
 
 
 def release_config(config: dict) -> dict:
-    """A ``config.json`` dict with the release's names: ``model_type: inkling2``, the text
-    config's ``inkling2_model`` and ``n_layers_per_attn_res_block``. Values are kept."""
+    """A ``config.json`` dict with the release's names: ``model_type: inkling2`` (``inkling2_loop`` and
+    ``architectures: [Inkling2LoopForConditionalGeneration]`` for a looped checkpoint), the text config's
+    ``inkling2_model`` and ``n_layers_per_attn_res_block``. Values are kept."""
     config = dict(config)
     text = dict(config.get("text_config") or {})
     if config.get("model_type") == LEGACY_MODEL_TYPE:
         config["model_type"] = LOOP_MODEL_TYPE if text.get("loop_config") is not None else MODEL_TYPE
+    # The vLLM build rejects an architecture that does not match the model type.
+    if config.get("model_type") in (MODEL_TYPE, LOOP_MODEL_TYPE):
+        config["architectures"] = [LOOP_ARCHITECTURE if config["model_type"] == LOOP_MODEL_TYPE else ARCHITECTURE]
     for old, new in LEGACY_KEYS.items():
         if old in text:
             text[new] = text.pop(old)

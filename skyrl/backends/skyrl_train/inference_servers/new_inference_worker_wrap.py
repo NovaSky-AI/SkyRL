@@ -62,7 +62,7 @@ ensure_ray_rdt_libfabric()
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 # Must run inside EVERY vLLM worker process: post-sync hooks in the receive
 # engines need the process-local model runner, but vLLM only gives engines the
@@ -114,6 +114,17 @@ except ModuleNotFoundError:
         exc_info=True,
     )
 
+def _apply_model_specific_patch(apply: Any) -> None:
+    """Apply a patch for one model family; on a vLLM it no longer matches, skip it with a warning.
+
+    vLLM 0.34 (the Inkling2 build) moved several patch targets; these patches only matter for their own models
+    (GLM-5.3-Flash, Kimi-K2.5, DeepSeek-V4, per-block FP8, PP > 1), which this build is not validated for."""
+    try:
+        apply()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("Skipping vLLM patch %s on this vLLM: %s", apply.__name__, exc)
+
+
 # vLLM's AOT compile artifact directory carries no device, so engines on
 # different GPUs can overwrite each other's artifact and die with "CUDA driver
 # error: invalid argument". Scope it to the running device. Installed here for
@@ -135,7 +146,7 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_glm5next_lora_packing import 
     apply_glm5next_lora_packing_patch,
 )
 
-apply_glm5next_lora_packing_patch()
+_apply_model_specific_patch(apply_glm5next_lora_packing_patch)
 
 # MoE expert LoRA slots sized at the expert adapter rank (additional_config.max_expert_lora_rank).
 # Installed here for the same reason as the patches above: the slots are allocated at model init.
@@ -151,7 +162,7 @@ from skyrl.backends.skyrl_train.patches.vllm_kimi_k25_lora import (  # noqa: E40
     apply_kimi_k25_lora_patch,
 )
 
-apply_kimi_k25_lora_patch()
+_apply_model_specific_patch(apply_kimi_k25_lora_patch)
 
 # Online fp8_per_block quantization hands the torch.compile'd per_block_cast_to_fp8 a vLLM
 # parameter subclass, which dynamo cannot trace (RecursionError on the first weight sync).
@@ -159,7 +170,7 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_per_block_fp8_param import ( 
     apply_per_block_fp8_param_patch,
 )
 
-apply_per_block_fp8_param_patch()
+_apply_model_specific_patch(apply_per_block_fp8_param_patch)
 
 # Full-weight syncs go through vLLM's layerwise reload, which buffers each incoming tensor at
 # its unsharded size until the whole layer has arrived (~19 GiB per GLM-5.3 MoE layer on every
@@ -187,7 +198,7 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_deepseek_v4_reload import (  
     apply_deepseek_v4_reload_patch,
 )
 
-apply_deepseek_v4_reload_patch()
+_apply_model_specific_patch(apply_deepseek_v4_reload_patch)
 
 # A PP stage with no layers of some KV cache group gets cache tensors for layers it does not own (DeepSeek-V4.1 at PP=2).
 # TODO: remove once the pinned vLLM includes vllm-project/vllm#60234 (on main, not in 0.33.0).
@@ -195,7 +206,7 @@ from skyrl.backends.skyrl_train.patches.vllm.patch_pp_kv_cache_projection import
     apply_pp_kv_cache_projection_patch,
 )
 
-apply_pp_kv_cache_projection_patch()
+_apply_model_specific_patch(apply_pp_kv_cache_projection_patch)
 
 
 VLLM_NEW_INFERENCE_WORKER_EXTENSION_CLS = f"{__name__}.NewInferenceWorkerWrap"

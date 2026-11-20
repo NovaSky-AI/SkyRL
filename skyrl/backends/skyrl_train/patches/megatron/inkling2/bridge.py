@@ -155,7 +155,7 @@ class LayerTypeMapping(ReplicatedMapping):
 
 
 @MegatronModelBridge.register_bridge(
-    source="Inkling2ForConditionalGeneration",
+    source=configuration.ARCHITECTURE,
     target=GPTModel,
     provider=Inkling2ModelProvider,
     model_type=configuration.MODEL_TYPE,
@@ -437,3 +437,13 @@ class Inkling2Bridge(MegatronModelBridge):
         for name in ("middle_cycle_cross_pass_queries", "middle_cycle_cross_pass_kv_queries"):
             mappings.append(ReplicatedMapping(f"decoder.loop_queries.{name}", f"{HF_PREFIX}.{name}"))
         return MegatronMappingRegistry(*mappings)
+
+
+@MegatronModelBridge.register_bridge(
+    source=configuration.LOOP_ARCHITECTURE,
+    target=GPTModel,
+    provider=Inkling2ModelProvider,
+    model_type=configuration.LOOP_MODEL_TYPE,
+)
+class Inkling2LoopBridge(Inkling2Bridge):
+    """:class:`Inkling2Bridge` for looped checkpoints' architecture name (``model_type: inkling2_loop``)."""

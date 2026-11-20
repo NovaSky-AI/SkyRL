@@ -126,7 +126,7 @@ def test_native_nccl_trainer_preserves_serialized_fp8_mixed_stream(monkeypatch):
 
     _, engine_cls = get_skyrl_nccl_trainer()
     engine = engine_cls(client=client, source=source, packed=True)
-    engine.model_update_group = object()
+    engine.model_update_group = SimpleNamespace(rank=0)  # the sender is group rank 0
     engine.send_weights()
 
     _assert_update_matches(source, client.update_infos[0])
@@ -152,7 +152,7 @@ def test_native_nccl_trainer_agrees_packing_during_initialization(monkeypatch):
     source = _StaticWeightSource([("model.norm.weight", torch.ones(4, dtype=torch.bfloat16))])
     client = _RecordingClient()
 
-    monkeypatch.setattr(nccl_engine, "open_trainer_endpoint", lambda _init_info: object())
+    monkeypatch.setattr(nccl_engine, "open_trainer_endpoint", lambda _init_info, _rank: SimpleNamespace(rank=0))
 
     init_info_cls, engine_cls = get_skyrl_nccl_trainer()
     engine = engine_cls.trainer_init(
@@ -180,6 +180,7 @@ def test_native_nccl_trainer_agrees_packing_during_initialization(monkeypatch):
                 "packed": True,
                 "packed_buffer_size_bytes": 1024,
                 "packed_num_buffers": 3,
+                "use_load_plan": False,
             },
         )
     ]
@@ -214,7 +215,7 @@ def test_native_nccl_trainer_uses_precomputed_weight_source_metadata(monkeypatch
 
     _, engine_cls = get_skyrl_nccl_trainer()
     engine = engine_cls(client=client, source=source, packed=True)
-    engine.model_update_group = object()
+    engine.model_update_group = SimpleNamespace(rank=0)  # the sender is group rank 0
     engine.send_weights()
 
     _assert_update_matches(source, client.update_infos[0])
@@ -237,7 +238,7 @@ def test_native_ipc_trainer_preserves_serialized_fp8_mixed_stream(monkeypatch):
     monkeypatch.setattr(torch.cuda, "get_device_properties", lambda _index: SimpleNamespace(uuid="GPU-0"))
     monkeypatch.setattr(ipc_engine.IPCTrainerWeightTransferEngine, "_post_send_sync", staticmethod(lambda: None))
 
-    def record_packed_ipc_producer(*, iterator, gpu_uuid, post_iter_func, buffer_size_bytes):
+    def record_packed_ipc_producer(*, iterator, gpu_uuid, device_index, post_iter_func, buffer_size_bytes):
         pairs = [(name, post_iter_func((name, tensor))) for name, tensor in iterator]
         observed["stream"] = pairs
         observed["buffer_size_bytes"] = buffer_size_bytes
@@ -245,8 +246,9 @@ def test_native_ipc_trainer_preserves_serialized_fp8_mixed_stream(monkeypatch):
             names=[name for name, _ in pairs],
             shapes=[list(tensor.shape) for _, tensor in pairs],
             dtype_names=[str(tensor.dtype).split(".")[-1] for _, tensor in pairs],
-            tensor_sizes=[tensor.nbytes for _, tensor in pairs],
             ipc_handle={gpu_uuid: ("unused-in-cpu-test",)},
+            chunk_capacity=buffer_size_bytes,
+            last=True,
         )
 
     monkeypatch.setattr(ipc_engine, "packed_ipc_producer", record_packed_ipc_producer)
@@ -268,4 +270,4 @@ def test_native_ipc_trainer_preserves_serialized_fp8_mixed_stream(monkeypatch):
         torch.bfloat16,
     ]
     assert observed["buffer_size_bytes"] == 1024
-    assert client.update_infos[0]["tensor_sizes"] == [tensor.nbytes for _, tensor in observed["stream"]]
+    assert client.update_infos[0]["chunk_capacity"] == 1024 and client.update_infos[0]["last"]

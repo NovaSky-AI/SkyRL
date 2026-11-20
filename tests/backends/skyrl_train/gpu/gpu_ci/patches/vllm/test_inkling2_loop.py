@@ -43,6 +43,8 @@ pytestmark = pytest.mark.b200
 # synthetic checkpoint's are 8 and 16, so the test redraws those tensors. Prompts are longer than the window.
 PROMPT_LENS = (150, 300)
 D_REL, WINDOW = 16, 128
+# The build's looped forward always runs its fused conv + mix kernels, which take only the release hidden sizes.
+HIDDEN = 4608
 # The special tokens vLLM's Inkling renderer requires of the tokenizer (the stand-in tokenizer lacks them).
 INKLING_SPECIAL_TOKENS = [
     "<|message_user|>",
@@ -70,7 +72,7 @@ def _write(path: str, looped: bool = True, topk=None) -> str:
 
     os.makedirs(path, exist_ok=True)
     # vLLM's Inkling renderer needs a tokenizer; prompts are token ids below the synthetic vocabulary's size.
-    synth.write_checkpoint(path, tokenizer="Qwen/Qwen3-0.6B", looped=looped)
+    synth.write_checkpoint(path, tokenizer="Qwen/Qwen3-0.6B", looped=looped, hidden=HIDDEN)
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(path)
@@ -95,7 +97,7 @@ def _widen_rel(path: str) -> None:
     g = torch.Generator().manual_seed(1)
     for name in list(tensors):
         if name.endswith(".attn.wr_du.weight"):
-            tensors[name] = (0.02 * torch.randn(synth.HEADS * D_REL, synth.H, generator=g)).bfloat16()
+            tensors[name] = (0.02 * (synth.H / HIDDEN) ** 0.5 * torch.randn(synth.HEADS * D_REL, HIDDEN, generator=g)).bfloat16()
         elif name.endswith(".attn.rel_l2_clip.scale"):
             tensors[name] = (1 + 0.3 * torch.randn(synth.HEADS, D_REL, generator=g)).bfloat16()
         elif name.endswith(".attn.rel_logits_proj.proj"):

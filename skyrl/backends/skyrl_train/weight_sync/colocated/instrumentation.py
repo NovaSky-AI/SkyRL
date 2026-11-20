@@ -309,12 +309,9 @@ def benchmark_create_and_map(sizes_mb=(64, 256), counts=(1, 10, 100), restore: b
     -- what a staged wake would do per group -- without ``CuMemAllocator.wake_up``'s
     ``gc.collect()`` / ``empty_cache()``.
     """
-    from vllm.device_allocator.cumem import (
-        CuMemAllocator,
-        create_and_map,
-        libcudart,
-        unmap_and_release,
-    )
+    from vllm.device_allocator.cumem import CuMemAllocator, libcudart
+
+    create_and_map, unmap_and_release = CuMemAllocator._create_and_map, CuMemAllocator._unmap_and_release
 
     alloc = CuMemAllocator.get_instance()
     results = []

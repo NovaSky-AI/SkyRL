@@ -44,8 +44,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/inkling2/test_lora.py` | LoRA targets on every Inkling2 linear, merged export vs `reference.py`, unmerged adapter export vs the merge |
 | `gpu_ci/patches/megatron/inkling2/test_worker.py` | Megatron policy worker forward / train step, EP and TP (sequence-parallel convolutions), packed and unpacked |
 | `gpu_ci/patches/megatron/inkling2/test_fused_elementwise.py` | `inkling2/modules.py` compiled elementwise pieces (`modules.fused`) vs their eager versions, values and gradients |
-| `gpu_ci/patches/vllm/test_inkling2_mxfp8_experts.py` (B200) | vLLM plugin's MXFP8 rollout experts: BF16 load bitwise equal to the branch's layout, forward, routed-experts capture (R3); shapes the build's kernels assume away (`_fit_mxfp8_kernels_to_shapes`: unrolled GEMMs on unaligned K, expert combine and few-row SwiGLU quantize blocks) |
-| `gpu_ci/patches/vllm/test_inkling2_loop.py` (B200) | vLLM plugin on looped checkpoints (`Inkling2LoopModel`): prompt logprobs vs `reference.py` at TP 1 / 2 (and against loop bugs), R3 capture per layer run in execution order, in-place reload with CUDA graphs |
+| `gpu_ci/patches/vllm/test_inkling2_mxfp8_experts.py` (B200) | vLLM plugin's MXFP8 rollout experts: BF16 load bitwise equal to the branch's layout, forward, routed-experts capture (R3); hidden / intermediate sizes that are not multiples of 512 / 256 |
+| `gpu_ci/patches/vllm/test_inkling2_loop.py` (B200) | Looped checkpoints (`Inkling2LoopForConditionalGeneration`) on the build's `Inkling2LoopModel` with the plugin's experts and the build's per-visit R3 capture: prompt logprobs vs `reference.py` at TP 1 / 2 (and against loop bugs), R3 capture per layer run in execution order, in-place reload with CUDA graphs |
 | `patches/megatron/test_dist_optim_te_load_state_dict.py` (CPU) | `patch_dist_optim_te_load_state_dict.py` |
 | `patches/megatron/test_dist_ckpt_exchange_wait.py` (CPU) | `patch_dist_ckpt_exchange_wait.py` |
 
@@ -222,8 +222,9 @@ Megatron-Core, Megatron-Bridge or Transformers support: `inkling2/` is the whole
   `configuration.py` (registers the HF config with `AutoConfig`) and `reference.py` (plain-PyTorch
   forward used as the test oracle; transcribed from the SGLang fork shipped with the checkpoint).
   `examples/train/megatron/dequantize_inkling2.py` writes BF16 checkpoints and slices.
-- **Looped checkpoints** (`model_type: inkling2_loop`, registered with Transformers by `configuration.py` and with
-  vLLM builds that lack it by `patches/vllm/inkling2/loop_config.py`; `loop_config`: core layers run `num_passes` times with shared weights, cross-pass
+- **Looped checkpoints** (`Inkling2LoopForConditionalGeneration`, `model_type: inkling2_loop`, registered with
+  Transformers by `configuration.py` and with Megatron-Bridge as `bridge.Inkling2LoopBridge`; the
+  vLLM build serves it natively; `loop_config`: core layers run `num_passes` times with shared weights, cross-pass
   messages mixed in by low-rank controllers): `Inkling2LoopBlockMixin` (mixed into the decoder `TransformerBlock`
   by the provider) replaces `TransformerBlock.forward` -- it runs prelude / core x passes / coda over the packed
   attn-res state and checkpoints layer runs (not physical layers) under full recompute. Megatron-core changes to

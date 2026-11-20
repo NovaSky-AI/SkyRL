@@ -26,15 +26,16 @@ def apply_model_runner_registry_patch() -> None:
     if _PATCHED:
         return
 
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
-    runner_classes = [GPUModelRunner]
-    try:
-        from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
+    runner_classes = []
+    try:  # vLLM <= 0.33's V1 runner; 0.34 keeps only the one under ``gpu/``.
+        from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     except ImportError:
         pass
     else:
-        runner_classes.append(GPUModelRunnerV2)
+        runner_classes.append(GPUModelRunner)
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
+
+    runner_classes.append(GPUModelRunnerV2)
 
     for runner_cls in runner_classes:
         _record_runner_on_load(runner_cls)

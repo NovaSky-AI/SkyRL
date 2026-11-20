@@ -396,10 +396,27 @@ def _build_skyrl_nccl_engine() -> type:
 
 
 def _build_skyrl_ipc_engine() -> type:
-    from vllm.distributed.weight_transfer.ipc_engine import IPCWeightTransferEngine
+    from dataclasses import dataclass
+
+    from vllm.distributed.weight_transfer.ipc_engine import (
+        IPCWeightTransferEngine,
+        IPCWeightTransferUpdateInfo,
+    )
+
+    @dataclass
+    class SkyrlIPCWeightTransferUpdateInfo(IPCWeightTransferUpdateInfo):
+        """vLLM's IPC update info, plus the colocated slot-ring chunks' byte sizes.
+
+        A slot-ring chunk (``colocated/slot_ring.py``) holds whole tensors back to back in one of several IPC
+        buffers, with this worker's own tensor list (a local-shard send), so it cannot ride vLLM's packed layout,
+        which every worker derives from the full tensor sequence and one buffer."""
+
+        skyrl_tensor_sizes: list[int] | None = None
 
     class SkyrlIPCWeightTransferEngine(SkyrlReceiveLifecycleMixin, IPCWeightTransferEngine):
         """vLLM's CUDA IPC receive engine plus SkyRL receive targets."""
+
+        update_info_cls = SkyrlIPCWeightTransferUpdateInfo
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             from skyrl.backends.skyrl_train.weight_sync.colocated.slot_ring import (
@@ -407,55 +424,90 @@ def _build_skyrl_ipc_engine() -> type:
             )
 
             super().__init__(*args, **kwargs)
-            # One mapping per IPC slot of a transfer, released together at finish:
-            # the colocated send may ring over several packed buffers, and vLLM's
-            # one-slot importer would rebuild/release on every chunk (see
-            # MultiSlotImporter). Identical to vLLM's with a single slot.
-            self._packed_importer = MultiSlotImporter()
             self.skyrl_receive_stats = {"chunks": 0, "bytes": 0, "tensors": 0}
+            # One mapping per slot of a slot-ring transfer, released together at the end.
+            self._skyrl_ring_importer = MultiSlotImporter()
 
         def receive_weights(self, update_info: Any) -> None:
-            sizes = getattr(update_info, "tensor_sizes", None) or []
+            names = getattr(update_info, "names", None) or []
             stats = self.skyrl_receive_stats
             stats["chunks"] += 1
-            stats["bytes"] += int(sum(sizes))
-            stats["tensors"] += len(getattr(update_info, "names", None) or [])
+            stats["tensors"] += len(names)
+            stats["bytes"] += sum(
+                torch.Size(shape).numel() * getattr(torch, dtype).itemsize
+                for shape, dtype in zip(update_info.shapes, update_info.dtype_names)
+            )
+            if getattr(update_info, "skyrl_tensor_sizes", None) is not None:
+                self._skyrl_receive_ring_chunk(update_info)
+                return
+            if self.packed and self._packed_consumer is None:
+                # The in-place and adapter paths skip vLLM's start_weight_update, which opens it.
+                from vllm.distributed.weight_transfer.packed_tensor import (
+                    PackedIpcConsumer,
+                )
+
+                uuid, device_index = self._local_gpu()
+                self._packed_consumer = PackedIpcConsumer(device_index, uuid)
             if self.packed and self.skyrl_loads_in_place() and not self.skyrl_lora_armed():
                 self._skyrl_receive_packed_in_place(update_info)
                 return
             super().receive_weights(update_info)
 
         def _skyrl_receive_packed_in_place(self, update_info: Any) -> None:
-            """Load a packed chunk straight from the trainer's IPC buffer, without cloning it.
+            """Load a packed chunk's completed tensors straight into the parameters (no layerwise reload).
 
-            vLLM's ``packed_ipc_consumer`` clones every chunk because its layerwise
-            reload may keep the views past this call. An in-place model copies each
-            tensor into its parameter during ``load_weights`` and keeps nothing, so
-            the clone is only a second, slot-sized transient allocation -- which a
-            GPU filled by the woken weights (Inkling2 BF16 at TP8, colocated) has no
-            room for. The stream is drained before returning: the trainer reuses the
-            slot as soon as this round trip ends.
-            """
-            from vllm.distributed.weight_transfer.packed_tensor import unpack_tensor
-            from vllm.model_executor.model_loader.mtp_validation import (
-                disable_mtp_completeness_check,
+            vLLM's consumer copies each tensor out of the trainer's IPC buffer (a tensor may span chunks); an in-place
+            model copies it into its parameter during ``load_weights`` and keeps nothing. The stream is drained before
+            returning: the trainer refills the buffer as soon as this round trip ends."""
+            weights = self._packed_consumer.receive(
+                ipc_handle=update_info.ipc_handles,
+                names=update_info.names,
+                shapes=update_info.shapes,
+                dtype_names=update_info.dtype_names,
+                chunk_capacity=update_info.chunk_capacity,
+                last=update_info.last,
+            )
+            if weights:
+                with torch.device(self.device), self.skyrl_checkpoint_load():
+                    self.model.load_weights(weights)
+            del weights
+            torch.cuda.current_stream(self.device).synchronize()
+
+        def _skyrl_receive_ring_chunk(self, update_info: Any) -> None:
+            """Load a slot-ring chunk: whole tensors at consecutive byte offsets of one ring slot.
+
+            An in-place model copies each tensor into its parameter and keeps nothing, so it reads views of the
+            slot; vLLM's layerwise reload may keep tensors past this call, so it gets copies. The stream is drained
+            before returning: the trainer refills the slot once this round trip ends."""
+            from vllm.distributed.weight_transfer.packed_tensor import (
+                local_rebuild_args,
             )
 
-            if update_info.tensor_sizes is None:
-                raise ValueError("`tensor_sizes` is required when packed=True")
-            device_index = self.device.index
-            uuid = str(torch.cuda.get_device_properties(device_index).uuid)
-            handles = update_info.ipc_handles
-            if uuid not in handles:
-                raise ValueError(f"IPC handle not found for GPU UUID {uuid}. Available UUIDs: {list(handles)}")
-            list_args = list(handles[uuid])
-            list_args[6] = device_index
-            packed = self._packed_importer.rebuild(list_args)[: sum(update_info.tensor_sizes)]
-            dtypes = [getattr(torch, dn) for dn in update_info.dtype_names]
-            weights = unpack_tensor(packed, update_info.names, update_info.shapes, dtypes, update_info.tensor_sizes)
-            with torch.device(self.device), self.skyrl_checkpoint_load(), disable_mtp_completeness_check():
-                self.model.load_weights(weights)
-            del weights, packed
+            sizes = update_info.skyrl_tensor_sizes
+            in_place = self.skyrl_loads_in_place() and not self.skyrl_lora_armed()
+            weights = []
+            if sizes:
+                uuid, device_index = self._local_gpu()
+                slot = self._skyrl_ring_importer.rebuild(
+                    local_rebuild_args(update_info.ipc_handles, uuid, device_index)
+                )
+                offset = 0
+                for name, shape, dtype_name, nbytes in zip(
+                    update_info.names, update_info.shapes, update_info.dtype_names, sizes, strict=True
+                ):
+                    dtype = getattr(torch, dtype_name)
+                    raw = slot[offset : offset + nbytes]
+                    if not in_place or offset % dtype.itemsize:
+                        raw = raw.clone()  # its own storage (and aligned for the dtype view)
+                    weights.append((name, raw.view(dtype).view(shape)))
+                    offset += nbytes
+            if weights:
+                if in_place:
+                    with torch.device(self.device), self.skyrl_checkpoint_load():
+                        self.model.load_weights(weights)
+                else:
+                    self.model.load_weights(weights)
+            del weights
             torch.cuda.current_stream(self.device).synchronize()
 
         def start_weight_update(self) -> None:
@@ -463,10 +515,12 @@ def _build_skyrl_ipc_engine() -> type:
             super().start_weight_update()
 
         def skyrl_release_receive_buffers(self) -> None:
-            # The importer holds this worker's mapping of the trainer's packed
-            # IPC buffer. Closing it once per export releases the producer-side
-            # refcount, so the trainer's ``ipc_collect`` can free the buffer.
-            self._packed_importer.close()
+            # Unmaps the trainer's packed IPC buffer, so the trainer's ``ipc_collect`` can free it; raises if the
+            # transfer stopped before its last chunk.
+            self._skyrl_ring_importer.close()
+            consumer, self._packed_consumer = self._packed_consumer, None
+            if consumer is not None:
+                consumer.close()
 
     return SkyrlIPCWeightTransferEngine
 

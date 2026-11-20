@@ -10,7 +10,7 @@ set -x
 # (thinkingmachines/Inkling-2-Small-MXFP8) also works. Megatron-Bridge and vLLM both dequantize the
 # experts to BF16 as they load, so trainer and rollouts start from the same BF16 model.
 # Adapter-only sync (merge_lora=false) needs the LoRA support of
-# the Inkling2 vLLM build (vllm/models/inkling2/lora.py).
+# the Inkling2 vLLM build (vllm/models/inkling2/nvidia/lora.py).
 #
 # Placement. Each engine holds the BF16 model at ~147 GiB/GPU, so the two sides take turns:
 # - Generation: Megatron is offloaded. Its frozen base (~37 GB/GPU at EP32) goes to file-backed

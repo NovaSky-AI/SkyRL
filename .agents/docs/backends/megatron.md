@@ -30,7 +30,7 @@ SkyRL uses Megatron-Bridge for HF-to-Megatron model conversion. Installed from g
   plain-PyTorch oracle the tests compare against. Removal plan: `patches/megatron/README.md`.
   vLLM serves it through `patches/vllm/inkling2/` on the pinned Inkling2 vLLM build
   (`pyproject.toml`). LoRA syncs merged (`merge_lora=true`) or as an adapter
-  (`merge_lora=false`, served by the build's `vllm/models/inkling2/lora.py`; use
+  (`merge_lora=false`, served by the build's `vllm/models/inkling2/nvidia/lora.py`; use
   `normalize_moe_lora=true`, as the full-rank 384-expert adapter is ~19 GiB per vLLM GPU).
   Looped checkpoints (`model_type: inkling2_loop`, `text_config.loop_config` incl. `is_varloop`; training always
   runs the checkpoint's `num_passes`) run a block-aligned core of layers several times with shared

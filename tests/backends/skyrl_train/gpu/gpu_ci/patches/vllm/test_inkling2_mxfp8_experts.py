@@ -24,7 +24,7 @@ if importlib.util.find_spec("vllm.models.inkling2") is None:
 if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 10:
     pytest.skip("Inkling2 MXFP8 experts need an SM100 GPU", allow_module_level=True)
 
-from vllm.models.inkling2.moe import Inkling2MoE  # noqa: E402
+from vllm.models.inkling2.nvidia.moe import Inkling2MoE  # noqa: E402
 
 from skyrl.backends.skyrl_train.patches.vllm.inkling2.model import (  # noqa: E402
     _BF16MoE,
@@ -169,8 +169,9 @@ def test_scales_are_not_loadable(dist_init):
 @pytest.mark.parametrize("cls", ["mxfp8", "bf16"])
 @pytest.mark.parametrize("tokens", [5, 300])
 def test_routed_experts_capture(dist_init, cls, tokens):
-    """Rollout router replay (R3): with a capture callback bound (as vLLM's routed-experts capturer
-    does), each layer reports the experts it routed each token to, and its output is unchanged."""
+    """Rollout router replay (R3): with a capture callback bound to the layer's capture row (as vLLM's
+    routed-experts capturer does), each layer reports the experts it routed each token to, and its output is
+    unchanged."""
     bf16 = _bf16_weights()
     if cls == "mxfp8":
         moe = _rollout_moe(bf16, "layer")
@@ -186,9 +187,10 @@ def test_routed_experts_capture(dist_init, cls, tokens):
         RoutedExpertsCaptureSource,
     )
 
-    assert isinstance(moe, RoutedExpertsCaptureSource)
+    (row,) = moe.routing_captures  # one row: a layer outside a loop core
+    assert isinstance(row, RoutedExpertsCaptureSource)
     captured = []
-    moe.capture_fn = captured.append
+    row.capture_fn = captured.append
     assert torch.equal(moe(x), expected)
     (ids,) = captured
     assert ids.shape == (tokens, CONFIG.num_experts_per_tok)
@@ -198,25 +200,18 @@ def test_routed_experts_capture(dist_init, cls, tokens):
     assert torch.equal(ids.long().sort(-1).values, ref.sort(-1).values)
 
 
-# K dims the build's MXFP8 kernel table does not fit: the gate / up GEMM's K (hidden) is not a multiple of 512, which
-# its loop-unrolled kernels need, and the down GEMM's K (intermediate) not a multiple of its 256-wide K tile.
+# Hidden / intermediate sizes that are not multiples of 512 / 256: the gate / up GEMM's K is not a multiple of the
+# loop-unrolled kernels' double K tile, and the combine and few-row SwiGLU quantize blocks must shrink.
 UNALIGNED = SimpleNamespace(**{**vars(CONFIG), "hidden_size": 768, "intermediate_size": 384})
 
 
 @pytest.mark.parametrize("tokens", [5, 100, 600, 2000])  # token tiles 8, 16, 64, 128
-def test_unaligned_k_shapes(dist_init, monkeypatch, tokens):
-    """``_fit_mxfp8_kernels_to_shapes`` swaps the unrolled kernels it cannot run for their plain siblings and
-    refits the combine and SwiGLU quantize blocks: the MXFP8 layer then loads and matches the BF16 layer on the
-    same weights like the aligned shapes above."""
-    from vllm.models.inkling2.ops import trtllm_bmm
+def test_unaligned_k_shapes(dist_init, tokens):
+    """The build picks kernels and blocks that fit such shapes: the MXFP8 layer loads BF16 weights and matches the
+    BF16 layer on them like the aligned shapes above."""
+    from vllm.models.inkling2.nvidia.ops import trtllm_bmm
 
-    from skyrl.backends.skyrl_train.patches.vllm.inkling2.model import (
-        _fit_mxfp8_kernels_to_shapes,
-    )
-
-    monkeypatch.setattr(trtllm_bmm, "_KERNELS", dict(trtllm_bmm._KERNELS))
     trtllm_bmm.expert_plan.cache_clear()
-    _fit_mxfp8_kernels_to_shapes(UNALIGNED.hidden_size, UNALIGNED.intermediate_size)
     bf16 = _bf16_weights(UNALIGNED)
     with torch.device("cuda"):
         moe, bf16_moe = _MXFP8MoE(UNALIGNED, "mxfp8"), _BF16MoE(UNALIGNED, "bf16")

@@ -204,7 +204,7 @@ def rewrite_config(config: dict, layers: list, num_experts) -> dict:
         loop, _ = slice_loop(text, layers)
         if loop is None:
             text.pop("loop_config")
-            # A plain checkpoint: looped ones have their own model type.
+            # A plain checkpoint: looped ones have their own model type (and architecture, see release_config).
             if config.get("model_type") == "inkling2_loop":
                 config["model_type"] = "inkling2"
         else:

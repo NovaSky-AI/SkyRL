@@ -150,12 +150,7 @@ class DeltaWeightTransferEngine(WeightTransferEngine[DeltaTransferInitInfo, Delt
             multi_thread_safetensors_max_workers=self._multi_thread_safetensors_max_workers,
         )
 
-        # MTP architectures raise on incomplete layer coverage.
-        from vllm.model_executor.model_loader.mtp_validation import (
-            disable_mtp_completeness_check,
-        )
-
-        with torch.device(self.device), disable_mtp_completeness_check():
+        with torch.device(self.device):
             self.model.load_weights(tensors)
 
         load_s = time.perf_counter() - t1
