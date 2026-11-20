@@ -51,6 +51,7 @@ from skyrl.train.config.config import (
     get_config_as_dict,
 )
 from skyrl.train.utils import deadline
+from skyrl.utils.tok import check_is_vlm
 
 
 class Timer:
@@ -707,6 +708,37 @@ def validate_generator_cfg(cfg: SkyRLTrainConfig):
     # Validate inference-engine instantiation / serving topology (shared with
     # the inference-only serve entrypoint).
     validate_inference_engine_cfg(cfg)
+    _validate_vlm_lora_cfg(cfg)
+
+
+def _validate_vlm_lora_cfg(cfg: SkyRLTrainConfig):
+    """Require vLLM visual-adapter support for full-VLM FSDP LoRA training."""
+    policy_cfg = cfg.trainer.policy
+    ie_cfg = cfg.generator.inference_engine
+    if (
+        cfg.trainer.strategy != "fsdp"
+        or policy_cfg.model.lora.rank <= 0
+        or policy_cfg.language_model_only
+        or ie_cfg.backend != "vllm"
+    ):
+        return
+
+    if not check_is_vlm(policy_cfg.model.path):
+        return
+
+    kwargs_names = (
+        ("prefill_init_kwargs", "decode_init_kwargs")
+        if ie_cfg.prefill_init_kwargs or ie_cfg.decode_init_kwargs
+        else ("engine_init_kwargs",)
+    )
+    for kwargs_name in kwargs_names:
+        if (getattr(ie_cfg, kwargs_name) or {}).get("enable_tower_connector_lora") is not True:
+            raise ValueError(
+                "Full-VLM FSDP LoRA training requires "
+                f"generator.inference_engine.{kwargs_name}.enable_tower_connector_lora=true "
+                "so vLLM applies the visual adapters during rollouts. "
+                "Set this flag explicitly; otherwise vLLM may silently omit visual adapters."
+            )
 
 
 def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
