@@ -355,7 +355,7 @@ class TokensBackend:
         )
         # The reply as the client's replay of it will be read back, which is what the next call
         # matches: stored as the node's message and hashed for its match hash.
-        replay = dialect.replayed(sampled)
+        replay = dialect.replayed(chat, sampled)
         call = CallInfo(
             t_start=started,
             t_end=time.time(),
