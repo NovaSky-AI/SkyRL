@@ -715,7 +715,8 @@ def test_expert_nvfp4_w4a4_on_alltoall_on_blackwell(ray_init_fixture):
     assert results["grads_finite"], results
     # The NVFP4 fprop accumulates the exact products in fp32; the reference rounds the dequantized operands' GEMM
     # to bf16: close, and much closer than the unrounded model or the weights-only one (the inputs are rounded).
-    assert results["rel/logits_vs_ref"] < 1e-2, results
+    # The gap varies run to run (B200: 0.008-0.0094 on torch 2.13, 0.0093-0.0102 on 2.14; vs raw ~0.041 on both).
+    assert results["rel/logits_vs_ref"] < 1.5e-2, results
     assert results["rel/logits_vs_raw"] > 3 * results["rel/logits_vs_ref"], results
     assert results["rel/logits_vs_weights_only"] > 2 * results["rel/logits_vs_ref"], results
     assert results["rel/grads_vs_ref_max"] < 0.1, results
