@@ -50,6 +50,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
@@ -1274,8 +1275,15 @@ class RemoteInferenceClient(InferenceEngineInterface):
         return await self._call_all_servers("/resume")
 
     async def pause_generation(self, clear_cache: bool = False) -> Dict[str, Any]:
-        """Pause using keep mode."""
-        return await self.pause(mode=PauseMode.KEEP, clear_cache=clear_cache)
+        """Pause for a weight sync, in keep mode by default.
+
+        Keep mode freezes in-flight requests and resumes them after the update, so a sync does not wait for the
+        longest running request. ``SKYRL_DP_PAUSE_MODE`` (keep / wait / abort) overrides it under data-parallel
+        serving: wait lets in-flight requests finish first, abort drops them."""
+        mode = PauseMode.KEEP
+        if self.data_parallel_size > 1:
+            mode = PauseMode(os.environ.get("SKYRL_DP_PAUSE_MODE", "keep").lower())
+        return await self.pause(mode=mode, clear_cache=clear_cache)
 
     async def resume_generation(self) -> Dict[str, Any]:
         """Resume after pause."""
