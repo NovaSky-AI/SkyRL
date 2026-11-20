@@ -67,9 +67,12 @@ class GeneratedOutputGroup:
         global_step_when_scheduled (int): The global step when the group was scheduled for generation,
             used for validating the staleness control.
 
-        group_completion_time_s (Optional[float]): Wall-clock time (seconds) for the whole group to
-            finish generation, i.e. the time for the slowest trajectory in the group to complete.
-            None if generation timing was not captured.
+        group_completion_time_s (Optional[float]): Time (seconds) for the whole group to finish
+            generation, i.e. the time for the slowest trajectory in the group to complete: wall-clock
+            time minus the time the inference engines were paused (weight sync) while the group was
+            in flight. Env work that overlaps a pause is excluded with it, since only LLM requests
+            are frozen. Pauses issued outside the driver's inference client (the delta weight-sync
+            reload) are not excluded. None if generation timing was not captured.
 
         prompts (Optional[List[Any]]): The generator input prompts (in OpenAI message format) for this
             group, one per trajectory (parallel to ``generator_output["response_ids"]``). Retained so
@@ -987,6 +990,7 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                 global_step_at_start = self.global_step  # for staleness control
 
                 group_start_time = time.monotonic()
+                paused_seconds_at_start = self.inference_engine_client.paused_seconds()
                 if "disable_tqdm" in inspect.signature(self.generator.generate).parameters:
                     # A workaround to disable tqdm for the SkyRLGymGenerator.generate method which will
                     # blast the console with each worker's progress bar.
@@ -995,7 +999,8 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
                     )
                 else:
                     cur_generator_output: GeneratorOutput = await self.generator.generate(generator_input)
-                group_completion_time_s = time.monotonic() - group_start_time
+                group_paused_seconds = self.inference_engine_client.paused_seconds() - paused_seconds_at_start
+                group_completion_time_s = time.monotonic() - group_start_time - group_paused_seconds
 
                 # 4. Enqueue the completed group and mark accepted to free capacity slot.
                 try:

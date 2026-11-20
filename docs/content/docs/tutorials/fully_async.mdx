@@ -319,6 +319,17 @@ See the following two PRs for more details:
 - https://github.com/NovaSky-AI/SkyRL/pull/537
 - https://github.com/NovaSky-AI/SkyRL/pull/557
 
+`RemoteInferenceClient` also tracks the cumulative time spent between `pause_generation()` and
+`resume_generation()`, and the per-group `generate/group_completion_time_{mean,p90,max}` metrics
+subtract the paused time that overlapped each group. These metrics therefore report generation
+latency without the weight-sync pauses. Notes:
+- Only LLM requests are frozen during a pause; environment work that overlaps the pause is
+  subtracted along with it.
+- With `weight_sync_backend=delta`, the reload pause is issued from a trainer worker rather than
+  the driver's client, so it is not subtracted.
+- The per-trajectory metrics (`generate/completion_*`, `generate/intra_group_completion_time_*`)
+  still include pauses.
+
 ### 2. How is checkpointing supported
 
 The main challenge of performing checkpointing and resuming in fully async training is that, the 
