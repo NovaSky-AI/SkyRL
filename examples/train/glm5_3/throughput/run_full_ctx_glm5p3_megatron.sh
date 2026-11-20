@@ -136,7 +136,6 @@ ${UV_RUN:-uv run --isolated} --extra megatron -m examples.train_scripts.full_con
   trainer.policy.optimizer_config.weight_decay=0.1 \
   trainer.remove_microbatch_padding=true \
   trainer.use_expandable_segments=true \
-  trainer.fused_lm_head_logprob=true \
   trainer.logprobs_chunk_size=1024 \
   trainer.max_tokens_per_microbatch=$MAX_TOKENS_PER_MICROBATCH \
   trainer.micro_forward_batch_size_per_gpu=1 \

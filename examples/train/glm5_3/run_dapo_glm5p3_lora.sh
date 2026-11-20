@@ -45,7 +45,6 @@ uv run --isolated --extra megatron -m examples.train.algorithms.dapo.main_dapo \
   trainer.policy.model.lora.share_expert_adapters=true \
   trainer.policy.model.lora.sync_mode=memory \
   trainer.policy.model.lora.target_modules='[linear_q_down_proj,linear_q_up_proj,linear_kv_down_proj,linear_kv_up_proj,linear_proj,linear_fc1,linear_fc2]' \
-  trainer.fused_lm_head_logprob=true \
   trainer.logprobs_chunk_size=8192 \
   trainer.remove_microbatch_padding=false \
   trainer.max_tokens_per_microbatch=-1 \

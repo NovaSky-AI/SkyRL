@@ -241,6 +241,24 @@ def default_cp_comm_type_for_sliding_window(config) -> None:
         )
 
 
+def _resolve_fused_lm_head_for_init_adapter(cfg, adapter_target_modules) -> None:
+    """Keep ``trainer.fused_lm_head_logprob`` off when the init adapter trains ``lm_head``.
+
+    The fused path reads ``output_layer.weight`` directly and would skip the adapter: the
+    ``None`` default falls back to the unfused path, and an explicit ``true`` raises.
+    """
+    if "output_layer" not in adapter_target_modules:
+        return
+    if cfg.fused_lm_head_logprob is None:
+        logger.warning("fused_lm_head_logprob=None: using the unfused LM head (init_adapter_path trains lm_head)")
+        cfg.fused_lm_head_logprob = False
+    elif cfg.fused_lm_head_logprob:
+        raise ValueError(
+            "init_adapter_path: the adapter trains lm_head, which trainer.fused_lm_head_logprob=true bypasses "
+            "(it reads output_layer.weight directly); disable fused_lm_head_logprob"
+        )
+
+
 class MegatronWorker:
     _mfu_warned = False
 
@@ -760,11 +778,7 @@ class MegatronWorker:
                 else list(lora_config.target_modules)
             ),
         )
-        if "output_layer" in plan.target_modules and self.cfg.fused_lm_head_logprob:
-            raise ValueError(
-                "init_adapter_path: the adapter trains lm_head, which trainer.fused_lm_head_logprob=true bypasses "
-                "(it reads output_layer.weight directly); disable fused_lm_head_logprob"
-            )
+        _resolve_fused_lm_head_for_init_adapter(self.cfg, plan.target_modules)
         if not self.cfg.policy.megatron_config.lora_config.merge_lora:
             max_lora_rank = lora_config.max_lora_rank or lora_config.rank
             if plan.max_rank > max_lora_rank:

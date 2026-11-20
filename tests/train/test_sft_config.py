@@ -157,7 +157,7 @@ class TestTopLevelOverrides:
 
     def test_fused_lm_head_logprob_bridges_to_trainer(self):
         skyrl_cfg = build_skyrl_config_for_sft(_sft_cfg_from_overrides([]))
-        assert skyrl_cfg.trainer.fused_lm_head_logprob is False
+        assert skyrl_cfg.trainer.fused_lm_head_logprob is None
         assert skyrl_cfg.trainer.logprobs_chunk_size == 1024
 
         cfg = _sft_cfg_from_overrides(["fused_lm_head_logprob=true", "logprobs_chunk_size=2048"])
