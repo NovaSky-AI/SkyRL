@@ -2,11 +2,13 @@
 uv run --isolated --extra dev pytest tests/test_sql.py
 """
 
+import sqlite3
+
 import skyrl_gym
 import pytest
 from unittest.mock import patch, MagicMock
 from omegaconf import DictConfig
-from skyrl_gym.envs.sql.utils import verify_format_and_extract
+from skyrl_gym.envs.sql.utils import calculate_reward_single, compute_score_single, verify_format_and_extract
 
 # Mock data for testing
 MOCK_DB_RESULTS = {
@@ -270,3 +272,111 @@ def test_verify_format_and_extract(output, expected_valid, description):
         pytest.fail(
             f"verify_format_and_extract should not raise exception for case {description} with input {repr(output)}, but got: {e}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Empty gold result regression tests (https://github.com/NovaSky-AI/SkyRL/issues/2451)
+#
+# When the gold SQL returns no rows, result-set equality matches *any* query
+# that also returns no rows (e.g. "SELECT 1 WHERE 0;"), which awarded a free
+# reward of 1.0. By default the env now awards 0.0 in that case; the legacy
+# behavior is available through Text2SQLEnvConfig.reward_empty_gold = True.
+# These tests run against a real on-disk sqlite database.
+# ---------------------------------------------------------------------------
+
+ANSWER_EMPTY_RESULT = "<think>I will return the final query.</think>\n<solution>SELECT 1 WHERE 0;</solution>"
+ANSWER_NONEMPTY_MATCH = "<think>t</think>\n<solution>SELECT name FROM employees WHERE salary > 150;</solution>"
+GOLD_EMPTY = "SELECT name FROM employees WHERE salary > 1000;"  # matches no row
+GOLD_NONEMPTY = "SELECT name FROM employees WHERE salary > 150;"  # matches 1 row
+
+
+@pytest.fixture
+def real_db(tmp_path):
+    """A real on-disk sqlite database laid out like the Spider tree used by SQLEnv."""
+    db_dir = tmp_path / "spider" / "database" / "mini"
+    db_dir.mkdir(parents=True)
+    conn = sqlite3.connect(db_dir / "mini.sqlite")
+    conn.execute("CREATE TABLE employees (id INTEGER PRIMARY KEY, name TEXT, salary INTEGER)")
+    conn.executemany(
+        "INSERT INTO employees (id, name, salary) VALUES (?, ?, ?)",
+        [(1, "John Doe", 100), (2, "Jane Smith", 200)],
+    )
+    conn.commit()
+    conn.close()
+    return tmp_path
+
+
+def make_sql_env(db_root, ground_truth, reward_empty_gold=None):
+    extras = {
+        "reward_spec": {"method": "rule", "ground_truth": ground_truth},
+        "max_turns": 1,
+        "db_id": "mini",
+        "data": "spider",
+    }
+    env_config = {"db_path": str(db_root)}
+    if reward_empty_gold is not None:
+        env_config["reward_empty_gold"] = reward_empty_gold
+    return skyrl_gym.make("text2sql", env_config=DictConfig(env_config), extras=extras)
+
+
+@pytest.mark.parametrize(
+    "gold_sql, completion, reward_empty_gold, expected, description",
+    [
+        # Regression for #2451: gold result is empty and the prediction is also
+        # empty -> no reward by default (used to be 1.0).
+        (GOLD_EMPTY, ANSWER_EMPTY_RESULT, None, 0.0, "empty_gold_and_pred_no_free_reward"),
+        # Opt-in flag restores the legacy behavior.
+        (GOLD_EMPTY, ANSWER_EMPTY_RESULT, True, 1.0, "empty_gold_and_pred_opt_in"),
+        # Explicitly disabling the flag keeps the safe default.
+        (GOLD_EMPTY, ANSWER_EMPTY_RESULT, False, 0.0, "empty_gold_and_pred_opt_out"),
+        # Empty gold, non-empty prediction: no match either way.
+        (
+            GOLD_EMPTY,
+            "<think>t</think>\n<solution>SELECT name FROM employees;</solution>",
+            None,
+            0.0,
+            "empty_gold_nonempty_pred",
+        ),
+        # Non-empty gold behavior is unchanged.
+        (GOLD_NONEMPTY, ANSWER_NONEMPTY_MATCH, None, 1.0, "nonempty_gold_match"),
+        (GOLD_NONEMPTY, ANSWER_EMPTY_RESULT, None, 0.0, "nonempty_gold_empty_pred"),
+        (
+            GOLD_NONEMPTY,
+            "<think>t</think>\n<solution>SELECT name FROM employees WHERE id = 1;</solution>",
+            None,
+            0.0,
+            "nonempty_gold_mismatch",
+        ),
+        # Malformed output still yields -1.
+        (GOLD_EMPTY, "no tags at all", None, -1.0, "invalid_format"),
+    ],
+)
+def test_empty_gold_reward(real_db, gold_sql, completion, reward_empty_gold, expected, description):
+    env = make_sql_env(real_db, gold_sql, reward_empty_gold)
+    out = env.step(completion)
+    assert out["done"]
+    assert out["reward"] == expected, description
+
+
+def test_calculate_reward_single_empty_gold(real_db):
+    """Direct check of the reward helpers on a real database file."""
+    db_file = str(real_db / "spider" / "database" / "mini" / "mini.sqlite")
+
+    # gold returns no rows: an empty prediction must not earn reward by default
+    assert calculate_reward_single(ANSWER_EMPTY_RESULT, GOLD_EMPTY, db_file) == 0.0
+    assert compute_score_single(ANSWER_EMPTY_RESULT, GOLD_EMPTY, db_file) == 0.0
+
+    # legacy behavior available through the opt-in flag
+    assert calculate_reward_single(ANSWER_EMPTY_RESULT, GOLD_EMPTY, db_file, reward_empty_gold=True) == 1.0
+    assert compute_score_single(ANSWER_EMPTY_RESULT, GOLD_EMPTY, db_file, reward_empty_gold=True) == 1.0
+
+    # non-empty gold is unchanged
+    assert calculate_reward_single(ANSWER_EMPTY_RESULT, GOLD_NONEMPTY, db_file) == 0.0
+    assert calculate_reward_single(ANSWER_NONEMPTY_MATCH, GOLD_NONEMPTY, db_file) == 1.0
+
+
+def test_env_config_missing_flag_defaults_to_false(real_db):
+    """A DictConfig without the new key keeps the safe default (no reward for empty-gold matches)."""
+    env = make_sql_env(real_db, GOLD_EMPTY, reward_empty_gold=None)
+    assert env.reward_empty_gold is False
+    assert env.step(ANSWER_EMPTY_RESULT)["reward"] == 0.0
