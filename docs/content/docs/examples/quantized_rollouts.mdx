@@ -62,6 +62,8 @@ trainer.policy.megatron_config.expert_nvfp4_activation_rounding.stochastic_round
 
 A block scale that differs from the rollouts' makes the trainer round to another grid than the one it emulates (logged at startup). Stochastic rounding keeps the round-to-nearest grid's block scales (one E4M3 step larger where a block's largest value would saturate) and rounds each value to one of its two E2M1 neighbours, up with probability equal to its distance from the lower one, so it is unbiased. Weights draw once per optimizer step and expert, so every fprop, dgrad and recompute of a step, and every rank holding the expert, round alike; inputs draw afresh in each forward, and activation recompute redraws the same.
 
+The trainer's round trips and packs run on fused CUDA kernels: one kernel reads each BF16 element once and writes its round trip once, with FlashInfer's arithmetic, so the round-to-nearest bytes are FlashInfer's. The kernels are compiled with `nvcc` on first use (a few seconds, once per node) and cached under `SKYRL_QAT_NVFP4_KERNEL_DIR` (default `$TMPDIR/skyrl_nvfp4_kernels_<uid>`; the directory must belong to the user and not be writable by others). If `nvcc` is missing or the build fails, the trainer logs a warning and uses FlashInfer with a Triton decode instead; `SKYRL_QAT_NVFP4_FUSED=0` selects that path. The `expert_nvfp4 (...)` line in the startup log names the path in use.
+
 The trainer needs whole experts per rank (`expert_tensor_parallel_size: 1`), `moe_grouped_gemm` and the NCCL or CUDA-IPC weight sync. LoRA, MTP and `fake_int4_qat` are not supported. See `examples/train/megatron/run_megatron_dapo_qwen3_30b_a3b_nvfp4.sh`.
 
 ### KV cache QAT: attending over the rollouts' KV cache

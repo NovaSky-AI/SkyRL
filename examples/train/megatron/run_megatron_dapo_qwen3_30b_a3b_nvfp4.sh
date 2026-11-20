@@ -10,9 +10,18 @@ set -x
 # too, with the fprops on NVFP4 tensor cores; on the default alltoall dispatcher). Same recipe as
 # run_megatron_dapo_qwen3_30b_a3b.sh apart from placement and the NVFP4 flags below. vLLM runs its experts
 # expert-parallel so each rank quantizes full-width down_proj inputs, as the trainer does.
+#
+# The trainer's NVFP4 round trips and packs run on the fused sm_100 kernels, which nvcc builds on first use. Without
+# nvcc they run on FlashInfer. The startup line "expert_nvfp4 (<mode>): ..." names the path in use.
+#
+# Optional flags, appended to the command line:
+#   stochastic weight rounding: trainer.policy.megatron_config.expert_nvfp4_weight_rounding.stochastic_rounding=true
+#   rollout routing replay:     trainer.policy.megatron_config.moe_enable_routing_replay=true
+#                               generator.inference_engine.enable_return_routed_experts=true
 
 # bash examples/train/algorithms/dapo/prepare_dapo_data.sh
 # bash examples/train/megatron/run_megatron_dapo_qwen3_30b_a3b_nvfp4.sh
+# EXPERT_NVFP4_MODE=w4a4 bash examples/train/megatron/run_megatron_dapo_qwen3_30b_a3b_nvfp4.sh
 
 MODEL_NAME="Qwen/Qwen3-30B-A3B-Base"
 DATA_DIR="$HOME/data/dapo"

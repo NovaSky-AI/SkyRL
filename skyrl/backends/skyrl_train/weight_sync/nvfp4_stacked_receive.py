@@ -10,7 +10,8 @@ code, run once, so the final parameters equal the per-expert path's bytes as lon
 per-expert loader writes. That holds for ModelOpt NVFP4 with MoE TP = 1 (expert parallel), no padded TP shards,
 no redundant experts, and parameters whose shapes equal the stack's local slice -- every one of which is checked;
 anything else falls back to :func:`unstack_to_per_expert` through ``model.load_weights``, i.e. exactly today's
-path.
+path. A layer with no expert module on this worker (a layer of another pipeline stage) also takes the fallback, so
+the model's own loader applies its stage checks.
 
 Pinned to vLLM's layerwise reload internals (``vllm/model_executor/model_loader/reload/``; written for 0.32,
 re-checked unchanged in 0.33). If they cannot be imported, every layer takes the fallback.
@@ -198,7 +199,13 @@ class Nvfp4StackedReceiver:
             except ImportError as exc:
                 self._fallback(layer_prefix, stacks, f"vLLM layerwise reload unavailable: {exc}")
                 return
-            module, _ = find_expert_module(self.model, layer_prefix)
+            try:
+                module, _ = find_expert_module(self.model, layer_prefix)
+            except ValueError as exc:
+                # E.g. a layer of another pipeline stage: every stage receives the whole stream. The model's own
+                # loader skips the weights of other stages and raises for names it does not know.
+                self._fallback(layer_prefix, stacks, str(exc))
+                return
             info = layerwise.get_layerwise_info(module)
             if not info.can_load():
                 self._fallback(layer_prefix, stacks, "layer is not under layerwise reload")

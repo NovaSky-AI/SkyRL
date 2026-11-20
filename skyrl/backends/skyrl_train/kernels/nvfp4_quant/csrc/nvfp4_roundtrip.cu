@@ -324,10 +324,12 @@ __device__ __forceinline__ void quant_block(const V8& x, uint32_t abits, float g
     for (int i = 0; i < 8; i++) {
       float2 const nt = __fmul2_rn(xp[i], bcast(-g));
       float2 const d4 = fhfma2(h4[i], __high2half(h2), nt), d6 = fhfma2(h6[i], __low2half(h2), nt);
-      float2 d = make_float2(d4.x, d6.x);
-      err = __fadd2_rn(err, __fmul2_rn(d, d));
-      d = make_float2(d4.y, d6.y);
-      err = __fadd2_rn(err, __fmul2_rn(d, d));
+      // Scalar on purpose: ptxas fuses the packed mul.rn + add.rn pair into one FMA (also with -fmad=false), and
+      // the fused sum picks the other candidate than FlashInfer on a few blocks per million.
+      err.x = __fadd_rn(err.x, __fmul_rn(d4.x, d4.x));
+      err.y = __fadd_rn(err.y, __fmul_rn(d6.x, d6.x));
+      err.x = __fadd_rn(err.x, __fmul_rn(d4.y, d4.y));
+      err.y = __fadd_rn(err.y, __fmul_rn(d6.y, d6.y));
     }
     bool const pick4 = err.x < err.y;
     if constexpr (SR) {
