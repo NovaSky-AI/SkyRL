@@ -529,8 +529,8 @@ def _fused_lm_head_logprob_apply(
     """Dispatch the fused LM-head token-logprob to the requested backend.
 
     ``"torch"`` uses :class:`FusedLinearChunkedDistributedLogprob`; both Triton
-    backends use ``FusedLinearLogprobTriton`` when CUDA + triton are available
-    and otherwise warn and fall back to torch. Both return TP-combined ``[B, S]``
+    backends require CUDA and Triton; import and execution errors propagate.
+    Both return TP-combined ``[B, S]``
     log-probs and, when requested, entropy. ``entropy_requires_grad`` keeps the
     entropy output in the fused backward graph for an RL entropy bonus. Only the
     torch backend applies a final logit ``softcap`` (and then ``temperature``);
@@ -546,34 +546,24 @@ def _fused_lm_head_logprob_apply(
         )
         backend = FusedLmHeadBackend.TORCH
     if backend in triton_backends:
-        try:
-            from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
-                TRITON_AVAILABLE,
-                FusedLinearLogprobTriton,
-                is_cuda_available,
-            )
+        from skyrl.backends.skyrl_train.distributed.megatron.fused_linear_logprob_triton import (
+            FusedLinearLogprobTriton,
+        )
 
-            if not (TRITON_AVAILABLE and is_cuda_available):
-                raise ImportError("triton is not installed or no CUDA device is available")
-            args = (
-                hidden,
-                weight,
-                target,
-                vocab_start_index,
-                vocab_end_index,
-                chunk_size,
-                tp_group,
-                inference_only,
-            )
-            return FusedLinearLogprobTriton.apply(  # type: ignore[no-any-return]
-                *args, active_mask, active_spans, compute_entropy, entropy_requires_grad
-            )
-        except (ImportError, RuntimeError) as e:
-            warnings.warn(
-                f"fused_lm_head_logprob_backend={backend!r} unavailable ({e}); falling back to the "
-                "pure-PyTorch backend. Use a CUDA environment with Triton available to run the fused Triton kernel.",
-                stacklevel=2,
-            )
+        return FusedLinearLogprobTriton.apply(
+            hidden,
+            weight,
+            target,
+            vocab_start_index,
+            vocab_end_index,
+            chunk_size,
+            tp_group,
+            inference_only,
+            active_mask,
+            active_spans,
+            compute_entropy,
+            entropy_requires_grad,
+        )
 
     result = FusedLinearChunkedDistributedLogprob.apply(
         hidden,
