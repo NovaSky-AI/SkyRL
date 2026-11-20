@@ -1,6 +1,7 @@
 from skyrl.train.config.config import (
     AlgorithmConfig,
     BaseConfig,
+    BitsAndBytes4BitConfig,
     ChatTemplateConfig,
     CISPOConfig,
     ClipCovConfig,
@@ -81,6 +82,7 @@ __all__ = [
     "DynamicSamplingConfig",
     "OffPolicyCorrectionConfig",
     "BaseConfig",
+    "BitsAndBytes4BitConfig",
     "MixedPrecisionConfig",
     "MegatronDDPConfig",
     "MegatronLoraConfig",
