@@ -109,7 +109,18 @@ def _sample_support_from_flat_logprobs(
     processed_logprobs = np.asarray(logprobs.logprobs).reshape(-1, row_width)
     sampled_logprobs_values = processed_logprobs[:, 0]
     if not np.isfinite(sampled_logprobs_values).all():
-        raise ValueError("sample-support capture received non-finite sampled logprob(s)")
+        bad = np.flatnonzero(~np.isfinite(sampled_logprobs_values))
+        bad_rows = processed_logprobs[bad]
+        raise ValueError(
+            "sample-support capture received non-finite sampled logprob(s): "
+            f"{bad.size}/{sampled_logprobs_values.size} positions (first {bad[:8].tolist()}), "
+            f"nan={int(np.isnan(sampled_logprobs_values).sum())} "
+            f"-inf={int(np.isneginf(sampled_logprobs_values).sum())} "
+            f"+inf={int(np.isposinf(sampled_logprobs_values).sum())}; "
+            f"bad rows with any finite candidate={int(np.isfinite(bad_rows[:, 1:]).any(axis=1).sum())}, "
+            f"with any NaN candidate={int(np.isnan(bad_rows[:, 1:]).any(axis=1).sum())}; "
+            f"sampled ids {token_ids[bad[:8], 0].tolist()}"
+        )
     sampled = token_ids[:, 0]
     candidate_ids = token_ids[:, 1:]
     # vLLM emits filtered candidates as -inf. Treat all non-finite values
