@@ -36,6 +36,7 @@ from skyrl.backends.skyrl_train.weight_sync.fp8 import (
     AUTO_FP8,
     BLOCKWISE_FP8,
     WIRE_FORMATS,
+    check_fp8_wire_backend,
 )
 from skyrl.env_vars import (
     SKYRL_DUMP_INFRA_LOG_TO_STDOUT,
@@ -744,18 +745,14 @@ def validate_inference_engine_cfg(cfg: SkyRLTrainConfig):
     if ie_cfg.fp8_weight_sync_mode in WIRE_FORMATS:
         if cfg.trainer.strategy != "megatron":
             raise ValueError("FP8 weight sync requires trainer.strategy='megatron'")
-        if ie_cfg.weight_sync_backend in {"sharded_rdt", "delta"}:
-            # Neither backend can carry the quantized payload + scale pairs that
-            # FP8 weight sync is made of: the RDT weight sources export plain bridge
-            # tensors (inference dtype, fp32 / integer params kept), and the delta checkpoint format
-            # cannot represent the marker names and scale tensors. Both senders
-            # refuse at send time too, but vLLM is built with quantization="fp8"
-            # and load_format="dummy" long before the first sync, so the model is
-            # already loaded by then.
-            raise ValueError(
-                "FP8 weight sync is not supported with "
-                f"weight_sync_backend={ie_cfg.weight_sync_backend!r}; use 'nccl'"
-            )
+        # The senders check this too, but vLLM is built with the FP8 quantization
+        # config and load_format="dummy" long before the first sync.
+        from skyrl.backends.skyrl_train.weight_sync import get_transfer_strategy
+
+        check_fp8_wire_backend(
+            ie_cfg.fp8_weight_sync_mode,
+            get_transfer_strategy(ie_cfg.weight_sync_backend, cfg.trainer.placement.colocate_all),
+        )
         lora_cfg = cfg.trainer.policy.model.lora
         if lora_cfg.rank > 0 and not cfg.trainer.policy.megatron_config.lora_config.merge_lora:
             raise ValueError(

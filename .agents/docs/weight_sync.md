@@ -33,6 +33,7 @@ skyrl/backends/skyrl_train/weight_sync/
 │   └── payload.py              # zstd compress/decompress + uint8 tensor <-> bytes helpers
 └── sharded_rdt/            # the sharded_rdt (NIXL pull) backend; __init__ is import-free
     ├── rdt_send.py             # its WeightSources + build_rdt_trainer_init_info
+    ├── rdt_fp8.py              # SerializedMxfp8GroupedSource (the MXFP8 wire over sharded_rdt)
     ├── sharded_rdt_base.py     # GroupedWeightSource + layerwise_groups (the two RDT-only channels)
     ├── rdt_libfabric_shim.py   # LIBFABRIC provider shim for NIXL
     ├── sharded_rdt_trainer.py  # vendored: trainer engine + the _RDTProducerServer sidecar
@@ -169,8 +170,13 @@ other. See `fp8/models/README.md`.
 
 The receiver reload proxy recognizes the compact batched
 MoE FP8 tensors before forwarding ordinary weights to `model.load_weights`; this keeps
-the compact expert representation intact for both NCCL and IPC reloads. FP8 serialization
-is incompatible with the delta and sharded-RDT transfer backends.
+the compact expert representation intact for both NCCL and IPC reloads.
+
+`fp8/vllm_format.FP8_WIRE_BACKENDS` lists the backends that carry each wire. Blockwise is
+NCCL/IPC only. MXFP8 also runs over `sharded_rdt`: `SerializedMxfp8GroupedSource`
+(`sharded_rdt/rdt_fp8.py`) wraps the RDT grouped source and emits the same tensors as the
+NCCL MXFP8 wire, keeping its ownership and groups. Stacked MoE expert tensors (Qwen3.5)
+are not supported there. `delta` carries no FP8 wire.
 
 For Qwen3.5-35B-A3B on Hopper, use rollout TP=4. vLLM block-FP8 requires compatible
 128-wide partition shapes; TP=8 is rejected by vLLM for this model's incompatible
@@ -460,7 +466,9 @@ Knobs are `SKYRL_RDT_*` env vars, forwarded to every Ray worker by
 `prepare_runtime_environment`: `SKYRL_RDT_LOOKAHEAD` (gather credit depth, default 1),
 `SKYRL_RDT_NUM_BUFFERS` (ring depth K, default 2), `SKYRL_RDT_STACKED_EXPERTS`,
 `SKYRL_RDT_EXPORT_RING`, `SKYRL_RDT_GC_FREEZE`, `SKYRL_RDT_SHARE_SLOTS`,
-`SKYRL_RDT_STALL_TIMEOUT_S`, `SKYRL_RDT_BUFFER_PRESIZE_GB`, and
+`SKYRL_RDT_STALL_TIMEOUT_S`, `SKYRL_RDT_BUFFER_PRESIZE_GB`,
+`SKYRL_RDT_MAX_PULL_GB` (largest packed pull, default 1, must be below 2: NIXL reads of
+2-4 GiB hang), and
 `SKYRL_RDT_VERIFY_STACKED=1` (a one-off numeric check of the stacked source's
 expert tensors against the bridge's per-expert export, on the first iteration).
 The
