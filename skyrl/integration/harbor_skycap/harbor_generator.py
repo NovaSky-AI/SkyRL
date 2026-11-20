@@ -217,6 +217,7 @@ class HarborSkycapGenerator(GeneratorInterface):
         output = compose(
             outcomes,
             overlong_filtering=self.generator_cfg.apply_overlong_filtering,
+            timeout_mask_instance_threshold=self.generator_cfg.timeout_mask_instance_threshold,
             top_k=self.generator_cfg.sampling_params.top_k,
             sample_support=getattr(self.generator_cfg.inference_engine, "enable_return_sample_support_set", False),
             routed_experts=self._routed_experts,
@@ -295,7 +296,7 @@ class HarborSkycapGenerator(GeneratorInterface):
                 attempts.record(results)
                 exception = results.exception_info.exception_type if results.exception_info else None
                 if exception == "AgentTimeoutError":
-                    # Masked, not retried, as the sibling does.
+                    # Not retried, as the sibling does; compose masks it, alone or with its instance.
                     reward, stop_reason = 0.0, "agent_timeout"
                 elif await asyncio.to_thread(_ran_out_of_context, results):
                     # Trains with reward 0, as the sibling does.
@@ -311,6 +312,14 @@ class HarborSkycapGenerator(GeneratorInterface):
             if self.records is not None and trajectory is not None:
                 self.records.add(phase, trajectory_id, attempt, trajectory)
 
+        if stop_reason == "agent_timeout":
+            # Masked whatever skycap captured, so a capture problem below must not turn it into a retried error.
+            return TrialOutcome(
+                trajectory_id=trajectory_id,
+                samples=finished.samples,
+                stop_reason=stop_reason,
+                unbridged_calls=finished.unbridged_calls,
+            )
         if finished.status != "finished":
             # The trajectory failed inside skycap (e.g. an unattributable prompt): its samples may miss a turn.
             logger.warning(f"Trajectory {trajectory_id}: skycap status {finished.status!r}, not training on it")
