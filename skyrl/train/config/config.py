@@ -692,8 +692,9 @@ class MegatronConfig(BaseConfig):
     )
     """Pass-through kwargs for Megatron's ``TransformerConfig``:
     https://github.com/NVIDIA/Megatron-LM/blob/core_r0.13.0/megatron/core/transformer/transformer_config.py
-    Also the place to put HuggingFace config overrides (e.g. ``rope_parameters``) for the Megatron
-    backend, where FSDP would use ``model_config_kwargs``.
+    ``rope_parameters`` is the one HuggingFace config key read here (the Megatron counterpart of FSDP's
+    ``model_config_kwargs.rope_parameters``): it is applied to the HF config Megatron-Bridge translates, it
+    must include ``rope_theta``, and startup fails if the model's bridge cannot apply its ``rope_type``.
 
     FP8 training is configured through the top-level ``fp8``, ``fp8_recipe``, ``fp8_param``, and
     ``fp8_amax_compute_algo`` fields above, which fold into these kwargs; setting the same keys
@@ -786,8 +787,9 @@ class MegatronConfig(BaseConfig):
     RoPE (``nvfp4_ds_mla``) or the E4M3 latent (``fp8_ds_mla``)."""
     model_config_kwargs: dict = field(default_factory=dict)
     """HF-config overrides read from the nested ``model_config`` key only.
-    Used for bridge resolution. Not a general HF-config override -- use
-    ``transformer_config_kwargs`` instead."""
+    Used for bridge resolution. Not a general HF-config override: Megatron settings go in
+    ``transformer_config_kwargs``, and RoPE overrides in ``transformer_config_kwargs.rope_parameters``
+    (RoPE keys here are rejected)."""
     dist_ckpt_optim_fully_reshardable: bool = False
     """When True, use the "fully-reshardable" format for the distributed-optimizer checkpoint.
     When False (default), use the "dp-reshardable" format, which is more efficient but only
@@ -861,9 +863,15 @@ class MegatronConfig(BaseConfig):
             {"rope_parameters", "rope_scaling", "rope_theta", "q_lora_rank"} & set(model_config_overrides)
         )
         if unapplied:
+            rope_hint = (
+                " RoPE overrides go in megatron_config.transformer_config_kwargs.rope_parameters."
+                if set(unapplied) - {"q_lora_rank"}
+                else ""
+            )
             raise ValueError(
                 f"megatron_config.model_config_kwargs.model_config sets {unapplied}, which the Megatron backend does "
                 "not apply: Megatron-Bridge builds the model from the checkpoint's own config. Remove the override."
+                + rope_hint
             )
         # The top-level FP8 fields fold into the TransformerConfig kwargs; explicitly
         # configured kwargs take precedence.
@@ -2025,6 +2033,23 @@ class TrainerConfig(BaseConfig):
         if self.ref.model.path is None:
             self.ref.model.path = self.policy.model.path
 
+        # The reference model scores the same tokens as the policy, so it takes the policy's RoPE override; a
+        # different one would make the KL term measure the RoPE difference instead of policy drift.
+        if self.strategy == "megatron":
+            policy_rope = self.policy.megatron_config.transformer_config_kwargs.get("rope_parameters")
+            ref_kwargs = self.ref.megatron_config.transformer_config_kwargs
+            ref_rope = ref_kwargs.get("rope_parameters")
+            if ref_rope is None:
+                if policy_rope is not None:
+                    ref_kwargs["rope_parameters"] = copy.deepcopy(policy_rope)
+            elif ref_rope != policy_rope:
+                # Also catches a ref-only override: the ref worker would apply it while the policy does not.
+                raise ValueError(
+                    "trainer.ref.megatron_config.transformer_config_kwargs.rope_parameters must match "
+                    "trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters (or be unset, to "
+                    "inherit it): the reference model scores the same tokens as the policy."
+                )
+
         if self.log_example_interval > 0:
             print(
                 f"log_example_interval has been renamed, use print_example_interval instead. Setting print_example_interval to {self.log_example_interval}"
@@ -2450,20 +2475,20 @@ class SkyRLTrainConfig(BaseConfig):
         inference_rope_parameters = _get_nested_value(
             overrides, "generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters"
         )
-        if inference_rope_parameters is not _MISSING:
-            trainer_strategy = _get_nested_value(overrides, "trainer.strategy")
-            trainer_strategy = "fsdp" if trainer_strategy is _MISSING else trainer_strategy
-            trainer_rope_parameters_path = (
-                "trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters"
-                if trainer_strategy == "megatron"
-                else "trainer.policy.model_config_kwargs.rope_parameters"
+        trainer_strategy = _get_nested_value(overrides, "trainer.strategy")
+        trainer_strategy = "fsdp" if trainer_strategy is _MISSING else trainer_strategy
+        trainer_rope_parameters_path = (
+            "trainer.policy.megatron_config.transformer_config_kwargs.rope_parameters"
+            if trainer_strategy == "megatron"
+            else "trainer.policy.model_config_kwargs.rope_parameters"
+        )
+        trainer_rope_parameters = _get_nested_value(overrides, trainer_rope_parameters_path)
+        # Either side alone is a mismatch too: vLLM would sample on different positions than the trainer scores.
+        if inference_rope_parameters != trainer_rope_parameters:
+            raise ValueError(
+                "`generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters` must match "
+                f"the trainer-side override at `{trainer_rope_parameters_path}` (set both, or neither)"
             )
-            trainer_rope_parameters = _get_nested_value(overrides, trainer_rope_parameters_path)
-            if inference_rope_parameters != trainer_rope_parameters:
-                raise ValueError(
-                    "`generator.inference_engine.engine_init_kwargs.hf_overrides.rope_parameters` must match "
-                    f"the trainer-side override at `{trainer_rope_parameters_path}`"
-                )
         async_engine_path = "generator.inference_engine.async_engine"
         async_engine = _get_nested_value(overrides, async_engine_path)
         if async_engine is not _MISSING:

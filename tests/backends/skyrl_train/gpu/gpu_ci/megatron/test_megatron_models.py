@@ -973,9 +973,13 @@ async def test_logprobs_matching_roundtrip(
     fp8_mode,
     max_generate_length,
     tmp_path,
+    rope_parameters=None,
 ):
     """
     Check that logprob diff matches acrosss vllm and megatron.
+
+    ``rope_parameters`` (used by ``test_logprobs_matching_roundtrip_with_rope_override``) applies the same RoPE
+    override to vLLM (``hf_overrides``) and to the Megatron trainer (``transformer_config_kwargs``).
     """
     # See the comparison branch at the end of the test.
     compare_common_prefix = (
@@ -984,6 +988,7 @@ async def test_logprobs_matching_roundtrip(
         or "kimi-k3" in model_name.lower()
         or "qwen3.8-flash-next" in model_name.lower()
         or _is_beam(model_name)
+        or bool(rope_parameters)
     )
     if _is_beam(model_name):
         create_beam_tiny(model_name)
@@ -1004,6 +1009,12 @@ async def test_logprobs_matching_roundtrip(
         )
         cfg.generator.batched = False
         cfg.generator.max_turns = 1
+        if rope_parameters:
+            mcfg = cfg.trainer.policy.megatron_config
+            mcfg.transformer_config_kwargs = {
+                **(mcfg.transformer_config_kwargs or {}),
+                "rope_parameters": dict(rope_parameters),
+            }
 
         if fp8_mode:
             # Megatron: blockwise FP8 compute; the fp8_param variant keeps
@@ -1063,6 +1074,10 @@ async def test_logprobs_matching_roundtrip(
         tokenizer.pad_token = tokenizer.eos_token
 
         engine_overrides = _engine_overrides_for_model(model_name, fp8_mode)
+        if rope_parameters:
+            # YaRN multiplies the context vLLM would size its KV cache for.
+            engine_overrides["engine_init_kwargs"]["hf_overrides"] = {"rope_parameters": dict(rope_parameters)}
+            engine_overrides["engine_init_kwargs"].setdefault("max_model_len", 4096)
         async with InferenceEngineState.create(
             cfg=cfg,
             model=model_name,
@@ -1202,7 +1217,9 @@ async def test_logprobs_matching_roundtrip(
             # has a flat enough distribution that 53 of 80 sequences diverged
             # (~0.93 positional vs ~0.008 on prefixes). So does the 4-of-48-layer
             # Qwen3.8-Flash-Next slice, whose greedy output differs between two
-            # unsynced runs of the same engine. The Kimi K3 slice is the same story.
+            # unsynced runs of the same engine. The Kimi K3 slice is the same story, and so is
+            # the RoPE-override test: Qwen3-0.6B at rope_theta 1e4 instead of its trained 1e6
+            # (0.166 positional; per-token means -0.2550 vs -0.2579).
             if compare_common_prefix:
                 ids_1, lp_1 = gen_out_1["response_ids"], gen_out_1["rollout_logprobs"]
                 ids_2, lp_2 = gen_out_2["response_ids"], gen_out_2["rollout_logprobs"]
@@ -1254,3 +1271,22 @@ async def test_logprobs_matching_roundtrip(
             assert (
                 logprobs_diff.mean().item() < vllm_threshold
             ), f"Logprob diff should be less than {vllm_threshold}, but is {logprobs_diff.mean().item():.6f}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.megatron_models
+async def test_logprobs_matching_roundtrip_with_rope_override(tmp_path):
+    """The same RoPE override on vLLM and on the Megatron trainer gives matching logprobs (#2753).
+
+    Real weights and the real-weights bound (5e-2). The override moves rope_theta from Qwen3's 1e6 to 1e4 and adds
+    YaRN x4, so a trainer that ignores it, as before #2735, misses the bound by far.
+    """
+    await test_logprobs_matching_roundtrip(
+        2, 1, 1, 1, None, 2, 2, "Qwen/Qwen3-0.6B", 1e-1, 5e-2, None, None, tmp_path,
+        rope_parameters={
+            "rope_type": "yarn",
+            "factor": 4.0,
+            "original_max_position_embeddings": 32768,
+            "rope_theta": 10000.0,
+        },
+    )  # fmt: skip

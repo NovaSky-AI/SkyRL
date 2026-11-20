@@ -1,3 +1,4 @@
+import copy
 import dataclasses
 import functools
 import os
@@ -167,6 +168,8 @@ if TYPE_CHECKING:
 
 import skyrl.backends.skyrl_train.workers.megatron.model_bridges  # noqa: F401  # register extra bridges
 from skyrl.backends.skyrl_train.workers.megatron.model_bridges import (
+    apply_rope_override,
+    check_rope_override,
     maybe_force_qwen35_text_bridge,
 )
 from skyrl.backends.skyrl_train.workers.megatron.model_flops import (
@@ -408,6 +411,7 @@ class MegatronWorker:
             if isinstance(transformer_config_kwargs, dict)
             else OmegaConf.to_container(transformer_config_kwargs, resolve=True)
         )
+        rope_parameters = transformer_config_kwargs.get("rope_parameters")
         # validate_megatron_cfg resolves fp8_recipe="auto" on the driver when it
         # can see a GPU; a GPU-less driver ships "auto" through unresolved. The
         # worker always has the target device visible, so resolve here and
@@ -441,6 +445,8 @@ class MegatronWorker:
                 "language_model_only=True: forcing Qwen3.5 text->GPTModel bridge "
                 "(native GDN thd packing path; vision tower dropped)"
             )
+        if rope_parameters:
+            apply_rope_override(bridge.hf_pretrained.config, rope_parameters)
         if language_model_only and getattr(hf_config_original, "model_type", None) == "kimi_k25":
             # megatron-bridge ships its own KimiK25VLBridge for this architecture, whose
             # provider builds a vision tower this backend cannot train. model_bridges
@@ -466,6 +472,8 @@ class MegatronWorker:
         # Random init needs no extra sync: MegatronStrategy.set_seed seeds every TP rank alike and calls
         # model_parallel_cuda_manual_seed, so TP-replicated parameters come out identical.
         provider = bridge.to_megatron_provider(load_weights=not SKYRL_MEGATRON_RANDOM_INIT)
+        if rope_parameters:
+            check_rope_override(provider, rope_parameters, type(getattr(bridge, "_model_bridge", None)).__name__)
 
         if not enable_mtp and getattr(provider, "mtp_num_layers", None):
             logger.info(f"Disabling MTP for training (mtp_num_layers={provider.mtp_num_layers} -> None)")
@@ -510,6 +518,10 @@ class MegatronWorker:
 
         # Apply any additional transformer config kwargs (can override the above).
         for k, v in transformer_config_kwargs.items():
+            # rope_parameters is an HF config key, not a TransformerConfig field: apply_rope_override already
+            # applied it through Megatron-Bridge's HF config before the provider was built.
+            if k == "rope_parameters":
+                continue
             setattr(provider, k, v)
 
         # megatron-core rejects mHC (hyper-connection) models under full activation recompute:
@@ -608,8 +620,14 @@ class MegatronWorker:
 
         # strategy.hf_config is the on-disk source-of-truth used by
         # save_hf_configs and must NOT carry runtime overrides like
-        # mtp_num_layers=0; assign the un-mutated AutoConfig here.
-        self.strategy.hf_config = hf_config_original
+        # mtp_num_layers=0; assign the un-mutated AutoConfig here. A RoPE
+        # override is not runtime-only: the weights are trained under it, so the
+        # exported config carries it (as FSDP's saved config does).
+        export_config = hf_config_original
+        if rope_parameters:
+            export_config = copy.deepcopy(hf_config_original)
+            apply_rope_override(export_config, rope_parameters)
+        self.strategy.hf_config = export_config
         self.tokenizer = tokenizer
         self.enable_router_replay = megatron_config.moe_enable_routing_replay
         self.enable_sample_support_replay = self.cfg.algorithm.enable_sample_support_replay
