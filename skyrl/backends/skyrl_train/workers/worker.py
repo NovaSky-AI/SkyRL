@@ -1233,8 +1233,9 @@ class PolicyWorkerBase(Worker):
             centering_inputs = None
             loss_rollout_logprobs, score_centering_kwargs = rollout_action_logprobs, {}
             if centering_weight is not None:
+                centering_scores = output[SCORE_CENTERING_SCORES_KEY]
                 centering_inputs = score_centering_loss_inputs(
-                    output[SCORE_CENTERING_SCORES_KEY], action_positions, rollout_action_logprobs, advantages
+                    centering_scores, action_positions, rollout_action_logprobs, advantages
                 )
                 loss_rollout_logprobs = centering_inputs.sampler_logprobs
                 score_centering_kwargs = centering_inputs.loss_kwargs()
@@ -1314,6 +1315,10 @@ class PolicyWorkerBase(Worker):
                 entropy_BS = entropy_BS[:, -num_actions - 1 : -1]
                 entropy = masked_mean(entropy_BS, loss_mask)
 
+            # Autograd retains logits until their backward runs; do not also keep
+            # the full vocabulary tensor alive throughout the decoder backward.
+            del output
+
             if self.cfg.algorithm.use_entropy_loss:
                 entropy_loss_term = entropy * self.cfg.algorithm.entropy_loss_coef
             else:
@@ -1374,11 +1379,7 @@ class PolicyWorkerBase(Worker):
             for k, v in loss_metrics.items():
                 status["loss_metrics/" + k] = v
             if centering_inputs is not None:
-                status.update(
-                    score_centering_metrics(
-                        output[SCORE_CENTERING_SCORES_KEY], centering_inputs, action_positions, loss_mask
-                    )
-                )
+                status.update(score_centering_metrics(centering_scores, centering_inputs, action_positions, loss_mask))
             if self.cfg.algorithm.use_kl_loss:
                 status["policy_kl"] = kl_loss.item()
             status.update(
