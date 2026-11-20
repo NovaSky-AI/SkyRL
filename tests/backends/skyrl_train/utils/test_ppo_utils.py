@@ -9,6 +9,10 @@ import numpy as np
 import pytest
 import torch
 
+from skyrl.backends.skyrl_train.training_batch import TrainingInputBatch
+from skyrl.backends.skyrl_train.utils.loss_normalization import (
+    MinibatchLossNormalization,
+)
 from skyrl.backends.skyrl_train.utils.ppo_utils import (
     AdaptiveKLController,
     AdvantageEstimatorRegistry,
@@ -711,6 +715,58 @@ class TestApplyLossReductionToAdvantagesMinibatch:
         )
         loss = reduce_loss(scaled, loss_mask)
         assert torch.allclose(loss, torch.tensor(4.25))
+
+    @pytest.mark.parametrize(
+        "loss_reduction", ["token_mean", "sequence_mean", "seq_mean_token_sum_norm", "prompt_mean"]
+    )
+    def test_rows_and_prompts_that_train_nothing_do_not_dilute_the_loss(self, loss_reduction):
+        """A masked or filtered trajectory, or a whole filtered prompt, is not counted in any mean."""
+        advantages = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0], [9.0, 9.0]])
+        loss_mask = torch.tensor([[1.0, 1.0], [1.0, 0.0], [0.0, 0.0], [1.0, 1.0], [0.0, 0.0]])
+        kwargs = dict(loss_reduction=loss_reduction, micro_batch_size=1, max_seq_len=2)
+        # Prompts: rows 0-2 (row 2 masked), row 3, and row 4 (filtered whole).
+        with_untrained = reduce_loss(
+            apply_loss_reduction_to_advantages_minibatch(
+                advantages, loss_mask, prompt_boundaries=[(0, 3), (3, 4), (4, 5)], **kwargs
+            ),
+            loss_mask,
+        )
+        trained = [0, 1, 3]
+        without = reduce_loss(
+            apply_loss_reduction_to_advantages_minibatch(
+                advantages[trained], loss_mask[trained], prompt_boundaries=[(0, 2), (2, 3)], **kwargs
+            ),
+            loss_mask[trained],
+        )
+        torch.testing.assert_close(with_untrained, without)
+
+    @pytest.mark.parametrize("loss_reduction", ["token_mean", "sequence_mean", "seq_mean_token_sum_norm"])
+    def test_chunks_with_the_step_normalization_sum_to_the_whole(self, loss_reduction):
+        """Chunks of a mini-batch scaled with its normalization give the whole mini-batch's loss."""
+        advantages = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]])
+        loss_mask = torch.tensor([[1.0, 1.0], [1.0, 0.0], [1.0, 1.0], [0.0, 0.0]])
+        whole = TrainingInputBatch(
+            {"sequences": torch.zeros(4, 3), "loss_mask": loss_mask, "attention_mask": torch.ones(4, 3)}
+        )
+        kwargs = dict(loss_reduction=loss_reduction, micro_batch_size=1, max_seq_len=2)
+        expected = reduce_loss(
+            apply_loss_reduction_to_advantages_minibatch(advantages, loss_mask, **kwargs),
+            loss_mask,
+        )
+        normalization = MinibatchLossNormalization.from_batch(whole)
+        actual = sum(
+            reduce_loss(
+                apply_loss_reduction_to_advantages_minibatch(
+                    advantages[start:end],
+                    loss_mask[start:end],
+                    normalization=normalization,
+                    **kwargs,
+                ),
+                loss_mask[start:end],
+            )
+            for start, end in [(0, 2), (2, 4)]
+        )
+        torch.testing.assert_close(actual, expected)
 
     def test_prompt_mean_requires_boundaries(self):
         """prompt_mean without prompt_boundaries should raise ValueError."""

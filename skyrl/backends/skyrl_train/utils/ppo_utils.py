@@ -27,6 +27,9 @@ import torch
 from jaxtyping import Float
 from loguru import logger
 
+from skyrl.backends.skyrl_train.utils.loss_normalization import (
+    MinibatchLossNormalization,
+)
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import (
     DPPOTrustRegion,
     DPPOType,
@@ -1223,8 +1226,13 @@ def apply_loss_reduction_to_advantages_minibatch(
     micro_batch_size: int,
     max_seq_len: int,
     prompt_boundaries: Optional[List[Tuple[int, int]]] = None,
+    normalization: Optional[MinibatchLossNormalization] = None,
 ) -> torch.Tensor:
     """Scale advantages so that summing produces the desired loss reduction.
+
+    Only trained rows (those with a loss token) and trained prompts count in a mean's denominator.
+    ``advantages`` may be only part of the optimizer step when ``normalization`` describes the
+    whole step, except for "prompt_mean", which counts the prompts in ``prompt_boundaries``.
 
     Args:
         advantages: Advantage tensor of shape (minibatch_size, seq_len).
@@ -1236,16 +1244,21 @@ def apply_loss_reduction_to_advantages_minibatch(
         max_seq_len: Maximum sequence length.
         prompt_boundaries: Mini-batch-relative (start, end) slices grouping the sequences of
             each prompt. Required for "prompt_mean"; ignored otherwise.
+        normalization: The optimizer step's denominators. Defaults to counting this batch.
 
     Returns:
         Scaled advantages tensor.
     """
     batch_size = advantages.shape[0]
+    trained_rows = loss_mask.sum(dim=-1) > 0
+    # A step that trains nothing still scales finitely, so its masked loss stays zero.
+    num_sequences = max(1.0, float(trained_rows.sum()) if normalization is None else normalization.num_sequences)
     normalized_advantages = torch.zeros_like(advantages)
 
     # Option 1: token mean
     if loss_reduction == "token_mean":
-        normalized_advantages = advantages / loss_mask.sum().clamp(min=1)
+        num_loss_tokens = float(loss_mask.sum()) if normalization is None else normalization.num_loss_tokens
+        normalized_advantages = advantages / max(1.0, num_loss_tokens)
 
     # Option 1b: legacy token-mean that normalizes per-microbatch then averages across microbatches.
     elif loss_reduction == "token_mean_legacy":
@@ -1263,11 +1276,11 @@ def apply_loss_reduction_to_advantages_minibatch(
 
     # Option 2: sequence mean
     elif loss_reduction == "sequence_mean":
-        normalized_advantages = advantages / (batch_size * loss_mask.sum(dim=-1, keepdim=True).clamp(min=1))
+        normalized_advantages = advantages / (num_sequences * loss_mask.sum(dim=-1, keepdim=True).clamp(min=1))
 
     # Option 3: Dr. GRPO style loss reduction to avoid length bias by normalizing by a constant
     elif loss_reduction == "seq_mean_token_sum_norm":
-        normalized_advantages = advantages / (batch_size * max_seq_len)
+        normalized_advantages = advantages / (num_sequences * max_seq_len)
 
     # Option 4: Prompt level mean - token mean within each prompt, then average over all prompts.
     # A "prompt" is a group of sequences sharing the same prompt (e.g. the n_samples_per_prompt
@@ -1276,7 +1289,7 @@ def apply_loss_reduction_to_advantages_minibatch(
     elif loss_reduction == "prompt_mean":
         if prompt_boundaries is None:
             raise ValueError("`prompt_mean` loss reduction requires `prompt_boundaries`")
-        num_prompts = len(prompt_boundaries)
+        num_prompts = max(1, sum(bool(trained_rows[p_start:p_end].any()) for p_start, p_end in prompt_boundaries))
         for p_start, p_end in prompt_boundaries:
             prompt_tokens = loss_mask[p_start:p_end].sum().clamp(min=1)
             normalized_advantages[p_start:p_end] = advantages[p_start:p_end] / (num_prompts * prompt_tokens)

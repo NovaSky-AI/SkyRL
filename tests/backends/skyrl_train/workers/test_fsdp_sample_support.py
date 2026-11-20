@@ -10,6 +10,9 @@ import torch
 from torch import nn
 
 from skyrl.backends.skyrl_train.distributed.ulysses import utils as ulysses_utils
+from skyrl.backends.skyrl_train.utils.loss_normalization import (
+    MinibatchLossNormalization,
+)
 from skyrl.backends.skyrl_train.utils.off_policy_correction_utils import RatioBand
 from skyrl.backends.skyrl_train.utils.packed_tensor import (
     PackedTensor,
@@ -453,7 +456,9 @@ def test_the_worker_centers_rollout_is_with_the_post_override_band():
     ):
         status = worker._forward_backward_micro(
             experience,
-            microbatch_weight=1.0,
+            loss_normalization=MinibatchLossNormalization(
+                num_sequences=2, num_loss_tokens=4, num_model_tokens=6, num_segments=2, min_segment_length=3
+            ),
             loss_fn_config={"eps_clip_low": 0.1, "eps_clip_high": 0.3},
         )
 
