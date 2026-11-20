@@ -34,6 +34,7 @@ from skyrl.backends.skyrl_train.weight_sync.control_plane import (
     nccl_init_payloads,
     rdt_init_payloads,
 )
+from skyrl.backends.skyrl_train.weight_sync.register import RDT_BACKEND
 
 if TYPE_CHECKING:
     import torch
@@ -212,10 +213,9 @@ def build_trainer_engine(
     dtype = str_to_torch_dtype(ie_cfg.model_dtype)
     source = source_factory(dtype, backend)
     draft_source = None
-    # Every supported speculative method (MTP) drafts from the policy checkpoint.
-    if getattr(ie_cfg, "speculative_config", None) is not None:
-        if backend == "sharded_rdt":
-            raise ValueError("sharded_rdt cannot sync the spec-decode drafter; use the nccl or delta backend.")
+    # Every supported speculative method (MTP) drafts from the policy checkpoint. sharded_rdt needs no
+    # draft session: its plan carries the MTP layers, and its engines bake them into the drafter.
+    if ie_cfg.speculative_config is not None and backend != RDT_BACKEND:
         draft_source = draft_source_factory(dtype)
 
     init_info, init_payload_fn = _build_sender_init_info(

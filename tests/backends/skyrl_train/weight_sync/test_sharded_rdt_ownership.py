@@ -61,6 +61,8 @@ class TestPpLocalOwnership:
         src._my_ep_rank = 0
         src._demoted = False
         src._verified = True
+        src._stack_ring_on = True  # __init__'s default
+        src._layer_geom = {}
         src._group_stages = []
         src._owned_group_idx = []
         src._pp_geometry = lambda: (pp_size, my_pp)  # type: ignore[method-assign]
@@ -249,7 +251,7 @@ class TestExpertOwnership:
         # these through the bridge's mapping registry and raises if it cannot —
         # there is no synthesized fallback to lean on here.)
         src._expert_names = {
-            layer: [
+            ("model.layers", layer): [
                 name
                 for e in range(ep_size * 2)
                 for name in (
@@ -286,6 +288,15 @@ class TestExpertOwnership:
         assert src._my_ep_rank == 1
         assert owners == [-1, 0, 0, 1, 1, -1, -1]
 
+    def test_each_stack_counts_its_own_experts(self):
+        """An MTP head's ``mtp.layers.0`` is not decoder layer 0, so its two experts split over EP alone."""
+        src = self._stub(ep_size=2, my_ep_rank=0)
+        decoder = [f"model.layers.0.mlp.experts.{e}.up_proj.weight" for e in range(4)]
+        src.__dict__["metadata"] = self._meta_of(
+            decoder + [f"mtp.layers.0.mlp.experts.{e}.up_proj.weight" for e in range(2)]
+        )
+        assert src._name_owner() == [0, 0, 1, 1, 0, 1]
+
     def test_an_expert_count_not_divisible_by_ep_size_raises(self):
         src = self._stub(ep_size=2)
         src.__dict__["metadata"] = self._meta_of([f"model.layers.0.mlp.experts.{e}.up_proj.weight" for e in range(3)])
@@ -315,7 +326,17 @@ class TestExpertOwnership:
         src = self._stub(ep_size=2, my_ep_rank=1)
         fc1 = [_Task(torch.full((2 * F, H), float(10 + i))) for i in range(n_local)]
         fc2 = [_Task(torch.full((H, F), float(20 + i))) for i in range(n_local)]
-        lay = _ExpertLayer(layer=0, fc1=fc1, fc2=fc2, owned=True, n_local=n_local, F=F, H=H, ep_size=2)
+        lay = _ExpertLayer(
+            megatron_index=0,
+            checkpoint_key=("model.layers", 0),
+            fc1=fc1,
+            fc2=fc2,
+            owned=True,
+            n_local=n_local,
+            F=F,
+            H=H,
+            ep_size=2,
+        )
 
         names, tensors = [], []
         src._extend_layer_experts(lay, None, names, tensors)
@@ -351,7 +372,8 @@ class TestExpertOwnership:
         F, H = 3, 2
         src = self._stub(ep_size=2, my_ep_rank=0)
         lay = _ExpertLayer(
-            layer=7,
+            megatron_index=7,
+            checkpoint_key=("model.layers", 7),
             fc1=[_Task(torch.zeros((2 * F, H)))],
             fc2=[_Task(torch.zeros((H, F)))],
             owned=True,
@@ -561,3 +583,22 @@ class TestQkvIndexDeviceCtx:
         assert pm.split_qkv_weights is before
         assert torch.arange is real_arange
         assert torch.arange(3).device.type == "cpu"
+
+
+@pytest.mark.megatron
+class TestPpLocalExportCtx:
+    """``_pp_local_export_ctx`` makes each stage export only its own tasks, with no
+    PP broadcast. A task the stage has no module for must be skipped there, not
+    fail: megatron-bridge clears the module of the MTP stage's copy of the input
+    embedding so that it is exported once, from the first stage. If that task
+    raises, only the MTP stage falls back to the plain source, and the stages then
+    meet in different PP collectives and unpickle each other's payloads."""
+
+    def test_a_task_without_a_local_module_is_skipped(self):
+        from megatron.bridge.models.conversion.param_mapping import AutoMapping
+
+        from skyrl.backends.skyrl_train.weight_sync.sharded_rdt import rdt_send
+
+        mapping = AutoMapping(megatron_param="embedding.word_embeddings.weight", hf_param="model.embed_tokens.weight")
+        with rdt_send._pp_local_export_ctx():
+            assert mapping.megatron_to_hf(None, None) == {}

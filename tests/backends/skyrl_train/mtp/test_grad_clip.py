@@ -166,6 +166,18 @@ def test_step_still_applies_the_update():
     assert update_successful and opt.stepped_with_ready_grads
 
 
+def test_a_step_skipped_on_inf_grads_clears_the_head_norm():
+    # fp16 loss scaling found inf/nan: the step reports no grad_norm, so the trainer must not
+    # re-log the previous step's head norm.
+    opt, _, _ = _build(policy_grad_norm=0.5, mtp_grad_norm=3.0)
+    assert opt.mtp_grad_norm is None  # set at install
+    opt.step()
+    assert opt.mtp_grad_norm == pytest.approx(3.0, rel=1e-4)
+    opt.prepare_grads = lambda: True
+    assert opt.step() == (False, None, None)
+    assert opt.mtp_grad_norm is None
+
+
 def test_raises_when_head_name_does_not_match():
     # If the head's parameter naming drifts, it would silently fall back into the policy's clip --
     # the exact coupling this module removes. Must fail loud instead.
@@ -195,3 +207,39 @@ def test_raises_when_named_head_params_are_absent_from_the_optimizer():
     opt = _FakeChainedOptimizer(_FakeSubOptimizer([policy_model], [policy_main]))
     with pytest.raises(RuntimeError, match="mapped to optimizer main params"):
         install_mtp_separate_grad_clip(opt, [_FakeChunk(policy_model, mtp_model)])
+
+
+def test_a_pipeline_stage_without_the_head_installs(monkeypatch):
+    # Under PP only the last stage holds the head; the first stage's ranks see no `mtp.` names but
+    # must still install (both norms are collectives). The checks are global: another rank has it.
+    policy_model = torch.nn.Parameter(torch.zeros(4))
+    policy_main = torch.nn.Parameter(torch.zeros(4))
+    policy_main.grad = torch.ones(4)
+    opt = _FakeChainedOptimizer(_FakeSubOptimizer([policy_model], [policy_main]))
+    first_stage = torch.nn.ModuleDict({"decoder": torch.nn.ParameterList([policy_model])})
+
+    def all_reduce(tensor, op=None):
+        tensor += torch.tensor([3, 1])  # the last stage's named head params and owned main params
+
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "all_reduce", all_reduce)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
+    assert install_mtp_separate_grad_clip(opt, [first_stage]) == 0
+
+
+def test_precision_aware_optimizer_layout():
+    # use_precision_aware_optimizer: the optimizer steps the bf16 shard_float16_groups, and
+    # shard_fp32_from_float16_groups holds None.
+    policy_model, mtp_model = torch.nn.Parameter(torch.zeros(4)), torch.nn.Parameter(torch.zeros(4))
+    policy_shard, mtp_shard = torch.nn.Parameter(torch.zeros(4)), torch.nn.Parameter(torch.zeros(4))
+    policy_shard.grad = torch.tensor([0.8, 0.0, 0.0, 0.0])
+    mtp_shard.grad = torch.tensor([21.0, 0.0, 0.0, 0.0])
+    sub = _FakeSubOptimizer([policy_model, mtp_model], [policy_shard, mtp_shard])
+    sub.shard_fp32_from_float16_groups = [[None, None]]
+    sub.shard_float16_groups = [[policy_shard, mtp_shard]]
+    opt = _FakeChainedOptimizer(sub)
+    assert install_mtp_separate_grad_clip(opt, [_FakeChunk(policy_model, mtp_model)]) == 1
+    _, grad_norm, _ = opt.step()
+    assert grad_norm == pytest.approx(0.8, rel=1e-4)
+    assert opt.mtp_grad_norm == pytest.approx(21.0, rel=1e-4)
+    assert torch.norm(mtp_shard.grad, 2).item() == pytest.approx(CLIP, rel=1e-3)

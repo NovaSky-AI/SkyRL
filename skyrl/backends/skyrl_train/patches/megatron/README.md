@@ -28,6 +28,7 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `gpu_ci/patches/megatron/test_dsa_head_full.py` | `patch_dsa_head_full.py` all-to-alls vs megatron-core's and an all-gather reference (TP 2 and 4) |
 | `patches/megatron/test_sparse_mla_nope.py` (CPU) | `patch_sparse_mla_nope.py` padding/unpadding, fake kernel |
 | `gpu_ci/patches/megatron/test_sparse_mla_nope.py` (H100) | `patch_sparse_mla_nope.py` vs dense reference, real TileLang kernel |
+| `patches/megatron/test_hybrid_output_processor.py` (CPU) | `patch_hybrid_output_processor.py` hook placement and kwargs vs `GPTModel`'s, wrappers installed first stay installed, refusal when the hunks don't apply, no-op once landed |
 | `patches/megatron/test_dsa_hybrid_indexer.py` (CPU) | `patch_dsa_hybrid_indexer.py` hook resolution, fake backends |
 | `patches/megatron/test_moe_release_dispatcher_probs.py` (CPU) | `patch_moe_release_dispatcher_probs.py`, fake layer state |
 | `patches/megatron/test_distopt_mixed_dtype_group_index.py` (CPU) | `patch_distopt_mixed_dtype_group_index.py` index rebuild |
@@ -39,6 +40,8 @@ Tests for this folder mirror its layout, so they are found and deleted together 
 | `patches/megatron/glm5_next/test_glm5_next_flops_fields.py` (CPU) | `glm5_next/bridge.py` sets the `kimi_*` FLOPs-formula fields |
 | `patches/megatron/test_dist_optim_te_load_state_dict.py` (CPU) | `patch_dist_optim_te_load_state_dict.py` |
 | `patches/megatron/test_dist_ckpt_exchange_wait.py` (CPU) | `patch_dist_ckpt_exchange_wait.py` |
+| `patches/megatron/test_mtp_roll_allgather.py` (CPU) | `patch_mtp_roll_allgather.py` vs megatron-core's P2P exchange (gloo, CP=4), install gating |
+| `gpu_ci/patches/megatron/test_mtp_roll_allgather_nccl.py` | `patch_mtp_roll_allgather.py` vs megatron-core's P2P exchange on NCCL (CP=2/4/8, one node) |
 
 The end-to-end GLM-5.3-Flash rows stay with the other models: `glm-5.3-flash-4layer_*` in
 `gpu_ci/megatron/test_megatron_models.py` and `test_megatron_lora_models.py`. When removing a patch,
@@ -285,6 +288,17 @@ Per-forward DSA index-share carrier under activation recompute.
 - **Remove:** the `patch_dsa_index_share()` call in `MegatronWorker.make_megatron_module`, both
   files here, and the `*.patch` package-data entry in `pyproject.toml` if nothing else uses it.
 
+### `patch_hybrid_output_processor.py`: NVIDIA/Megatron-LM#7054
+
+Upstream 57103cf063's three `HybridModel.forward` hunks, inlined and inserted at load time: they add `GPTModel`'s
+`output_processor` hook, so the fused LM head runs on HybridModel with MTP (GLM-5 under megatron-bridge 0.8).
+- **Wrappers:** the patched code goes into megatron-core's own function object, in place, so `functools.wraps`
+  wrappers installed before it stay installed, as over upstream's forward. DeepSeek-V4.1's per-forward state
+  (`deepseek_v41/model.py`) installs one when `megatron_worker.py` imports `model_bridges`.
+- **Landed?** The patch checks for itself: once megatron-core's `HybridModel.forward` takes `output_processor`, it is a
+  no-op that logs that it can be deleted.
+- **Remove:** the module, its call and import in `megatron_worker.py`, and its CPU test.
+
 ### `patch_sparse_mla_nope.py`: NVIDIA/Megatron-LM#7617
 
 Lets the TileLang SparseMLA kernel (`tilelang_dsa.fused_sparse_mla_absorbed`) take NoPE MLA
@@ -386,6 +400,18 @@ fp32 copies of all optimizer state. With allocated FusedAdam state the patch res
 - **Landed?** `DistributedOptimizer.load_state_dict` no longer calls `self.optimizer.state_dict()`.
 - **Remove:** the `apply_dist_optim_te_load_state_dict_patch()` call and import in `megatron_worker.py`,
   the module, and its CPU test.
+
+### `patch_mtp_roll_allgather.py`: megatron-core MTP roll under CP, no upstream PR yet
+
+megatron-core's MTP `roll_tensor` (packed and unpacked) sends the CP boundary tokens to the neighbours
+through `_exchange_cp_roll_boundaries`, one `batch_isend_irecv` per call. Those are the only P2P ops on
+the CP communicator, so the first call sets up its P2P connections lazily, which can deadlock when the
+CP group spans nodes. With MTP and CP > 1 the patch swaps that helper for one `all_gather_into_tensor`
+(`SKYRL_MTP_ROLL_ALLGATHER=0` / `1` forces it off / on). The roll itself stays megatron-core's.
+- **Landed?** `_exchange_cp_roll_boundaries` no longer uses P2P. On a megatron-core without the helper
+  (before NVIDIA/Megatron-LM#8389) the patch logs a warning and does nothing.
+- **Remove:** the `apply_mtp_roll_allgather_patch()` call and import in `megatron_worker.py`, the
+  module, and its CPU and GPU tests.
 
 ### `patch_dsa_head_full.py` (+ `_block_copy_kernel.py`): SkyRL-only, no upstream counterpart
 

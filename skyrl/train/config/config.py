@@ -12,7 +12,7 @@ import os
 import typing
 from abc import ABC
 from dataclasses import asdict, dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Type, TypeVar, Union
 
 import yaml
@@ -551,6 +551,31 @@ DEFAULT_TRANSFORMER_CONFIG_KWARGS = {
 }
 
 
+class MTPLossType(StrEnum):
+    """What the MTP draft heads are trained against (``trainer.mtp.loss_type``). Both are cross-entropies of the
+    draft head's next-token prediction; they differ in the target.
+
+    ``DISTRIBUTION``: the policy's own detached next-token distribution at each position (soft labels,
+    distillation). Its teacher is the full main logits, so it requires CP=1, PP=1 and no fused LM head.
+
+    ``HARD_LABEL``: the token the policy actually generated at that position (one hard label per generated token,
+    the heads' pretraining objective), a sample from the same sampler that verifies the drafts. It is scored
+    through the detached output layer on the policy's packed / CP-aware / fused-LM-head log-prob path, so it also
+    runs with CP, PP and the fused LM head (on HybridModel through the backported ``output_processor`` hook).
+
+    Both are a token mean over the whole mini-batch (see ``MegatronConfig.mtp_loss_weight``). For now both train
+    only the MTP heads, as Megatron's ``process_mtp_loss`` does with ``mtp_detach_heads=True``: the trunk,
+    embedding and output layer are detached, so the draft loss never changes the policy's update. Megatron's
+    default also trains those shared layers with the MTP loss.
+    """
+
+    DISTRIBUTION = "distribution"
+    HARD_LABEL = "hard_label"
+
+
+MTP_LOSS_TYPES = tuple(loss_type.value for loss_type in MTPLossType)
+
+
 @dataclass
 class MegatronConfig(BaseConfig):
     """Megatron-Core backend configuration, used when ``trainer.strategy="megatron"``.
@@ -720,18 +745,23 @@ class MegatronConfig(BaseConfig):
     (``num_nextn_predict_layers``); an int overrides it (``0`` force-disables MTP). Active heads are
     trained with the decoupled draft loss and synced to vLLM for speculative decoding."""
     mtp_loss_weight: float = 0.1
-    """Weight ``w`` of the draft loss in ``policy_loss + w * draft_loss``. The draft loss is fully
-    decoupled: trunk, re-embedding, output weight and teacher are all detached, so its gradient
-    reaches only the ``.mtp.`` head params. Only used when MTP heads are active."""
+    """Weight ``w`` of the draft loss in ``policy_loss + w * draft_loss``. The draft loss is a token mean
+    over the whole mini-batch (every microbatch and DP rank; per depth, then averaged over depths), so each
+    token weighs the same however the mini-batch is split into microbatches. It is fully decoupled: trunk,
+    re-embedding, output weight and teacher are all detached, so its gradient reaches only the ``.mtp.``
+    head params. Only used when MTP heads are active."""
     mtp_loss_chunk_size: Optional[int] = 1024
-    """Sequence-chunk size for the draft loss, with gradient checkpointing, to bound peak memory at
-    large vocab (e.g. Qwen3.5's 248K, where the full-sequence softmax OOMs). Numerically identical to
-    no chunking. ``None`` disables it; ignored when ``mtp_loss_topk`` is set."""
+    """Sequence-chunk size for the draft loss, to bound peak memory at large vocab (e.g. Qwen3.5's 248K,
+    where the full-sequence softmax OOMs). ``"distribution"`` checkpoints each chunk of its full-vocab soft
+    cross-entropy (ignored when ``mtp_loss_topk`` is set); ``"hard_label"`` chunks its log-prob computation.
+    Numerically identical to no chunking. ``None`` disables it."""
     mtp_loss_topk: Optional[int] = None
     """If set, use a top-k approximation of the soft-CE draft loss: distill only the teacher's top-k
     tokens (renormalized), ``O(seq*k)`` memory instead of ``O(seq*vocab)`` -- fits at large vocab
     without fragmentation. Reconciled across the TP group, so it scales to any parallel size.
-    ``None`` uses the exact full-vocab loss. Typical: 64-128."""
+    ``None`` uses the exact full-vocab loss. Typical: 64-128. Ignored when ``mtp_loss_type="hard_label"``."""
+    mtp_loss_type: str = MTPLossType.HARD_LABEL.value
+    """Draft loss for the MTP heads, set from ``trainer.mtp.loss_type``; see ``MTPLossType``."""
     async_dist_ckpt_save: bool = False
     """Write the torch_dist checkpoint from a background process so training resumes
     immediately; the pending write is finalized at the next checkpoint and at shutdown.
@@ -1691,7 +1721,21 @@ class MTPConfig(BaseConfig):
     checkpoints (Qwen3.5/Qwen3-Next/DeepSeek-V3) reuse the one head autoregressively at depths > 1;
     expect acceptance to decay with depth (the head is trained at depth 1)."""
     loss_weight: float = 0.1
-    """Weight ``w`` of the draft loss in ``policy_loss + w * draft_loss``."""
+    """Weight ``w`` of the draft loss in ``policy_loss + w * draft_loss``. The draft loss is a token mean over
+    the whole mini-batch. See ``MegatronConfig.mtp_loss_weight``."""
+    loss_type: str = MTPLossType.HARD_LABEL.value
+    """Draft loss for the MTP heads: ``"distribution"`` or ``"hard_label"``; see ``MTPLossType``."""
+    lr: Optional[float] = None
+    """Peak learning rate of the MTP heads, in their own Megatron optimizer parameter group; ``None`` uses the
+    policy's ``optimizer_config.lr``. The group follows the policy's schedule, with ``min_lr`` at the policy's
+    ``min_lr / lr`` ratio. At an RL lr such as 1e-6 a pretrained head barely moves (Adam moves each weight by
+    about the lr per step), so a head that should track the policy usually needs a larger one."""
+
+    def __post_init__(self) -> None:
+        if self.loss_type not in MTP_LOSS_TYPES:
+            raise ValueError(f"trainer.mtp.loss_type must be one of {MTP_LOSS_TYPES}, got {self.loss_type!r}.")
+        if self.lr is not None and self.lr <= 0:
+            raise ValueError(f"trainer.mtp.lr must be > 0, got {self.lr}")
 
 
 # ---------------------------------------------------------------------------

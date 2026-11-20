@@ -56,7 +56,7 @@ import functools
 import time
 from dataclasses import dataclass, field
 from math import prod
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import torch
 from vllm.config.weight_transfer import WeightTransferConfig
@@ -163,6 +163,14 @@ class _ProcItem:
     chunk: "_Chunk"
     results: "dict[FetchKey, torch.Tensor]"
     slot: int
+
+
+class _Drafter(NamedTuple):
+    """A spec-decode drafter synced in the target's sessions (see ``skyrl_set_draft_model``)."""
+
+    model: torch.nn.Module
+    unshared: torch.nn.Module  # its modules not shared with the target, which bake, reload and finalize with it
+    config: Any  # its model config
 
 
 @dataclass
@@ -301,7 +309,8 @@ class SkyRLShardedRDTWeightTransferEngine(
     # deferred work before finalize. Declarative: nothing reads the flag.
     defers_processing = True
     # The baked replay plan is a function of one concrete model's parameter
-    # layout, so a separate draft model cannot reuse it.
+    # layout, so a separate draft session cannot reuse it. A spec-decode drafter
+    # syncs in the target's own sessions instead (skyrl_set_draft_model).
     supports_draft_weight_update = False
 
     def __init__(
@@ -349,6 +358,8 @@ class SkyRLShardedRDTWeightTransferEngine(
         # Names whose copy_ fired during the bake. Unbaked names not here never
         # move data (e.g. non-local EP experts), so receive_weights skips them.
         self._live_names: set[str] = set()
+        # The spec-decode drafter, from skyrl_set_draft_model.
+        self._draft: "_Drafter | None" = None
 
         # ---- Consumer-side pre-registered receive buffers ----------------------
         # One persistent 1-D buffer per dtype per ring slot, STORAGE-registered with
@@ -395,6 +406,17 @@ class SkyRLShardedRDTWeightTransferEngine(
         self._quant_thread: Any | None = None
         self._quant_stream: Any | None = None
         self._proc_error: BaseException | None = None
+
+    def skyrl_set_draft_model(self, draft_model: torch.nn.Module, draft_model_config: Any) -> None:
+        """Sync a spec-decode drafter in the target's sessions, before ``init_transfer_engine``.
+
+        The trainer's plan carries the MTP layers next to the target's, and the target's
+        ``load_weights`` skips them. The bake hands every name the target leaves unloaded to the
+        drafter's ``load_weights``, which picks its own layers out of a full checkpoint the same way at
+        engine load. Only the drafter's own modules are reloaded: the embedding and LM head it shares
+        with the target already reload with the target.
+        """
+        self._draft = _Drafter(draft_model, _unshared_submodules(draft_model, self.model), draft_model_config)
 
     def init_transfer_engine(self, init_info: SkyRLShardedRDTWeightTransferInitInfo) -> None:
         """Resolve producers and run the one-time bake.
@@ -670,6 +692,8 @@ class SkyRLShardedRDTWeightTransferEngine(
 
         with torch.device(self.device):
             initialize_layerwise_reload(self.model)
+            if self._draft is not None:
+                initialize_layerwise_reload(self._draft.unshared)
 
     def finish_weight_update(self) -> None:
         """Drain the deferred pull/process pipeline (so every layer is fully
@@ -685,9 +709,13 @@ class SkyRLShardedRDTWeightTransferEngine(
         self.drain_pending()
         with torch.device(self.device):
             finalize_layerwise_reload(self.model, self.model_config)
+            if self._draft is not None:
+                finalize_layerwise_reload(self._draft.unshared, self._draft.config)
             # A sleep for the sync (offload_kv_for_weight_sync) zeroes MoE kernel
             # constants that no reload rebuilds.
             restore_moe_kernel_constants(self.model)
+            if self._draft is not None:
+                restore_moe_kernel_constants(self._draft.model)
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """Receive one update. Unlike the base, does NOT issue a per-update
@@ -863,19 +891,26 @@ class SkyRLShardedRDTWeightTransferEngine(
         if not names:
             return
 
-        model = self.model
         recorder = BakeSink()
+        # (modules to reload, the model whose load_weights consumes the names): the target first; then the
+        # drafter's own modules, over the names the target left unloaded (see skyrl_set_draft_model).
+        passes = [(self.model, self.model)]
+        if self._draft is not None:
+            passes.append((self._draft.unshared, self._draft.model))
 
         _t0 = time.perf_counter()
         with torch.device(self.device):
-            # Meta-restore params + save kernel tensors (we bypass the loader
-            # wrapping it installs, below).
-            initialize_layerwise_reload(model)
-            # Stamp the *original* loaders (bypassing online_process_loader), so
-            # the single load pass runs the loaders on meta and records via the
-            # fake's copy_ — with no inline _layerwise_process, no deferral.
-            self._install_recording_stamps(model, recorder)
-            model.load_weights(self._build_fake_weights(names, recorder, self.device))
+            for reload_root, loader in passes:
+                loaded = set(recorder.copied_names)
+                pass_names = names if loader is self.model else [n for n in names if n not in loaded]
+                # Meta-restore params + save kernel tensors (we bypass the loader
+                # wrapping it installs, below).
+                initialize_layerwise_reload(reload_root)
+                # Stamp the *original* loaders (bypassing online_process_loader), so
+                # the single load pass runs the loaders on meta and records via the
+                # fake's copy_ — with no inline _layerwise_process, no deferral.
+                self._install_recording_stamps(reload_root, recorder)
+                loader.load_weights(self._build_fake_weights(pass_names, recorder, self.device))
             # Keep only fully-loaded modules (copied numel >= loadable size, the
             # test online_process_loader uses): a partial module leaves unwritten
             # regions that finalize would init, so baking it scatters garbage.
@@ -891,7 +926,28 @@ class SkyRLShardedRDTWeightTransferEngine(
                     # Every name of the module shares ONE list, so identity
                     # dedups them back to one module at plan time.
                     self._name_to_plan[c.src[0]] = copies
-            self._restore_after_dry_run(model)
+            for reload_root, _loader in passes:
+                self._restore_after_dry_run(reload_root)
+        if self._draft is not None:
+            # A drafter module the plan writes nothing into (no MTP layers, or an unshared embedding or LM head whose
+            # names the target consumed) would keep drafting with its boot weights. Checked per module that owns
+            # params, as the copies are recorded. A FusedMoE under EP still writes its local experts. Buffers need no
+            # data, nor does an attention layer's KV-cache scales: a quantized KV cache makes them params, kept at
+            # their defaults when the checkpoint has none.
+            kv_scales = ("q_scale", "k_scale", "v_scale", "prob_scale")
+            path = {m: n for n, m in self._draft.model.named_modules()}
+            unloaded = [
+                path[m]
+                for m in self._draft.unshared.modules()
+                if any(n not in kv_scales for n, _ in m.named_parameters(recurse=False))
+                and m not in recorder.copies_by_layer
+            ]
+            if unloaded:
+                raise RuntimeError(
+                    f"Sharded RDT: the trainer's plan loads nothing into the spec-decode drafter's {unloaded}, which "
+                    "would keep drafting with their boot weights. Train the policy's MTP head (trainer.mtp), and "
+                    "share any module the target also loads."
+                )
 
         # Names whose copy_ fired during the bake. Names not in here no-op for
         # this worker (e.g. foreign-EP experts) and are skipped; live names that
@@ -1537,6 +1593,28 @@ def _composed_loader_probe() -> "tuple[Any, int]":
             "for this vLLM before using sharded_rdt."
         )
     return code, fn_cell
+
+
+def _unshared_submodules(model: torch.nn.Module, other: torch.nn.Module) -> torch.nn.ModuleList:
+    """The largest submodules of ``model`` that contain no module of ``other``, in one container.
+
+    Layerwise reload puts a module's params on meta until it is reloaded, so reloading the drafter
+    as a whole would also take down the embedding and LM head it shares with the target.
+    """
+    shared = {id(module) for module in other.modules()}
+
+    @functools.cache
+    def is_clean(module: torch.nn.Module) -> bool:
+        return id(module) not in shared and all(is_clean(child) for child in module.children())
+
+    def pick(module: torch.nn.Module) -> list:
+        if is_clean(module):
+            return [module]
+        if id(module) in shared:
+            return []
+        return [m for child in module.children() for m in pick(child)]
+
+    return torch.nn.ModuleList(pick(model))
 
 
 def _plan_digest(keys_per_chunk: list) -> str:
