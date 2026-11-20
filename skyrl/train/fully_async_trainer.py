@@ -832,19 +832,32 @@ class FullyAsyncRayPPOTrainer(RayPPOTrainer):
     def _should_keep_group(self, group: GeneratedOutputGroup) -> bool:
         """Whether a group has reward variance (train on it) vs. is zero-variance (drop it).
 
-        Token-level rewards (``List[List[float]]``) are collapsed to a per-trajectory sum, like the rest
-        of the trainer. Groups with <=1 live trajectory (singletons / mostly masked) are always kept.
+        Token-level rewards (``List[List[float]]``) are summed per row. Step-wise output uses only
+        the final reward of each trajectory, matching advantage computation. A trajectory is live
+        if any of its turns has trainable tokens. Groups with <=1 live trajectory are always kept.
         """
         rewards = group.generator_output["rewards"]
         if rewards and isinstance(rewards[0], list):
-            # Token-level rewards: collapse each trajectory to a scalar sequence reward.
+            # Token-level rewards: collapse each row to a scalar reward.
             seq_rewards = [float(sum(r)) for r in rewards]
         else:
             seq_rewards = rewards
+        loss_masks = group.generator_output["loss_masks"]
+        is_last_step = group.generator_output.get("is_last_step")
+        if is_last_step is not None:
+            trajectory_rewards, trajectory_masks = [], []
+            live = False
+            for i, last in enumerate(is_last_step):
+                live = live or loss_masks is None or any(loss_masks[i])
+                if last:
+                    trajectory_rewards.append(seq_rewards[i])
+                    trajectory_masks.append([int(live)])
+                    live = False
+            seq_rewards, loss_masks = trajectory_rewards, trajectory_masks
         kept_indices = zero_variance_filter(
             seq_rewards,
             [group.uid] * len(seq_rewards),
-            loss_masks=group.generator_output["loss_masks"],
+            loss_masks=loss_masks,
             tol=self.cfg.trainer.algorithm.zero_variance_filter_tol,
         )
         return len(kept_indices) > 0
