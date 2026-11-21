@@ -317,4 +317,4 @@ We welcome contributions! The codebase is small and hackable — it's easy to ge
 
 ## 📄 License
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](../LICENSE) for details.

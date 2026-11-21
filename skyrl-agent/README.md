@@ -55,7 +55,7 @@ Then head to the `examples/` folder to run tasks (training and inference). Each 
 
 ## Acknowledgements
 Huge thanks to these projects:
-- [VERL](https://github.com/volcengine/verl)
+- [VERL](https://github.com/verl-project/verl)
 - [OpenHands](https://github.com/OpenHands/OpenHands)
 - [LocAgent](https://github.com/gersteinlab/LocAgent)
 - [R2E-Gym](https://github.com/R2E-Gym/R2E-Gym)
@@ -63,7 +63,7 @@ Huge thanks to these projects:
 - [rLLM](https://github.com/rllm-org/rllm)
 - [WebThinker](https://github.com/RUC-NLPIR/WebThinker)
 - [WebSailor](https://github.com/Alibaba-NLP/DeepResearch)
-- [ARPO](https://github.com/dvlab-research/ARPO)
+- [ARPO](https://github.com/JIA-Lab-research/ARPO)
 - [MemAgent](https://github.com/BytedTsinghua-SIA/MemAgent)
 
 ## Citation
