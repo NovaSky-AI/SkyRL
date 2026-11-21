@@ -11,6 +11,19 @@ an example DAPO script again with full finetuning and LoRA on minimal nodes.
 
 Other requirements: a user provided WANDB_API_KEY so that the runs are logged and tracked, a gh token or gh auth to push to a PR branch, and a huggingface token to create the slice for stage 0.
 
+# Patches and upstream
+
+Every patch is temporary: the goal is to delete it when SkyRL bumps to an upstream release that contains the fix. Before writing one:
+
+- **Search upstream first.** Look in vLLM, Megatron-LM (`main`, and `dev`, whose fixes do not reach `main` automatically), and Megatron-Bridge for merged commits, open PRs, and issues on the same bug or feature, including model tracking issues (e.g. NVIDIA/Megatron-LM#7224 for DeepSeek-V4.1). A fix merged to `main` but not in the pinned release still needs a patch. Say so, with the upstream PR, rather than writing a different fix.
+- **Match the shape of upstream when it exists, merged or in flight.** Backport its function and class names, config fields, and call sites, even when the mechanism has to differ because we patch the pinned version from outside. Removing the patch is then a deletion rather than a migration. Examples:
+  - #2560 ports vllm-project/vllm#57797's `load_attention_sink` and vllm-project/vllm#64357's once-per-reload model hook, instead of SkyRL-side stash/defer workarounds;
+  - #2567 uses megatron-core's in-flight V4.1 interface (`dsv4_version`, `csa2_*` config fields, `CSA2State`);
+  - #2562 uses the same mapping function as the `beam-release` branch.
+- **Keep deliberate deviations explicit.** If the patch narrows upstream's behavior (e.g. limits a hook to the patched classes) or keeps something upstream lacks (e.g. selective-recompute support), say so in the module docstring so the removal step checks for it.
+- **Record the removal plan.** Put a TODO in the patch module's docstring (and at its call site) that names the upstream PR(s), says how to tell whether a new pin contains them, and lists everything to delete with the patch. Also add an entry to `patches/megatron/README.md` for Megatron patches, an "Upstream" section in the PR description, and a row in the model's tracking issue (e.g. #2587).
+- **If nothing upstream exists, raise it.** File an issue or PR with the measurements behind the patch (e.g. vllm-project/vllm#64584), and state the mechanism only once an A/B confirms it.
+
 # Stages
 ## Stage 0: Model Architecture translation to Megatron, and roundtrip logprobs test
 Goal: Create a test_megatron_models.py and test_megatron_lora_models.py test on a N layer slice of the model (where N is max(4, number of layers to include all layer types/patterns), like if we have N dense layers before MoE, and some pattern of linear vs quadratic/sparse attention).
