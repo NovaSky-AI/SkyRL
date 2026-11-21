@@ -1,5 +1,7 @@
 """Tokenization related utilities"""
 
+from os import PathLike
+
 from transformers import (
     AutoConfig,
     AutoProcessor,
@@ -31,10 +33,10 @@ def get_tokenizer(model_name_or_path, **tokenizer_kwargs) -> AutoTokenizer:
 def check_is_vlm(model_config_or_path) -> bool:
     """Returns True if the model config declares a non-null ``vision_config``.
 
-    Accepts either an already-loaded ``PretrainedConfig`` or a model name/path.
+    Accepts an already-loaded ``PretrainedConfig``, a model name, or a path-like object.
     Passing the config avoids a redundant ``AutoConfig.from_pretrained`` round-trip
     when the caller already holds it."""
-    if isinstance(model_config_or_path, str):
+    if isinstance(model_config_or_path, (str, PathLike)):
         model_config = AutoConfig.from_pretrained(model_config_or_path, trust_remote_code=True)
     else:
         model_config = model_config_or_path
