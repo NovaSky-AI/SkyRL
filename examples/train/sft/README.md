@@ -21,7 +21,8 @@ bash examples/train/sft/run_sft_megatron.sh \
 
 Each entry of `pretokenized_dataset_paths` is a local path to a file or directory in any of these formats
 (auto-detected): Parquet, JSON-lines, raw Arrow IPC files, or a HuggingFace `Dataset.save_to_disk` directory.
-Like `train_datasets`, multiple stores are concatenated and mixed per `train_dataset_weights`; multiple eval
+Like `train_datasets`, multiple stores are concatenated and sampled as their union (every row once per
+epoch) -- or mixed per `train_dataset_weights` when set; multiple eval
 stores are evaluated separately under `eval/{name}/`, with names from `eval_dataset_names` (defaulting to each
 path's basename).
 
@@ -129,10 +130,10 @@ All SFT configuration is defined in [`skyrl/train/config/sft_config.py`](../../.
 |-----------|---------|-------------|
 | `strategy` | `megatron` | Backend: `megatron` or `fsdp` |
 | `model.path` | `Qwen/Qwen3-0.6B` | HuggingFace model ID or local path |
-| `train_datasets` | `[yahma/alpaca-cleaned]` | List of HuggingFace dataset names to train on; multiple entries are mixed per `train_dataset_weights` |
+| `train_datasets` | `[yahma/alpaca-cleaned]` | List of HuggingFace dataset names to train on; multiple entries are sampled as their union, or mixed per `train_dataset_weights` when set |
 | `train_dataset_splits` | `[train[:100]]` | Split/slice per training dataset (same length as `train_datasets`) |
-| `train_dataset_weights` | equal (`1/N`) | Per-dataset sampling ratios within a batch, independent of dataset sizes; `sampler=random` only |
-| `pretokenized_dataset_paths` | `None` | List of local paths to pretokenized datasets (Parquet/JSONL/Arrow/`save_to_disk`); skips tokenization, mixed per `train_dataset_weights`; exclusive with `train_datasets` |
+| `train_dataset_weights` | `None` (union sampling) | Per-dataset sampling ratios within a batch, independent of dataset sizes (with replacement); unset = one shuffle over the union, without replacement; `sampler=random` only |
+| `pretokenized_dataset_paths` | `None` | List of local paths to pretokenized datasets (Parquet/JSONL/Arrow/`save_to_disk`); skips tokenization, sampled like `train_datasets`; exclusive with `train_datasets` |
 | `eval_datasets` | `None` | List of eval dataset names; `None` disables eval. Metrics logged under `eval/{name}/` |
 | `eval_dataset_splits` | `None` | Split per eval dataset (same length as `eval_datasets`) |
 | `eval_dataset_names` | dataset names | Shorthand names used only for logging (`eval/{name}/loss`); must be unique |
