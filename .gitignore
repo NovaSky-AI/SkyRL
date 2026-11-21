@@ -1,6 +1,9 @@
 __pycache__/
 /wandb/
 **/*.egg-info/
+.vscode/
+.venv/
+.DS_Store
 # hydra logs
 /outputs/
 /data/lcb
