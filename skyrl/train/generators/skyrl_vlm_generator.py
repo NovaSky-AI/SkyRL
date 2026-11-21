@@ -95,6 +95,7 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
         session_id = (
             f"{trajectory_id.instance_id}_{trajectory_id.repetition_id}" if trajectory_id is not None else uuid4().hex
         )
+        env = None
         try:
             # ── Setup ──────────────────────────────────────────────────────
             env_extras["max_turns"] = self.max_turns
@@ -218,8 +219,6 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
 
             # ── Cleanup ───────────────────────────────────────────────────
             env_metrics = env.get_metrics()
-            await self._run_in_executor_if_available(env.close)
-
             return TrajectoryOutput(
                 response_ids=response_ids,
                 reward=per_token_reward,
@@ -234,7 +233,11 @@ class SkyRLVLMGymGenerator(SkyRLGymGenerator):
             )
 
         finally:
-            await self.inference_engine_client.finish_session(session_id)
+            try:
+                if env is not None:
+                    await self._run_in_executor_if_available(env.close)
+            finally:
+                await self.inference_engine_client.finish_session(session_id)
 
     async def generate_batched(self, *args, **kwargs) -> GeneratorOutput:
         raise NotImplementedError(

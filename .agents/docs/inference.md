@@ -10,6 +10,18 @@ For training-to-inference weight transfer (`NewInferenceWorkerWrap`, broadcast v
     - **Control plane**: Fan-out to individual server URLs for weight sync, pause/resume.
 - Shared inference interfaces and types live in `inference_servers/base.py` (`InferenceEngineInterface`, `InferenceEngineInput`/`Output`, `ConversationType`); shared helpers (`build_engine_runtime_env`, `get_sampling_params_for_backend`) live in `inference_servers/engine_utils.py`.
 
+## Sampling admission
+
+`skyrl/train/sampling_concurrency.py` builds the run-scoped `SamplingService`
+and `SamplingClient`. `generator.sampling_concurrency.enabled` opts into a fixed
+or engine-load-driven admission window. Managed vLLM feedback is scraped from
+each server's native `/metrics` endpoint.
+
+`admission_scope: trajectory` holds a permit through the generator's model calls,
+tool waits, and cleanup. It requires unbatched generation and direct client
+leases. HTTP-only generators use request admission. Under hard pressure, the
+service selects a trajectory to shed; the generator cleans up and retries it.
+
 ## vLLM Router
 
 - `VLLMRouter` in `skyrl/backends/skyrl_train/inference_servers/vllm_router.py` wraps a child process running `vllm-router`. 

@@ -20,13 +20,16 @@ from skyrl.train.generators.base import (
     ConversationType,
     GeneratorInput,
     GeneratorOutput,
+    TrajectoryID,
 )
 from skyrl.train.generators.skyrl_gym_generator import (
     AgentLoopState,
     SkyRLGymGenerator,
+    TrajectoryOutput,
     TurnOutput,
 )
 from skyrl.train.generators.utils import build_vllm_cache_salt
+from skyrl.train.sampling_service import TrajectoryShed
 from skyrl_gym.envs.base_text_env import BaseTextEnv, BaseTextEnvStepOutput
 from tests.backends.skyrl_train.sample_support_helpers import csr, dense
 
@@ -271,6 +274,61 @@ def validate_generator_output(output: GeneratorOutput) -> bool:
             if not all(isinstance(val, (int, float)) for val in sample_logprobs):
                 return False
     return True
+
+
+@pytest.mark.asyncio
+async def test_non_batched_generate_restarts_only_the_shed_trajectory(
+    mock_tokenizer,
+    mock_llm,
+    generator_cfg,
+    mock_env_cfg,
+):
+    generator_cfg.batched = False
+    generator = SkyRLGymGenerator(
+        generator_cfg=generator_cfg,
+        skyrl_gym_cfg=mock_env_cfg,
+        inference_engine_client=mock_llm,
+        tokenizer=mock_tokenizer,
+    )
+    calls = []
+
+    class NonCopyableHandle:
+        def __deepcopy__(self, memo):
+            raise AssertionError("environment handles must not be deep-copied")
+
+    handle = NonCopyableHandle()
+
+    async def agent_loop(prompt, env_class, env_extra, *args, trajectory_id, **kwargs):
+        assert env_extra["handle"] is handle
+        calls.append(trajectory_id)
+        if len(calls) == 1:
+            raise TrajectoryShed("item_0", "engine_preemptions")
+        return TrajectoryOutput(
+            response_ids=[10],
+            reward=1.0,
+            stop_reason="stop",
+            loss_mask=[1],
+            prompt_ids=[1],
+            rollout_logprobs=None,
+            env_metrics={},
+        )
+
+    generator.agent_loop = agent_loop
+    trajectory_id = TrajectoryID(instance_id="item", repetition_id=0)
+
+    output = await generator.generate(
+        {
+            "prompts": [[{"role": "user", "content": "prompt"}]],
+            "env_classes": [mock_env_cfg.env_class],
+            "env_extras": [{"handle": handle}],
+            "trajectory_ids": [trajectory_id],
+            "batch_metadata": BatchMetadata(global_step=0, training_phase="train"),
+        },
+        disable_tqdm=True,
+    )
+
+    assert calls == [trajectory_id, trajectory_id]
+    assert output["response_ids"] == [[10]]
 
 
 @pytest.mark.asyncio
