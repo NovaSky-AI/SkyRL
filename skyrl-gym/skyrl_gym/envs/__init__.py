@@ -18,6 +18,11 @@ register(
 )
 
 register(
+    id="gsm8k_long_horizon",
+    entry_point="skyrl_gym.envs.gsm8k.long_horizon_env:GSM8kLongHorizonEnv",
+)
+
+register(
     id="text2sql",
     entry_point="skyrl_gym.envs.sql.env:SQLEnv",
 )
