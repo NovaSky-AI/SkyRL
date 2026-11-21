@@ -4,6 +4,7 @@ from transformers import (
     AutoConfig,
     AutoProcessor,
     AutoTokenizer,
+    PretrainedConfig,
     PreTrainedTokenizerFast,
 )
 
@@ -23,6 +24,17 @@ def get_tokenizer(model_name_or_path, **tokenizer_kwargs) -> AutoTokenizer:
         tokenizer_kwargs.pop("use_fast", None)
         tokenizer = PreTrainedTokenizerFast.from_pretrained(model_name_or_path, **tokenizer_kwargs)
     if tokenizer.pad_token_id is None:
+        if tokenizer.eos_token_id is None:
+            # Some checkpoints define EOS only in model config.
+            config, _ = PretrainedConfig.get_config_dict(model_name_or_path, **tokenizer_kwargs)
+            eos_token_id = config.get("eos_token_id")
+            if eos_token_id is None:
+                eos_token_id = (config.get("text_config") or {}).get("eos_token_id")
+            if isinstance(eos_token_id, list):
+                eos_token_id = eos_token_id[0] if eos_token_id else None
+            if eos_token_id is None:
+                raise ValueError(f"Neither tokenizer nor model config defines EOS for {model_name_or_path}")
+            tokenizer.eos_token_id = eos_token_id
         tokenizer.pad_token_id = tokenizer.eos_token_id
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
