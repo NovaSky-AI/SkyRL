@@ -1,10 +1,10 @@
-"""Scrape vLLM engine metrics from Ray's per-node metrics agents.
+"""Scrape vLLM engine metrics from native servers or Ray metrics agents.
 
-When ``generator.inference_engine.enable_ray_prometheus_stats=true``, the vLLM
-engines record their metrics through ``ray.util.metrics`` (via vLLM's
-``RayPrometheusStatLogger``), and Ray's metrics agent on each node exposes them
-in Prometheus text format.  This module scrapes those endpoints once per
-training step and reduces a small fixed subset to scalars suitable for wandb.
+Adaptive admission reads each managed vLLM server's native ``/metrics``
+endpoint. Training telemetry can also discover Ray's per-node metrics agents
+when ``generator.inference_engine.enable_ray_prometheus_stats=true``. This
+module normalizes both Prometheus namespaces and reduces a fixed subset to
+scalars suitable for control feedback or wandb.
 
 Counters are summed across replicas; gauges are averaged.  Rates and average
 latencies are derived from deltas vs. the previous sample.
@@ -24,6 +24,12 @@ from loguru import logger
 from skyrl.backends.skyrl_train.inference_servers.common import format_http_url
 from skyrl.train.utils.vllm_run_statistics import RunStatistics
 from skyrl.train.utils.vllm_window_statistics import latency_metrics
+from skyrl.utils.adaptive_concurrency import (
+    ConcurrencyDecision,
+    SamplingConcurrencyController,
+    VLLMEngineLoad,
+    VLLMEngineSamplingFeedback,
+)
 
 # vLLM metric base names after RayPrometheusStatLogger sanitization (`:` -> `_`)
 # AND the `ray_` prefix that Ray's metrics agent adds to every custom metric.
@@ -32,12 +38,14 @@ from skyrl.train.utils.vllm_window_statistics import latency_metrics
 # Histograms expose `_sum`/`_count`/`_bucket` samples.
 _GAUGE_NUM_RUNNING = "ray_vllm_num_requests_running"
 _GAUGE_NUM_WAITING = "ray_vllm_num_requests_waiting"
+_GAUGE_NUM_WAITING_BY_REASON = "ray_vllm_num_requests_waiting_by_reason"
 _GAUGE_KV_CACHE_USAGE = "ray_vllm_kv_cache_usage_perc"
+_GAUGE_CACHE_CONFIG_INFO = "ray_vllm_cache_config_info"
+_COUNTER_PREEMPTIONS = "ray_vllm_num_preemptions_total"
 _COUNTER_PREFIX_QUERIES = "ray_vllm_prefix_cache_queries_total"
 _COUNTER_PREFIX_HITS = "ray_vllm_prefix_cache_hits_total"
 _COUNTER_PROMPT_TOKENS = "ray_vllm_prompt_tokens_total"
 _COUNTER_GENERATION_TOKENS = "ray_vllm_generation_tokens_total"
-_COUNTER_PREEMPTIONS = "ray_vllm_num_preemptions_total"
 _COUNTER_EXTERNAL_PREFIX_QUERIES = "ray_vllm_external_prefix_cache_queries_total"
 _COUNTER_EXTERNAL_PREFIX_HITS = "ray_vllm_external_prefix_cache_hits_total"
 _COUNTER_KV_OFFLOAD_STORE_BYTES = "ray_vllm_kv_offload_store_bytes_total"
@@ -130,6 +138,20 @@ def parse_metrics_text(text: str) -> ParsedSamples:
     return out
 
 
+def _canonical_metric_name(name: str) -> str:
+    """Normalize native vLLM names to the existing Ray-exported namespace.
+
+    vLLM's own endpoint exports ``vllm:num_requests_running`` while Ray's
+    OpenTelemetry bridge exports ``ray_vllm_num_requests_running``. Keeping one
+    internal namespace lets the same reduction and typed-feedback code consume
+    either transport.
+    """
+
+    if name.startswith("vllm:"):
+        return f"ray_{name.replace(':', '_')}"
+    return name
+
+
 def aggregate(parsed: ParsedSamples, names: Iterable[str], how: str) -> Dict[str, float]:
     """Reduce per-(name, labels) values to one scalar per name.
 
@@ -220,6 +242,7 @@ class VLLMMetricsScraper:
         self._prev_timestamp: Optional[float] = None
         self._client: Optional[httpx.AsyncClient] = None
         self._warned_empty = False
+        self._previous_preemptions_by_engine: Dict[str, float] = {}
         self._snapshot_complete = True
         self._engine_snapshot = {}
         self._previous_engines = {}
@@ -319,12 +342,20 @@ class VLLMMetricsScraper:
         texts = await asyncio.gather(*(self._fetch_one(client, u) for u in self._urls))
         self._snapshot_complete = all(bool(text) for text in texts)
         merged: ParsedSamples = {}
-        for text in texts:
+        for url, text in zip(self._urls, texts):
             if not text:
                 continue
-            for key, value in parse_metrics_text(text).items():
-                # Same (name, labels) tuple should not appear on two nodes for
-                # vLLM metrics (ReplicaId is unique), so last-wins is safe.
+            for (name, labels), value in parse_metrics_text(text).items():
+                is_native_vllm = name.startswith("vllm:")
+                name = _canonical_metric_name(name)
+                if is_native_vllm:
+                    # Native endpoints use engine indexes local to each server.
+                    # Add the scrape target so two servers' ``engine=0`` series
+                    # remain distinct when their payloads are merged.
+                    labels = frozenset((*labels, ("ScrapeTarget", url)))
+                key = (name, labels)
+                # Native series include ScrapeTarget and Ray series include a
+                # unique ReplicaId, so last-wins is safe for identical keys.
                 merged[key] = value
         return merged
 
@@ -340,11 +371,7 @@ class VLLMMetricsScraper:
         if not self._snapshot_complete:
             return None
         if not parsed and not self._warned_empty:
-            logger.warning(
-                "VLLMMetricsScraper: scraped Ray metrics agents but found no "
-                "samples; check that engines were started with "
-                "enable_ray_prometheus_stats=true."
-            )
+            logger.warning("VLLMMetricsScraper: configured endpoints returned no usable vLLM metric samples.")
             self._warned_empty = True
 
         if self._worker_ids is not None:
@@ -450,6 +477,78 @@ class VLLMMetricsScraper:
         self._prev_aggregated = snapshot
         self._prev_timestamp = now
         return out
+
+    async def engine_feedback(self, *, max_model_len: Optional[int] = None) -> Optional[VLLMEngineSamplingFeedback]:
+        """Return one coherent load record per vLLM engine.
+
+        Unlike the W&B reduction, this preserves the engine identity and never
+        combines a KV gauge from one replica with queue state from another.
+        A replica is omitted until all three load gauges are present; treating
+        an incomplete scrape as zero pressure would incorrectly open growth.
+        """
+
+        if not self._urls:
+            return None
+        parsed = await self._fetch_all()
+        grouped: Dict[str, Dict[str, object]] = {}
+        for (name, frozen_labels), value in parsed.items():
+            if name not in {
+                _GAUGE_NUM_RUNNING,
+                _GAUGE_NUM_WAITING,
+                _GAUGE_NUM_WAITING_BY_REASON,
+                _GAUGE_KV_CACHE_USAGE,
+                _GAUGE_CACHE_CONFIG_INFO,
+                _COUNTER_PREEMPTIONS,
+            }:
+                continue
+            labels = dict(frozen_labels)
+            engine_id = _engine_id(labels)
+            if engine_id is None:
+                continue
+            record = grouped.setdefault(engine_id, {})
+            if name == _GAUGE_NUM_WAITING_BY_REASON:
+                if labels.get("reason") == "capacity":
+                    record["waiting_capacity"] = int(value)
+            elif name == _GAUGE_CACHE_CONFIG_INFO:
+                record["cache_config"] = labels
+            else:
+                record[name] = value
+
+        loads: List[VLLMEngineLoad] = []
+        current_preemptions: Dict[str, float] = {}
+        for engine_id, record in sorted(grouped.items()):
+            if not all(
+                metric in record
+                for metric in (
+                    _GAUGE_NUM_RUNNING,
+                    _GAUGE_NUM_WAITING,
+                    _GAUGE_KV_CACHE_USAGE,
+                )
+            ):
+                continue
+            cumulative_preemptions = float(record.get(_COUNTER_PREEMPTIONS, 0.0))
+            current_preemptions[engine_id] = cumulative_preemptions
+            previous = self._previous_preemptions_by_engine.get(engine_id)
+            preemptions_delta = 0 if previous is None else max(0, int(cumulative_preemptions - previous))
+            cache_config = record.get("cache_config")
+            kv_capacity_tokens = _kv_capacity_tokens(cache_config if isinstance(cache_config, dict) else {})
+            loads.append(
+                VLLMEngineLoad(
+                    engine_id=engine_id,
+                    role=None,
+                    kv_capacity_tokens=kv_capacity_tokens,
+                    max_model_len=max_model_len,
+                    kv_usage=float(record[_GAUGE_KV_CACHE_USAGE]),
+                    running=int(record[_GAUGE_NUM_RUNNING]),
+                    waiting=int(record[_GAUGE_NUM_WAITING]),
+                    waiting_capacity=(int(record["waiting_capacity"]) if "waiting_capacity" in record else None),
+                    preemptions_delta=preemptions_delta,
+                )
+            )
+        self._previous_preemptions_by_engine = current_preemptions
+        if not loads:
+            return None
+        return VLLMEngineSamplingFeedback(engine_loads=tuple(loads))
 
     async def start(self, label: str) -> None:
         """Open a metrics window labelled ``label`` (e.g. ``"vllm/train"``).
@@ -626,6 +725,133 @@ class VLLMMetricsScraper:
                 out[f"{prefix}draft_acceptance_rate_pos_{pos + 1}"] = pos_d / drafts_d
 
         return out
+
+
+class VLLMEngineFeedbackProducer:
+    """Continuously push managed-vLLM load into its SDK-side controller.
+
+    A producer observes an actionable backend signal, constructs typed
+    :class:`SamplingFeedback`, and publishes it with
+    ``controller.on_feedback``. Producers never acquire slots or own request
+    execution.
+    """
+
+    def __init__(
+        self,
+        controller: SamplingConcurrencyController,
+        *,
+        poll_interval_s: float = 5.0,
+        scraper: Optional[VLLMMetricsScraper] = None,
+        model_server_urls: Optional[List[str]] = None,
+    ) -> None:
+        if poll_interval_s <= 0:
+            raise ValueError(f"poll_interval_s must be positive, got {poll_interval_s}")
+        self._model_server_urls = model_server_urls or []
+        self._controller = controller
+        self._poll_interval_s = poll_interval_s
+        self._scraper = scraper or VLLMMetricsScraper(
+            urls=[f"{url.rstrip('/')}/metrics" for url in self._model_server_urls]
+        )
+        self._max_model_len: Optional[int] = None
+        self._model_metadata_probed = False
+        self._task: Optional[asyncio.Task[None]] = None
+
+    def start(self) -> None:
+        """Start polling on the caller's event loop, at most once."""
+
+        if self._task is not None and not self._task.done():
+            return
+        self._task = asyncio.create_task(self._run(), name="skyrl-vllm-engine-feedback")
+
+    async def poll_once(self) -> Optional[ConcurrencyDecision]:
+        if not self._model_metadata_probed and self._model_server_urls:
+            self._model_metadata_probed = True
+            self._max_model_len = await self._fetch_max_model_len()
+        feedback = await self._scraper.engine_feedback(max_model_len=self._max_model_len)
+        if feedback is None:
+            return None
+        return await self._controller.on_feedback(feedback)
+
+    async def _fetch_max_model_len(self) -> Optional[int]:
+        """Read the static served-model context limit when vLLM exposes it."""
+
+        client = await self._scraper._get_client()
+
+        async def fetch(url: str) -> List[int]:
+            try:
+                response = await client.get(f"{url.rstrip('/')}/v1/models")
+                response.raise_for_status()
+                lengths = [model.get("max_model_len") for model in response.json().get("data", [])]
+                return [int(length) for length in lengths if length]
+            except (
+                httpx.RequestError,
+                httpx.HTTPStatusError,
+                ValueError,
+                TypeError,
+            ) as exc:
+                logger.debug(f"VLLMEngineFeedbackProducer: failed to read max_model_len from {url}: {exc}")
+                return []
+
+        lengths = [
+            length
+            for values in await asyncio.gather(*(fetch(url) for url in self._model_server_urls))
+            for length in values
+        ]
+        return max(lengths) if lengths else None
+
+    async def _run(self) -> None:
+        try:
+            while True:
+                try:
+                    await self.poll_once()
+                except Exception as exc:
+                    logger.warning(f"VLLMEngineFeedbackProducer: metrics poll failed: {exc!r}")
+                await asyncio.sleep(self._poll_interval_s)
+        except asyncio.CancelledError:
+            raise
+
+    async def aclose(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+            self._task = None
+        await self._scraper.aclose()
+
+
+def _engine_id(labels: Dict[str, str]) -> Optional[str]:
+    """Build a stable identity from Ray's replica/worker and vLLM engine labels."""
+
+    owner = next(
+        (
+            labels.get(name)
+            for name in ("ReplicaId", "WorkerId", "ActorId", "instance", "ScrapeTarget")
+            if labels.get(name)
+        ),
+        None,
+    )
+    engine = labels.get("engine")
+    if owner is not None and engine is not None:
+        return f"{owner}.{engine}"
+    if owner is not None:
+        return owner
+    if engine is not None:
+        model = labels.get("model_name")
+        return f"{model}.{engine}" if model else f"engine.{engine}"
+    return None
+
+
+def _kv_capacity_tokens(cache_config: Dict[str, str]) -> Optional[int]:
+    size_tokens = cache_config.get("kv_cache_size_tokens", "")
+    if size_tokens.isdigit():
+        return int(size_tokens)
+    num_gpu_blocks = cache_config.get("num_gpu_blocks", "")
+    block_size = cache_config.get("block_size", "")
+    if num_gpu_blocks.isdigit() and block_size.isdigit():
+        return int(num_gpu_blocks) * int(block_size)
+    return None
 
 
 def engine_imbalance(previous, current, prefix):

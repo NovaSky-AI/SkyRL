@@ -90,7 +90,7 @@ def test_last_lora_unload_tears_down_when_disabled():
     shutdown.assert_called_once_with()
     assert backend._dispatch is None
     assert backend._base_lora_signature is None
-    backend._inference_state_publisher.assert_called_once_with(None)
+    backend._inference_state_publisher.assert_called_once_with(None, None)
 
 
 def test_fsdp_lora_unload_tears_down_even_when_warm_enabled():
@@ -107,7 +107,7 @@ def test_fsdp_lora_unload_tears_down_even_when_warm_enabled():
     dispatch.delete_adapter.assert_not_called()
     assert backend._dispatch is None
     assert backend._base_lora_signature is None
-    backend._inference_state_publisher.assert_called_once_with(None)
+    backend._inference_state_publisher.assert_called_once_with(None, None)
 
 
 def test_fft_unload_tears_down_even_when_warm_enabled():
