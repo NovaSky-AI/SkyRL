@@ -1204,6 +1204,15 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         # DeepSeek-V4.1 switches read by the Megatron workers (patches/megatron/deepseek_v41: KV fake-quant,
         # Engram table placement, faulthandler).
         env_vars.update({k: v for k, v in os.environ.items() if k.startswith("SKYRL_DSV41_")})
+        # NCCL buffer / channel sizing (each communicator's buffers are GPU memory outside PyTorch's allocator; CP
+        # adds communicators): NCCL_BUFFSIZE, NCCL_NCHANNELS_PER_NET_PEER, NCCL_{MIN,MAX}_NCHANNELS.
+        env_vars.update(
+            {
+                k: v
+                for k, v in os.environ.items()
+                if k in ("NCCL_BUFFSIZE", "NCCL_NCHANNELS_PER_NET_PEER", "NCCL_MIN_NCHANNELS", "NCCL_MAX_NCHANNELS")
+            }
+        )
 
         # Expert NVFP4: FlashInfer's NVFP4 env for the engines' per-token activation quantization (the trainer sets
         # it around its own launches), every key explicit so stray shell values cannot change the grid.
@@ -1332,9 +1341,17 @@ def prepare_runtime_environment(cfg: SkyRLTrainConfig) -> dict[str, str]:
         "SKYRL_DSA_HEAD_FULL",
         "SKYRL_DSA_HEAD_FULL_FAST_PERMUTE",
         "SKYRL_DSA_HEAD_FULL_ZIGZAG",
+        # Megatron-Bridge checkpoint-read caches (reused safetensors handles keep every touched shard mmapped; small
+        # tensors are cloned per rank). Read in the Megatron workers during the model load.
+        "MBRIDGE_STATE_REUSE_HANDLES",
+        "MBRIDGE_STATE_CACHE_SMALL_TENSORS",
         # vLLM all-reduce backend switches; multi-node TP engines need FlashInfer / symm-mem off.
         "VLLM_ALLREDUCE_USE_FLASHINFER",
         "VLLM_ALLREDUCE_USE_SYMM_MEM",
+        # Layers per pipeline stage of a PP engine (e.g. "19,21"); vLLM splits evenly without it.
+        "VLLM_PP_LAYER_PARTITION",
+        # Tuned LoRA kernel configs (e.g. the DeepSeek-V4.1 recipe's fused MoE-LoRA block sizes), read by the engines.
+        "VLLM_TUNED_CONFIG_FOLDER",
         # Ray sets OMP_NUM_THREADS=num_cpus (1 per policy actor) unless the runtime env has it,
         # which leaves the CPU-offloaded optimizer step single-threaded.
         "OMP_NUM_THREADS",
