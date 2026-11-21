@@ -73,7 +73,7 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
             buf = module._buffers[key]
             if buf is not None and buf.device.type == "meta":
                 module._buffers[key] = torch.empty(buf.shape, dtype=buf.dtype, device="cpu")
-    model.to("cpu", non_blocking=True)
+    model.to("cpu", non_blocking=False)
     if empty_cache:
         torch.cuda.empty_cache()
 
