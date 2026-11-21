@@ -137,18 +137,154 @@ def validate_response_format(response: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# LIMIT addition (mirrors V6b's _add_limit_to_query)
+# LIMIT addition (adapted from V6b's _add_limit_to_query; the top-level
+# detection below deliberately diverges from V6b's substring check)
 # ---------------------------------------------------------------------------
+
+_WORD_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$")
+
+
+def _is_word_char(ch: str) -> bool:
+    # SQLite identifier characters: ASCII letters and digits, "_", "$",
+    # and any non-ASCII character. A word token only ends at some other
+    # character, so identifiers such as "limité" or "limit$value" stay
+    # single tokens and are never mistaken for the LIMIT keyword.
+    return ch in _WORD_CHARS or ord(ch) >= 0x80
+
+
+def _find_top_level_limit(query: str) -> tuple[bool, int]:
+    """Scan a query for a LIMIT clause that belongs to the outer query.
+
+    Returns (found, tail_start). ``found`` is True when a LIMIT keyword
+    token appears at parenthesis depth 0, outside string literals, quoted
+    identifiers, and comments. Keyword matching is case-insensitive, as it
+    was in the previous substring check. Identifiers that merely contain
+    "limit" (credit_limit, limit1) are single word tokens and never match.
+
+    ``tail_start`` is the index where the query's trailing tail begins: the
+    run of whitespace, comments, and statement-terminating semicolons after
+    the last real token (len(query) when the query ends with a real token).
+    A cap appended at the very end of the string could land inside a
+    trailing line comment and be ignored, or after a semicolon that already
+    terminated the statement, which makes the result two statements and
+    fails execution; callers that append must insert before the tail.
+    """
+    depth = 0
+    tail_start = None
+    i = 0
+    n = len(query)
+    while i < n:
+        ch = query[i]
+        if ch == "'":
+            # String literal; a doubled '' is an escaped quote (SQLite has
+            # no backslash escapes in string literals).
+            tail_start = None
+            i += 1
+            while i < n:
+                if query[i] == "'":
+                    if i + 1 < n and query[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch in ('"', "`"):
+            # Quoted identifier; a doubled quote character is the escape.
+            tail_start = None
+            i += 1
+            while i < n:
+                if query[i] == ch:
+                    if i + 1 < n and query[i + 1] == ch:
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "[":
+            # Bracket-quoted identifier (SQLite); ends at the first ']'.
+            tail_start = None
+            end = query.find("]", i + 1)
+            i = n if end == -1 else end + 1
+            continue
+        if ch == "-" and query[i + 1 : i + 2] == "-":
+            # Line comment, running to the next newline or end of string.
+            if tail_start is None:
+                tail_start = i
+            end = query.find("\n", i + 2)
+            if end == -1:
+                break
+            i = end + 1
+            continue
+        if ch == "/" and query[i + 1 : i + 2] == "*":
+            # Block comment; an unterminated one consumes the rest.
+            if tail_start is None:
+                tail_start = i
+            end = query.find("*/", i + 2)
+            if end == -1:
+                break
+            i = end + 2
+            continue
+        if ch == "(":
+            tail_start = None
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            tail_start = None
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if _is_word_char(ch):
+            tail_start = None
+            end = i + 1
+            while end < n and _is_word_char(query[end]):
+                end += 1
+            if depth == 0 and query[i:end].upper() == "LIMIT":
+                return True, n
+            i = end
+            continue
+        if ch == ";" or ch.isspace():
+            # Whitespace and statement terminators are tail material: they
+            # return no rows, but a cap placed after them can still be
+            # swallowed by a following comment or split the statement.
+            if tail_start is None:
+                tail_start = i
+            i += 1
+            continue
+        tail_start = None
+        i += 1
+    return False, tail_start if tail_start is not None else n
 
 
 def _add_limit_to_query(query: str, limit: int = DEFAULT_LIMIT_NUMBER) -> str:
-    """Add LIMIT clause if the query doesn't already have one."""
+    """Add LIMIT clause if the query doesn't already have one at the top level.
+
+    Only a LIMIT clause of the outer query suppresses the cap. A LIMIT
+    inside a subquery, a string literal, a quoted identifier, or a comment
+    does not bound the rows the outer query returns, so the cap is still
+    applied (V6b's substring check treated all of those as an existing
+    LIMIT; this is the deliberate divergence from V6b). The cap is inserted
+    before the query's trailing tail of whitespace, comments, and
+    semicolons, for the reasons given in ``_find_top_level_limit``.
+    """
     if not query:
         return query
-    upper = query.upper()
-    if "LIMIT " in upper or "LIMIT\n" in upper or "LIMIT\t" in upper:
+    has_limit, tail_start = _find_top_level_limit(query)
+    if has_limit:
         return query
-    return query.rstrip().rstrip(";").rstrip() + f" LIMIT {limit};"
+    head = query[:tail_start]
+    if not head:
+        # Nothing but whitespace, comments, and semicolons: there is no
+        # statement to cap. Keep the previous behaviour of appending.
+        return query.rstrip().rstrip(";").rstrip() + f" LIMIT {limit};"
+    # Semicolons in the tail terminated the statement; left in place after
+    # the inserted LIMIT they would split it into two statements.
+    tail = query[tail_start:].replace(";", "").strip()
+    if tail:
+        return head + f" LIMIT {limit}; " + tail
+    return head + f" LIMIT {limit};"
 
 
 # ---------------------------------------------------------------------------
