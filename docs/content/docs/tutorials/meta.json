@@ -9,6 +9,7 @@
     "vision_language_rl",
     "skyrl_gym_generator",
     "agent-integration",
-    "step-wise-training"
+    "step-wise-training",
+    "skycap"
   ]
 }
