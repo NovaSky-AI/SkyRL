@@ -14,6 +14,10 @@ set -x
 #   - sequence_parallel_size and context_parallel_size must be 1
 #   - train_on_what must be last_assistant_message
 #
+# Image tensors of the whole dataset are held in host memory by default; for
+# datasets where that does not fit, add lazy_vlm_dataset=true (rows are
+# re-tokenized when fetched; see docs/content/docs/sft/overview.mdx).
+#
 # Usage:
 #   uv run examples/train/sft/prepare_cauldron_vlm.py --output-dir $HOME/data/cauldron-vlm
 #   bash examples/train/sft/run_sft_megatron_vlm.sh
