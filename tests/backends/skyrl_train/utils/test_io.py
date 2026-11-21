@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from fsspec.implementations.memory import MemoryFileSystem
 
 from skyrl.backends.skyrl_train.utils.io.io import (
     download_directory,
@@ -379,6 +380,31 @@ class TestContextManagers:
                 pass
 
 
+class _MemoryBucket(MemoryFileSystem):
+    """In-memory object store that accepts ``s3://`` and ``gs://`` paths."""
+
+    store = {}
+    pseudo_dirs = [""]
+
+    @classmethod
+    def _strip_protocol(cls, path):
+        for prefix in ("s3://", "gs://"):
+            if path.startswith(prefix):
+                path = path[len(prefix) :]
+        return super()._strip_protocol(path)
+
+
+@pytest.fixture
+def memory_bucket(monkeypatch):
+    """Serve cloud paths from an in-memory bucket holding one checkpoint directory."""
+    monkeypatch.setattr(_MemoryBucket, "store", {})
+    monkeypatch.setattr(_MemoryBucket, "pseudo_dirs", [""])
+    bucket = _MemoryBucket(skip_instance_cache=True)
+    bucket.pipe({"bucket/ckpt/model.pt": b"weights", "bucket/ckpt/adapters/rank_0.pt": b"adapter"})
+    monkeypatch.setattr("skyrl.backends.skyrl_train.utils.io.io._get_filesystem", lambda path: bucket)
+    return bucket
+
+
 class TestUploadDownload:
     """Test upload and download directory functions."""
 
@@ -391,6 +417,20 @@ class TestUploadDownload:
         """Test that download_directory validates source is a cloud path."""
         with pytest.raises(ValueError, match="Source must be a cloud path"):
             download_directory("/local/src", "/local/dst")
+
+    @pytest.mark.parametrize("cloud_path", ["s3://bucket/ckpt", "s3://bucket/ckpt/", "gs://bucket/ckpt"])
+    def test_download_directory_copies_contents_into_existing_dir(self, memory_bucket, tmp_path, cloud_path):
+        """The source directory's contents land directly in an existing ``local_path``."""
+        download_directory(cloud_path, str(tmp_path))
+
+        assert sorted(os.listdir(tmp_path)) == ["adapters", "model.pt"]
+        assert (tmp_path / "model.pt").read_bytes() == b"weights"
+        assert (tmp_path / "adapters" / "rank_0.pt").read_bytes() == b"adapter"
+
+    def test_local_read_dir_cloud_path_yields_contents(self, memory_bucket):
+        """``local_read_dir`` yields a directory holding the cloud directory's files."""
+        with local_read_dir("s3://bucket/ckpt") as read_dir:
+            assert sorted(os.listdir(read_dir)) == ["adapters", "model.pt"]
 
 
 if __name__ == "__main__":
