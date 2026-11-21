@@ -117,7 +117,10 @@ class FullCtxTrainer(RayPPOTrainer):
         if model == "policy":
             data = self._normalize_advantages(data, boundaries, data.metadata.get("policy_prompt_boundaries"))
         all_metrics: Dict[str, List[float]] = defaultdict(list)
-        all_chunk_refs = self.dispatch.stage_data(model, data, boundaries)
+        perm = self._dp_balance_permutation(model, data, boundaries)
+        all_chunk_refs = self.dispatch.stage_data(
+            model, data.index_select(perm) if perm is not None else data, boundaries
+        )
         fwd_bwd_s = optim_s = 0.0
         for _epoch in range(self.cfg.trainer.update_epochs_per_batch):
             for chunk_refs in all_chunk_refs:

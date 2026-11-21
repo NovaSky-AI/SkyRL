@@ -465,6 +465,26 @@ class TensorBatch(dict, Generic[DictType]):
         sliced_batch.metadata = self.metadata
         return sliced_batch
 
+    def index_select(self, indices: List[int]) -> "TensorBatch[DictType]":
+        """Return a new batch whose row ``i`` is row ``indices[i]`` of this one (rows are copied).
+
+        ``metadata`` is shared, not reordered.
+        """
+        index = torch.as_tensor(indices, dtype=torch.long)
+        selected = {}
+        for key, value in self.items():
+            if value is None:
+                selected[key] = value
+            elif isinstance(value, torch.Tensor):
+                selected[key] = value[index.to(value.device)]
+            elif isinstance(value, BATCH_FIELD_TYPES):
+                selected[key] = value[index]
+            else:
+                raise ValueError(f"Unsupported type {type(value)} for key {key}")
+        selected_batch = self.__class__(selected)
+        selected_batch.metadata = self.metadata
+        return selected_batch
+
     def save(self, path: str):
         """Save the data to a pickle file"""
         with open(path, "wb") as f:
