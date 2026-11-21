@@ -177,7 +177,14 @@ def test_qwen3_moe_layer_lora(ep: int, tp: int):
             x_sample = x[sample_idx : sample_idx + 1].numpy()
             output_merged, _ = moe_layer_merged(x_sample, return_router_logits=True)
 
-            assert np.allclose(output_with_lora[sample_idx : sample_idx + 1], output_merged, rtol=1e-3, atol=1e-3)
+            # These outputs reach a magnitude of ~1e4, so their float32 accumulation error is set by
+            # the scale of the whole tensor rather than by each element's own value. A per-element
+            # `rtol` leaves near-zero entries almost no budget while granting the largest entries
+            # tens of absolute error, so compare against one absolute tolerance scaled to the tensor.
+            # The observed error is <= ~1.4e-6 of that scale, so 1e-4 leaves ample headroom while
+            # still being an order of magnitude stricter than `rtol=1e-3` for the dominant entries.
+            atol = 1e-4 * np.abs(output_merged).max()
+            np.testing.assert_allclose(output_with_lora[sample_idx : sample_idx + 1], output_merged, rtol=0, atol=atol)
 
 
 def test_qwen3_lora():
