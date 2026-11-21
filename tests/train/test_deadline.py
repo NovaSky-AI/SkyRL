@@ -47,8 +47,9 @@ def test_ray_get_with_timeout_raises_requested_exception(monkeypatch):
 async def test_trainers_bound_initial_weight_sync(monkeypatch, module_name, class_name):
     trainer_cls = getattr(import_module(module_name), class_name)
     trainer = trainer_cls.__new__(trainer_cls)
-    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(weight_sync_timeout_s=2.5))
+    trainer.cfg = SimpleNamespace(trainer=SimpleNamespace(weight_sync_timeout_s=2.5, max_training_steps=None))
     trainer.global_step = 0
+    trainer._dataloader_epoch = 0
     trainer.resume_mode = ResumeMode.NONE
     trainer.colocate_all = False
     trainer._ray_gpu_monitor = None
