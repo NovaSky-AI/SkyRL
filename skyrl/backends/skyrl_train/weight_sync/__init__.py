@@ -10,6 +10,7 @@ it to a ``TrainerWeightTransferEngine`` (``weight_senders.py``) whose
 ``ipc``          CUDA IPC handles; colocated (``placement.colocate_all``)
 ``delta``        compressed checkpoint deltas via disk / ``gs://`` / ``s3://``
 ``sharded_rdt``  the inference workers pull slices over NIXL
+``reload``       HF export + server restart (``reload.py``); no vLLM engine
 ===============  ==========================================================
 
 This package imports no vLLM at module scope: half the CPU suite runs without the
@@ -44,6 +45,8 @@ def get_transfer_strategy(weight_sync_backend: str, colocate_all: bool) -> str:
         return "sharded_rdt"
     if weight_sync_backend == "delta":
         return "delta"
+    if weight_sync_backend == "reload":
+        return "reload"
     if weight_sync_backend == "nccl" and colocate_all:
         return "ipc"
     return "nccl"

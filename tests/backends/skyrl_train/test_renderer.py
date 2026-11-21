@@ -210,3 +210,22 @@ class TestVLLMRendererMixed:
         assert mm is not None
         assert torch.equal(mm["pixel_values"], torch.cat([pv_a, pv_b], dim=0))
         assert torch.equal(mm["image_grid_thw"], torch.cat([thw_a, thw_b], dim=0))
+
+
+def test_decode_mm_kwargs_reads_safetensors_items_without_vllm():
+    """Items in the ``st:`` safetensors format decode without importing vLLM's serde."""
+    from safetensors.torch import save as st_save
+
+    from skyrl.backends.renderer import SAFETENSORS_MM_PREFIX, decode_mm_kwargs
+
+    pv_a, thw_a = torch.randn(4, 6), torch.tensor([1, 2, 2])
+    pv_b, thw_b = torch.randn(8, 6), torch.tensor([[1, 2, 4]])
+
+    def encode(pv, thw):
+        return SAFETENSORS_MM_PREFIX + base64.b64encode(st_save({"pixel_values": pv, "image_grid_thw": thw})).decode()
+
+    with patch.dict(sys.modules, {"vllm.entrypoints.scale_out.token_in_token_out.mm_serde": None}):
+        mm = decode_mm_kwargs({"image": [encode(pv_a, thw_a), encode(pv_b, thw_b)]})
+
+    assert torch.equal(mm["pixel_values"], torch.cat([pv_a, pv_b], dim=0))
+    assert torch.equal(mm["image_grid_thw"], torch.tensor([[1, 2, 2], [1, 2, 4]]))
