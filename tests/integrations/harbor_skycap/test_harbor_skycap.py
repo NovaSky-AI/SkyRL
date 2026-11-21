@@ -484,23 +484,42 @@ async def test_a_trial_with_no_captured_tokens_is_retried_then_masked_not_reward
 @pytest.mark.parametrize(
     "batches, check, stops",
     [
-        ([("silent",)], True, True),
-        ([("silent",)], False, False),
-        ([("silent", "linear")], True, False),
-        ([("linear",), ("silent",)], True, False),
+        ([("train", "silent")], True, True),
+        # Captured, then timed out: compose masks the instance, so it has samples but trains nothing.
+        ([("train", "timeout")], True, True),
+        ([("train", "silent")], False, False),
+        ([("train", "silent", "linear")], True, False),
+        ([("train", "linear"), ("train", "silent")], True, False),
+        ([("eval", "silent")], True, False),
+        ([("eval", "linear"), ("train", "silent")], True, True),
     ],
-    ids=["nothing trains", "check off", "one trajectory trains", "a later batch"],
+    ids=[
+        "nothing trains",
+        "everything masked",
+        "check off",
+        "one trajectory trains",
+        "a later batch",
+        "an eval batch",
+        "an eval before training",
+    ],
 )
-async def test_a_first_batch_with_nothing_to_train_stops_the_run(skycap, trials, generator, batches, check, stops):
+async def test_the_first_training_batch_with_nothing_to_train_stops_the_run(
+    skycap, trials, generator, batches, check, stops
+):
     gen = generator(check_first_batch=check)
-    *earlier, last = batches
-    for scripts in earlier:
-        await gen.generate(batch(*scripts), disable_tqdm=True)
+
+    def phased(phase: str, *scripts: str) -> dict:
+        return {**batch(*scripts), "batch_metadata": SimpleNamespace(global_step=3, training_phase=phase)}
+
+    *earlier, (phase, *last) = batches
+    for spec in earlier:
+        await gen.generate(phased(*spec), disable_tqdm=True)
     if stops:
-        with pytest.raises(RuntimeError, match=r"first batch \(1\).*~/trials.*skycap\.check_first_batch=false"):
-            await gen.generate(batch(*last), disable_tqdm=True)
+        match = r"first training batch \(1\).*~/trials.*skycap\.check_first_batch=false"
+        with pytest.raises(RuntimeError, match=match):
+            await gen.generate(phased(phase, *last), disable_tqdm=True)
     else:
-        out = await gen.generate(batch(*last), disable_tqdm=True)
+        out = await gen.generate(phased(phase, *last), disable_tqdm=True)
         assert len(out["trajectory_ids"]) == len(last)
 
 
