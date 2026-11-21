@@ -8,6 +8,10 @@ from skyrl_agent.agents import AgentRunner
 
 
 def _import_object(path: str):
+    if "." not in path:
+        raise ValueError(
+            f"Invalid import path '{path}'. Expected a dotted 'module.path.ClassName', e.g. 'skyrl_agent.agents.runner.AgentRunner'."
+        )
     module_path, class_name = path.rsplit(".", 1)
     return getattr(import_module(module_path), class_name)
 

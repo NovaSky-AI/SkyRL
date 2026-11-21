@@ -57,7 +57,7 @@ class Env(Generic[ObsType, ActType]):
         """
         raise NotImplementedError
 
-    def init(self, *kwargs) -> Tuple[ObsType, Dict[str, Any]]:
+    def init(self, **kwargs) -> Tuple[ObsType, Dict[str, Any]]:
         """
         Initialize the environment, returning initial observation and optional metadata.
 
