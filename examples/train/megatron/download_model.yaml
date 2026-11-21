@@ -1,0 +1,36 @@
+name: qwen-model-prefetch
+entrypoint: |
+  set -e
+  export HF_HOME=/mnt/cluster_storage/hf_cache
+  export HF_HUB_ENABLE_HF_TRANSFER=1
+  /home/ray/anaconda3/bin/python3 -m pip install -q --upgrade huggingface_hub hf_transfer
+  /home/ray/anaconda3/bin/python3 - <<'PY'
+  from huggingface_hub import snapshot_download
+  import time
+  t0 = time.time()
+  path = snapshot_download(
+      repo_id="Qwen/Qwen3-235B-A22B-Instruct-2507",
+      cache_dir="/mnt/cluster_storage/hf_cache/hub",
+      max_workers=8,
+      allow_patterns=["*.json", "*.txt", "*.safetensors", "tokenizer*"],
+  )
+  print(f"\n[prefetch] Downloaded to {path} in {time.time()-t0:.1f}s")
+  PY
+  echo "[prefetch] DONE"
+  ls -lh /mnt/cluster_storage/hf_cache/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507/snapshots/*/ | head -5
+  du -sh /mnt/cluster_storage/hf_cache/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507/
+image_uri: novaskyai/skyrl-train-ray-2.51.1-py3.12-cu12.8
+cloud: rkn-gpu-cloud
+ray_version: "2.51.1"
+working_dir: .
+max_retries: 0
+
+compute_config:
+  advanced_instance_config:
+    metadata:
+      labels:
+        kueue.x-k8s.io/queue-name: default-queue
+  head_node:
+    required_resources:
+      CPU: 4
+      memory: 16Gi
