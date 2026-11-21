@@ -11,6 +11,7 @@ See ``FullyAsyncConfig.simulate_training`` and the
 """
 
 import asyncio
+import os
 
 from loguru import logger
 
@@ -51,6 +52,16 @@ class _SimDispatch:
     async def save_weights_for_sampler(self):
         await self._client.pause_generation()
         try:
+            # LoRA policies sample with model=skyrl-lora, which only a weight sync registers. With
+            # SKYRL_SIM_LORA_ADAPTER=<PEFT dir>, every (simulated) sync loads that adapter under the name,
+            # so LoRA inference (and its per-sync adapter reload) runs as in a real run.
+            adapter = os.environ.get("SKYRL_SIM_LORA_ADAPTER")
+            if adapter:
+                from skyrl.backends.skyrl_train.inference_servers.remote_inference_client import (
+                    SKYRL_LORA_ADAPTER_NAME,
+                )
+
+                await self._client.load_lora_adapter(SKYRL_LORA_ADAPTER_NAME, adapter)
             if self._sync_sleep > 0:
                 await asyncio.sleep(self._sync_sleep)
         finally:
